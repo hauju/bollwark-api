@@ -23,6 +23,7 @@ All optional, with sensible defaults:
 - `MIN_DIFFICULTY` / `MAX_DIFFICULTY` — Adaptive difficulty bounds (default: `16` / `28`)
 - `CHALLENGE_TTL_SECS` — Challenge expiry (default: `300`)
 - `CLEANUP_INTERVAL_SECS` — Expired challenge cleanup interval (default: `60`)
+- `TIER_CHECKBOX_MIN` / `TIER_HARD_POW_MIN` / `TIER_VISUAL_MIN` / `TIER_BLOCK_MIN` — Risk-score thresholds for each escalation tier (defaults: `20`/`40`/`65`/`85`)
 - `RUST_LOG` — Tracing filter (default: `info`)
 
 ## Architecture
@@ -31,9 +32,10 @@ Self-hostable proof-of-work CAPTCHA service. Clients solve SHA-256 puzzles (find
 
 ### Module Layout
 
-- **`puzzle/`** — Core PoW engine. `challenge.rs` generates challenges and verifies solutions via `compute_hash(prefix, nonce)` + `has_leading_zero_bits()`. `difficulty.rs` computes adaptive difficulty from IP and site-key rate counters. `solve_challenge()` is a brute-force solver used only in tests.
+- **`puzzle/`** — Core PoW engine. `challenge.rs` generates challenges and verifies solutions via `compute_hash(prefix, nonce)` + `has_leading_zero_bits()`. `difficulty.rs` is the legacy adaptive-difficulty calculator (still wired but superseded by `risk::signals::score_rate`). `solve_challenge()` is a brute-force solver used only in tests.
+- **`risk/`** — Risk scoring + escalation ladder. `signals.rs` holds the per-signal scorers (rate, header anomaly). `score.rs` aggregates a `SignalContext` into a `RiskScore`. `tier.rs` maps scores to `EscalationTier` (`InvisiblePass`, `Checkbox`, `HardPow`, `VisualChallenge`, `Block`) and to PoW difficulty. `Block` and `VisualChallenge` short-circuit puzzle issuance with a 429.
 - **`storage/`** — `Store` trait defines the async storage interface. `memory.rs` is the in-memory implementation using `RwLock<HashMap>`. The trait is designed for future Redis/MongoDB backends.
-- **`api/`** — Axum router with three endpoints. `handlers.rs` contains all handler logic. `state.rs` defines `AppState` (shared via `Arc`). `middleware.rs` has Bearer token extraction helpers.
+- **`api/`** — Axum router with three endpoints. `handlers.rs` contains all handler logic. `state.rs` defines `AppState` (shared via `Arc`) and `tier_thresholds_from_config`. `middleware.rs` has Bearer token extraction helpers.
 - **`site/`** — Site registration types (`site_key` + `secret_key`).
 - **`error.rs`** — `CaptchaError` enum implementing `IntoResponse` for Axum error mapping.
 - **`config.rs`** — `AppConfig` loaded from environment variables with defaults.

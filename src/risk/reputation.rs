@@ -1,0 +1,187 @@
+use std::fs;
+use std::net::IpAddr;
+use std::path::Path;
+
+use ipnet::IpNet;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IpCategory {
+    Datacenter,
+    Tor,
+    Vpn,
+    Residential,
+}
+
+impl IpCategory {
+    fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "datacenter" | "dc" | "hosting" => Some(Self::Datacenter),
+            "tor" => Some(Self::Tor),
+            "vpn" | "proxy" => Some(Self::Vpn),
+            "residential" | "isp" => Some(Self::Residential),
+            _ => None,
+        }
+    }
+}
+
+/// File-backed CIDR list. One entry per line: `<cidr> <category>` (whitespace-separated).
+/// Lines starting with `#` and blank lines are ignored. Unknown categories on otherwise
+/// well-formed lines are skipped with a warning.
+pub struct CidrListReputation {
+    entries: Vec<(IpNet, IpCategory)>,
+}
+
+impl CidrListReputation {
+    pub fn empty() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = path.as_ref();
+        let content =
+            fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        Self::parse(&content)
+    }
+
+    pub fn parse(content: &str) -> Result<Self, String> {
+        let mut entries = Vec::new();
+        for (lineno, raw) in content.lines().enumerate() {
+            let line = raw.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let mut parts = line.split_whitespace();
+            let cidr_str = parts
+                .next()
+                .ok_or_else(|| format!("line {}: missing cidr", lineno + 1))?;
+            let category_str = parts
+                .next()
+                .ok_or_else(|| format!("line {}: missing category", lineno + 1))?;
+            let cidr: IpNet = cidr_str
+                .parse()
+                .map_err(|e| format!("line {}: bad cidr {cidr_str:?}: {e}", lineno + 1))?;
+            let Some(category) = IpCategory::parse(category_str) else {
+                tracing::warn!(
+                    "ip reputation: unknown category {category_str:?} on line {}, skipping",
+                    lineno + 1
+                );
+                continue;
+            };
+            entries.push((cidr, category));
+        }
+        Ok(Self { entries })
+    }
+
+    pub fn lookup(&self, ip: IpAddr) -> Option<IpCategory> {
+        // First match wins. For small lists this is fine; replace with a trie if it grows.
+        self.entries
+            .iter()
+            .find(|(net, _)| net.contains(&ip))
+            .map(|(_, cat)| *cat)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+// Score contributions per category. Tor is the strongest signal because the
+// IP set is small and well-defined; datacenter / vpn are noisier (some legit
+// traffic) so they're moderate; residential is a faint trust nudge but kept
+// at zero for v1 to avoid over-weighting a noisy positive signal.
+pub const SCORE_TOR: u32 = 40;
+pub const SCORE_DATACENTER: u32 = 30;
+pub const SCORE_VPN: u32 = 20;
+pub const SCORE_RESIDENTIAL: u32 = 0;
+
+pub fn score_ip_reputation(category: Option<IpCategory>) -> u32 {
+    match category {
+        Some(IpCategory::Tor) => SCORE_TOR,
+        Some(IpCategory::Datacenter) => SCORE_DATACENTER,
+        Some(IpCategory::Vpn) => SCORE_VPN,
+        Some(IpCategory::Residential) => SCORE_RESIDENTIAL,
+        None => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn empty_list_returns_none() {
+        let rep = CidrListReputation::empty();
+        assert_eq!(rep.lookup(ip("10.0.0.1")), None);
+    }
+
+    #[test]
+    fn parses_simple_list() {
+        let content = "\
+            # comment line\n\
+            10.0.0.0/8 datacenter\n\
+            \n\
+            192.168.0.0/16 vpn\n\
+            2001:db8::/32 tor\n\
+        ";
+        let rep = CidrListReputation::parse(content).unwrap();
+        assert_eq!(rep.len(), 3);
+        assert_eq!(rep.lookup(ip("10.5.6.7")), Some(IpCategory::Datacenter));
+        assert_eq!(rep.lookup(ip("192.168.1.1")), Some(IpCategory::Vpn));
+        assert_eq!(rep.lookup(ip("2001:db8::1")), Some(IpCategory::Tor));
+        assert_eq!(rep.lookup(ip("8.8.8.8")), None);
+    }
+
+    #[test]
+    fn ignores_inline_comments_and_blank_lines() {
+        let content = "10.0.0.0/8 datacenter # hosting provider X\n\n\n";
+        let rep = CidrListReputation::parse(content).unwrap();
+        assert_eq!(rep.len(), 1);
+    }
+
+    #[test]
+    fn unknown_category_skipped() {
+        let content = "10.0.0.0/8 mystery_category\n";
+        let rep = CidrListReputation::parse(content).unwrap();
+        assert_eq!(rep.len(), 0);
+    }
+
+    #[test]
+    fn malformed_cidr_errors() {
+        let content = "not.a.cidr datacenter\n";
+        let result = CidrListReputation::parse(content);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn first_match_wins() {
+        // Overlapping ranges — first listed wins.
+        let content = "10.0.0.0/8 datacenter\n10.0.0.0/16 vpn\n";
+        let rep = CidrListReputation::parse(content).unwrap();
+        assert_eq!(rep.lookup(ip("10.0.0.1")), Some(IpCategory::Datacenter));
+    }
+
+    #[test]
+    fn score_mapping() {
+        assert_eq!(score_ip_reputation(Some(IpCategory::Tor)), SCORE_TOR);
+        assert_eq!(
+            score_ip_reputation(Some(IpCategory::Datacenter)),
+            SCORE_DATACENTER
+        );
+        assert_eq!(score_ip_reputation(Some(IpCategory::Vpn)), SCORE_VPN);
+        assert_eq!(
+            score_ip_reputation(Some(IpCategory::Residential)),
+            SCORE_RESIDENTIAL
+        );
+        assert_eq!(score_ip_reputation(None), 0);
+    }
+}

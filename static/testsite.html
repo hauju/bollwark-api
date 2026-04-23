@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RustCaptcha Test Site</title>
+  <link rel="stylesheet" href="/static/captcha-widget.css">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f0f2f5;
+      color: #333;
+      min-height: 100vh;
+      padding: 40px 20px;
+    }
+    .container {
+      max-width: 480px;
+      margin: 0 auto;
+    }
+    h1 {
+      font-size: 24px;
+      margin-bottom: 8px;
+    }
+    .subtitle {
+      color: #666;
+      margin-bottom: 32px;
+      font-size: 14px;
+    }
+    .card {
+      background: #fff;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+      padding: 28px;
+      margin-bottom: 24px;
+    }
+    .form-group {
+      margin-bottom: 16px;
+    }
+    .form-group label {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      color: #555;
+      margin-bottom: 6px;
+    }
+    .form-group input {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #d3d3d3;
+      border-radius: 4px;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .form-group input:focus {
+      border-color: #4a90d9;
+    }
+    .captcha-container {
+      margin: 20px 0;
+    }
+    button[type="submit"] {
+      width: 100%;
+      padding: 12px;
+      background: #4a90d9;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    button[type="submit"]:hover {
+      background: #357abd;
+    }
+    button[type="submit"]:disabled {
+      background: #a0c4e8;
+      cursor: not-allowed;
+    }
+    .setup-card {
+      border: 2px dashed #d3d3d3;
+      background: #fafafa;
+    }
+    .setup-card h2 {
+      font-size: 16px;
+      margin-bottom: 12px;
+    }
+    .setup-card p {
+      font-size: 13px;
+      color: #666;
+      margin-bottom: 8px;
+    }
+    .setup-btn {
+      padding: 10px 16px;
+      background: #333;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      font-size: 13px;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+    .setup-btn:hover { background: #555; }
+    .setup-btn:disabled { background: #999; cursor: not-allowed; }
+    .site-info {
+      margin-top: 12px;
+      padding: 10px;
+      background: #e8f5e9;
+      border-radius: 4px;
+      font-family: "SF Mono", Menlo, Monaco, monospace;
+      font-size: 11px;
+      word-break: break-all;
+      display: none;
+    }
+    .result-card {
+      display: none;
+    }
+    .result-card h2 {
+      font-size: 16px;
+      margin-bottom: 12px;
+      color: #00a651;
+    }
+    .result-card pre {
+      background: #f5f5f5;
+      padding: 12px;
+      border-radius: 4px;
+      font-size: 12px;
+      overflow-x: auto;
+      white-space: pre-wrap;
+    }
+    .risk-card { background: #fff8e7; }
+    .risk-card h2 { font-size: 16px; margin-bottom: 12px; }
+    .risk-card .muted { font-size: 12px; color: #888; margin-bottom: 12px; }
+    .risk-buttons { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+    .risk-buttons button {
+      padding: 8px 12px;
+      background: #333;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .risk-buttons button:hover { background: #555; }
+    .risk-buttons button:disabled { background: #999; cursor: not-allowed; }
+    .risk-current {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 6px 14px;
+      font-family: "SF Mono", Menlo, Monaco, monospace;
+      font-size: 12px;
+      padding: 10px;
+      background: #fff;
+      border-radius: 4px;
+      margin-bottom: 12px;
+    }
+    .risk-current .label { color: #888; }
+    .tier-pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-weight: 600;
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+    .tier-invisible_pass { background: #d4edda; color: #155724; }
+    .tier-checkbox       { background: #fff3cd; color: #856404; }
+    .tier-hard_pow       { background: #ffe5cc; color: #cc5500; }
+    .tier-visual_challenge { background: #f8d7da; color: #721c24; }
+    .tier-block          { background: #721c24; color: #fff; }
+    .tier-blocked-429    { background: #721c24; color: #fff; }
+    .risk-history {
+      max-height: 180px;
+      overflow-y: auto;
+      font-family: "SF Mono", Menlo, Monaco, monospace;
+      font-size: 11px;
+      background: #fff;
+      border-radius: 4px;
+      padding: 8px;
+    }
+    .risk-history .row {
+      padding: 3px 0;
+      border-bottom: 1px solid #f0f0f0;
+      display: flex;
+      gap: 10px;
+    }
+    .risk-history .row:last-child { border-bottom: none; }
+    .risk-history .ts { color: #999; min-width: 70px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>RustCaptcha Test Site</h1>
+    <p class="subtitle">
+      SHA-256 proof-of-work with risk-tier escalation
+    </p>
+
+    <!-- Setup -->
+    <div class="card setup-card" id="setup-section">
+      <h2>1. Setup</h2>
+      <p>Create a site to get a site key, or paste an existing one.</p>
+      <button class="setup-btn" id="setup-btn" onclick="autoSetup()">
+        Create Site Automatically
+      </button>
+      <div class="site-info" id="site-info"></div>
+    </div>
+
+    <!-- Form -->
+    <div class="card">
+      <h2 style="font-size:16px; margin-bottom:16px;">2. Test the Widget</h2>
+      <p style="font-size:13px; color:#666; margin-bottom:16px;">
+        For low-risk requests the widget verifies silently. The checkbox
+        appears only when the server escalates the tier.
+      </p>
+      <form id="demo-form">
+        <div class="form-group">
+          <label for="name">Name</label>
+          <input type="text" id="name" name="name" placeholder="Jane Doe" required>
+        </div>
+        <div class="form-group">
+          <label for="email">Email</label>
+          <input type="email" id="email" name="email" placeholder="jane@example.com" required>
+        </div>
+
+        <div class="captcha-container">
+          <div id="captcha-widget" data-sitekey="" data-debug="true"></div>
+        </div>
+
+        <button type="submit" id="submit-btn" disabled>Register</button>
+      </form>
+    </div>
+
+    <!-- Risk debug -->
+    <div class="card risk-card" id="risk-section" style="display:none;">
+      <h2>Risk Debug</h2>
+      <p class="muted">
+        Live readout of the <code>tier</code> field from <code>GET /v1/puzzle</code>.
+        Server logs show the per-signal breakdown (rate, header anomaly, IP reputation,
+        cookie age). Cookie + IP rep need <code>COOKIE_SIGNING_SECRET</code> /
+        <code>IP_REPUTATION_FILE</code> env vars set on the server. Honeypot fires at verify time.
+      </p>
+      <div class="risk-buttons">
+        <button id="risk-fetch">Fetch one puzzle</button>
+        <button id="risk-spam">Spam 30× (push toward HardPow / Block)</button>
+        <button id="risk-reset-widget">Reset widget (re-fetch puzzle)</button>
+      </div>
+      <div class="risk-current" id="risk-current">
+        <span class="label">widget received</span><span id="rc-widget-tier">—</span>
+        <span class="label">tier (last manual fetch)</span><span id="rc-tier">—</span>
+        <span class="label">difficulty</span><span id="rc-diff">—</span>
+        <span class="label">last status</span><span id="rc-status">—</span>
+      </div>
+      <div class="risk-history" id="risk-history">
+        <div class="row" style="color:#aaa;">No requests yet.</div>
+      </div>
+    </div>
+
+    <!-- Result -->
+    <div class="card result-card" id="result-section">
+      <h2>Submission Result</h2>
+      <pre id="result-data"></pre>
+    </div>
+  </div>
+
+  <script src="/static/captcha-widget.js"></script>
+  <script>
+    let siteSecret = null;
+    let siteKey = null;
+
+    // ── Risk debug helpers ──
+
+    function renderTier(tier) {
+      const cls = tier ? "tier-" + tier : "";
+      return '<span class="tier-pill ' + cls + '">' + (tier || "—") + "</span>";
+    }
+
+    function logRiskRow(status, tier, difficulty) {
+      const history = document.getElementById("risk-history");
+      // Drop the placeholder on first real row.
+      if (history.firstElementChild && history.firstElementChild.style.color === "rgb(170, 170, 170)") {
+        history.innerHTML = "";
+      }
+      const row = document.createElement("div");
+      row.className = "row";
+      const ts = new Date().toLocaleTimeString();
+      row.innerHTML =
+        '<span class="ts">' + ts + "</span>" +
+        "<span>" + status + "</span>" +
+        "<span>" + renderTier(tier) + "</span>" +
+        '<span style="color:#666;">diff=' + (difficulty ?? "—") + "</span>";
+      history.prepend(row);
+      while (history.children.length > 30) history.removeChild(history.lastChild);
+    }
+
+    function setCurrent(status, tier, difficulty) {
+      document.getElementById("rc-status").textContent = status;
+      document.getElementById("rc-tier").innerHTML = renderTier(tier);
+      document.getElementById("rc-diff").textContent = difficulty ?? "—";
+    }
+
+    async function fetchOnePuzzle() {
+      if (!siteKey) return;
+      try {
+        const resp = await fetch("/v1/puzzle?site_key=" + siteKey);
+        const status = resp.status + " " + resp.statusText;
+        if (resp.status === 429) {
+          setCurrent(status, "blocked-429", null);
+          logRiskRow(status, "blocked-429", null);
+          return;
+        }
+        const data = await resp.json();
+        setCurrent(status, data.tier, data.difficulty);
+        logRiskRow(status, data.tier, data.difficulty);
+      } catch (err) {
+        setCurrent("error", null, null);
+        logRiskRow("error: " + err.message, null, null);
+      }
+    }
+
+    async function spamPuzzles(n) {
+      const btn = document.getElementById("risk-spam");
+      btn.disabled = true;
+      const orig = btn.textContent;
+      try {
+        for (let i = 0; i < n; i++) {
+          btn.textContent = "Spamming " + (i + 1) + "/" + n + "…";
+          await fetchOnePuzzle();
+        }
+      } finally {
+        btn.textContent = orig;
+        btn.disabled = false;
+      }
+    }
+
+    document.getElementById("risk-fetch").addEventListener("click", fetchOnePuzzle);
+    document.getElementById("risk-spam").addEventListener("click", () => spamPuzzles(30));
+    document.getElementById("risk-reset-widget").addEventListener("click", () => {
+      const w = window.RustCaptcha._instances[0];
+      if (w) w.reset();
+    });
+
+    // Mirror what tier the widget itself received from its eager puzzle fetch.
+    document.addEventListener("rustcaptcha:puzzle", (e) => {
+      const d = e.detail || {};
+      const tier = d.ok ? d.tier : (d.tier || "blocked-429");
+      document.getElementById("rc-widget-tier").innerHTML = renderTier(tier);
+      logRiskRow("widget", tier, d.difficulty);
+    });
+
+    async function autoSetup() {
+      const btn = document.getElementById("setup-btn");
+      const info = document.getElementById("site-info");
+      btn.disabled = true;
+      btn.textContent = "Creating...";
+
+      try {
+        const resp = await fetch("/v1/sites", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: "test-site" }),
+        });
+        if (!resp.ok) throw new Error("Failed: " + resp.status);
+        const data = await resp.json();
+
+        siteSecret = data.secret_key;
+        siteKey = data.site_key;
+        document.getElementById("risk-section").style.display = "block";
+
+        // Update widget with site key
+        const widgetEl = document.getElementById("captcha-widget");
+        widgetEl.dataset.sitekey = data.site_key;
+
+        // Re-init widget. Order matters: set siteKey before reset() so the
+        // widget's eager puzzle fetch can run.
+        if (window.RustCaptcha._instances.length > 0) {
+          window.RustCaptcha._instances[0].siteKey = data.site_key;
+          window.RustCaptcha._instances[0].reset();
+        } else {
+          window.RustCaptcha.render(widgetEl, {
+            sitekey: data.site_key,
+            debug: true,
+          });
+        }
+
+        info.style.display = "block";
+        info.innerHTML =
+          "<strong>site_key:</strong> " + data.site_key +
+          "<br><strong>secret_key:</strong> " + data.secret_key;
+
+        btn.textContent = "Site Created";
+        document.getElementById("submit-btn").disabled = false;
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = "Retry Setup";
+        alert("Setup failed: " + err.message);
+      }
+    }
+
+    // Form submit: show data and optionally verify server-side
+    document.getElementById("demo-form").addEventListener("submit", async function (e) {
+      e.preventDefault();
+      const formData = new FormData(this);
+      const data = Object.fromEntries(formData.entries());
+
+      // Parse captcha token
+      let token = null;
+      try {
+        token = JSON.parse(data["captcha-token"] || "null");
+      } catch (_) {}
+
+      const resultSection = document.getElementById("result-section");
+      const resultData = document.getElementById("result-data");
+
+      if (!token) {
+        resultSection.style.display = "block";
+        resultData.textContent = "No captcha token found. Complete the captcha first.";
+        return;
+      }
+
+      // Server-side verification
+      let verification = null;
+      if (siteSecret) {
+        try {
+          const resp = await fetch("/v1/verify", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: "Bearer " + siteSecret,
+            },
+            body: JSON.stringify({
+              challenge_id: token.challenge_id,
+              nonce: token.nonce,
+              honeypot: token.honeypot,
+            }),
+          });
+          verification = await resp.json();
+        } catch (err) {
+          verification = { error: err.message };
+        }
+      }
+
+      resultSection.style.display = "block";
+      resultData.textContent = JSON.stringify(
+        {
+          form: { name: data.name, email: data.email },
+          captcha_token: token,
+          server_verification: verification,
+        },
+        null,
+        2
+      );
+    });
+  </script>
+</body>
+</html>

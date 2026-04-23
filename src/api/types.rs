@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::puzzle::types::Algorithm;
+use crate::risk::EscalationTier;
 
 // --- Requests ---
 
@@ -14,6 +15,8 @@ pub struct GetPuzzleParams {
 pub struct VerifyRequest {
     pub challenge_id: Uuid,
     pub nonce: u64,
+    #[serde(default)]
+    pub honeypot: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -30,6 +33,7 @@ pub struct PuzzleResponse {
     pub prefix: String,
     pub difficulty: u32,
     pub expires_at: String,
+    pub tier: EscalationTier,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

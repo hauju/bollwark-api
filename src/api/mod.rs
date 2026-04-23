@@ -6,16 +6,21 @@ pub mod types;
 use axum::Router;
 use axum::routing::{get, post};
 use tower_http::cors::CorsLayer;
+use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
 use state::SharedState;
 
 pub fn router(state: SharedState) -> Router {
-    Router::new()
+    let api = Router::new()
         .route("/v1/puzzle", get(handlers::get_puzzle))
         .route("/v1/verify", post(handlers::verify))
         .route("/v1/sites", post(handlers::create_site))
+        .with_state(state);
+
+    Router::new()
+        .merge(api)
+        .nest_service("/static", ServeDir::new("static"))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
-        .with_state(state)
 }
