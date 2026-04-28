@@ -39,6 +39,8 @@ Without `ADMIN_TOKEN`, `POST /v1/sites` returns 404 — no anonymous provisionin
 
 Open `http://localhost:3000/static/testsite.html` for a working harness that exercises the full flow against a freshly registered site.
 
+For a full application walkthrough, see **[INTEGRATION.md](./INTEGRATION.md)**.
+
 ## Embedding the widget
 
 ```html
@@ -93,6 +95,21 @@ Everything is env-var driven and every setting has a default — `cargo run` wor
 - `VERIFY_SHADOW_MIN` / `VERIFY_BLOCK_MIN` — verify-time score thresholds.
 - Optional signals (off until set): `IP_REPUTATION_FILE`, `COOKIE_SIGNING_SECRET` (+ `COOKIE_SECURE`), `TLS_FINGERPRINT_HEADER` (+ `TLS_FINGERPRINT_FILE`, `TRUSTED_PROXIES`).
 - Validation dashboard: `ADMIN_DB_PATH` + `ADMIN_TOKEN`.
+
+## Docker
+
+Build and run locally:
+
+```bash
+docker build -t rust-captcha .
+docker run --rm -p 3000:3000 \
+  -e ADMIN_TOKEN=<long-random-secret> \
+  -e SITE_DB_PATH=/data/sites.db \
+  -v rust-captcha-data:/data \
+  rust-captcha
+```
+
+The image exposes port `3000`, serves static widget assets from `/static`, and keeps runtime configuration env-var driven. CI publishes `dcr.oxidt.com/rust-captcha:latest` and `dcr.oxidt.com/rust-captcha:<commit-sha>` from `main`.
 
 ## Architecture
 
