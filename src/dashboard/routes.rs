@@ -12,13 +12,16 @@ use axum::routing::get;
 use serde::Deserialize;
 use serde_json::json;
 
+use super::types::SiteSummary;
 use super::{DecisionLog, Sessions};
+use crate::storage::memory::InMemoryStore;
 
 #[derive(Clone)]
 pub struct AdminState {
     pub sessions: Sessions,
     pub log: DecisionLog,
     pub token: Arc<String>,
+    pub store: Arc<InMemoryStore>,
 }
 
 pub fn router(state: AdminState) -> Router {
@@ -29,6 +32,7 @@ pub fn router(state: AdminState) -> Router {
         )
         .route("/v1/admin/sessions/{id}", get(get_session))
         .route("/v1/admin/stats", get(get_stats))
+        .route("/v1/admin/sites", get(list_sites))
         .with_state(state)
 }
 
@@ -107,6 +111,47 @@ async fn get_stats(State(state): State<AdminState>, headers: HeaderMap) -> impl 
             (StatusCode::INTERNAL_SERVER_ERROR, "query failed").into_response()
         }
     }
+}
+
+async fn list_sites(State(state): State<AdminState>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(resp) = check_auth(&state, &headers) {
+        return resp;
+    }
+
+    let sites = match state.store.list_sites() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "admin list_sites: store read failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "store read failed").into_response();
+        }
+    };
+
+    // Per-site activity is best-effort: if the decision log query fails
+    // (e.g. a transient SQLite hiccup), fall back to an empty map so the
+    // operator still sees the registered sites with zeroed counters.
+    let activity = state.sessions.site_activity().await.unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "admin list_sites: activity query failed");
+        Default::default()
+    });
+
+    let summaries: Vec<SiteSummary> = sites
+        .into_iter()
+        .map(|s| {
+            let key = s.site_key.to_string();
+            let act = activity.get(&key).cloned().unwrap_or_default();
+            SiteSummary {
+                site_key: key,
+                name: s.name,
+                created_at: s.created_at.to_rfc3339(),
+                puzzle_count: act.puzzle_count,
+                verify_count: act.verify_count,
+                last_seen: act.last_seen,
+                avg_bot_probability: act.avg_bot_probability,
+            }
+        })
+        .collect();
+
+    Json(json!({ "sites": summaries })).into_response()
 }
 
 #[allow(clippy::result_large_err)]

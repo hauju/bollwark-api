@@ -50,6 +50,22 @@
   header button { cursor: pointer; }
   header button:hover { border-color: var(--accent); }
   header button.danger:hover { border-color: var(--bad); color: var(--bad); }
+  .tabs { display: flex; gap: 4px; }
+  .tabs button {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 6px 12px;
+    color: var(--muted);
+    cursor: pointer;
+    font: inherit;
+  }
+  .tabs button:hover { color: var(--text); }
+  .tabs button.active {
+    color: var(--text);
+    background: var(--panel-2);
+    border-color: var(--border);
+  }
   main {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 480px;
@@ -229,30 +245,112 @@ function renderApp(token) {
   const aside = h('aside', {}, h('div', { class: 'empty' }, 'Select a session to inspect.'));
   const statusEl = h('span', { id: 'status' }, 'loading…');
   const statsPanel = h('div', { class: 'stats-panel' }, h('span', { class: 'stat' }, 'loading stats…'));
+  const sitesTbody = h('tbody');
   let selectedId = null;
+  let activeTab = 'sessions';
   let timer = null;
+
+  const sessionsView = h('div', { class: 'left' },
+    statsPanel,
+    h('div', { class: 'table-wrap' },
+      h('table', {},
+        h('thead', {},
+          h('tr', {},
+            h('th', {}, 'time'),
+            h('th', {}, 'ip'),
+            h('th', {}, 'bot %'),
+            h('th', {}, 'tier'),
+            h('th', {}, 'puzzle'),
+            h('th', {}, 'verify'),
+            h('th', {}, 'p score'),
+            h('th', {}, 'v score'),
+            h('th', {}, 'challenge'),
+          ),
+        ),
+        tbody,
+      ),
+    ),
+  );
+
+  // Sites view spans the full main area — there's no detail aside, so we
+  // swap the entire <main> children based on the active tab.
+  const sitesView = h('div', { class: 'left', style: 'border-right: none; grid-column: 1 / -1;' },
+    h('div', { class: 'table-wrap' },
+      h('table', {},
+        h('thead', {},
+          h('tr', {},
+            h('th', {}, 'name'),
+            h('th', {}, 'site key'),
+            h('th', {}, 'created'),
+            h('th', {}, 'puzzles'),
+            h('th', {}, 'verifies'),
+            h('th', {}, 'avg bot %'),
+            h('th', {}, 'last seen'),
+          ),
+        ),
+        sitesTbody,
+      ),
+    ),
+  );
+
+  const mainEl = h('main', {}, sessionsView, aside);
+  const clearBtn = h('button', { class: 'danger', onclick: () => clearAll() }, 'Clear all');
+  const sessionsTabBtn = h('button', { class: 'active', onclick: () => switchTab('sessions') }, 'Sessions');
+  const sitesTabBtn = h('button', { onclick: () => switchTab('sites') }, 'Sites');
+
+  const refreshSessions = async () => {
+    const [sRes, statsRes] = await Promise.all([
+      fetch('/v1/admin/sessions?limit=200', { headers: { Authorization: `Bearer ${token}` } }),
+      fetch('/v1/admin/stats', { headers: { Authorization: `Bearer ${token}` } }),
+    ]);
+    if (sRes.status === 401 || statsRes.status === 401) {
+      sessionStorage.removeItem(TOKEN_KEY);
+      location.reload();
+      return;
+    }
+    if (!sRes.ok) throw new Error(`HTTP ${sRes.status}`);
+    if (!statsRes.ok) throw new Error(`HTTP ${statsRes.status}`);
+    const data = await sRes.json();
+    const stats = await statsRes.json();
+    renderRows(data.sessions);
+    statsPanel.replaceChildren(...renderStats(stats));
+    statusEl.textContent = `${data.sessions.length} sessions · refreshed ${new Date().toLocaleTimeString()}`;
+  };
+
+  const refreshSites = async () => {
+    const res = await fetch('/v1/admin/sites', { headers: { Authorization: `Bearer ${token}` } });
+    if (res.status === 401) {
+      sessionStorage.removeItem(TOKEN_KEY);
+      location.reload();
+      return;
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    renderSiteRows(data.sites);
+    statusEl.textContent = `${data.sites.length} sites · refreshed ${new Date().toLocaleTimeString()}`;
+  };
 
   const refresh = async () => {
     try {
-      const [sRes, statsRes] = await Promise.all([
-        fetch('/v1/admin/sessions?limit=200', { headers: { Authorization: `Bearer ${token}` } }),
-        fetch('/v1/admin/stats', { headers: { Authorization: `Bearer ${token}` } }),
-      ]);
-      if (sRes.status === 401 || statsRes.status === 401) {
-        sessionStorage.removeItem(TOKEN_KEY);
-        location.reload();
-        return;
-      }
-      if (!sRes.ok) throw new Error(`HTTP ${sRes.status}`);
-      if (!statsRes.ok) throw new Error(`HTTP ${statsRes.status}`);
-      const data = await sRes.json();
-      const stats = await statsRes.json();
-      renderRows(data.sessions);
-      statsPanel.replaceChildren(...renderStats(stats));
-      statusEl.textContent = `${data.sessions.length} sessions · refreshed ${new Date().toLocaleTimeString()}`;
+      if (activeTab === 'sessions') await refreshSessions();
+      else await refreshSites();
     } catch (e) {
       statusEl.textContent = `error: ${e.message}`;
     }
+  };
+
+  const switchTab = (tab) => {
+    if (tab === activeTab) return;
+    activeTab = tab;
+    sessionsTabBtn.classList.toggle('active', tab === 'sessions');
+    sitesTabBtn.classList.toggle('active', tab === 'sites');
+    clearBtn.style.display = tab === 'sessions' ? '' : 'none';
+    if (tab === 'sessions') {
+      mainEl.replaceChildren(sessionsView, aside);
+    } else {
+      mainEl.replaceChildren(sitesView);
+    }
+    refresh();
   };
 
   const renderRows = (sessions) => {
@@ -277,6 +375,31 @@ function renderApp(token) {
       );
       if (s.id === selectedId) tr.classList.add('selected');
       return tr;
+    }));
+  };
+
+  const renderSiteRows = (sites) => {
+    if (sites.length === 0) {
+      sitesTbody.replaceChildren(h('tr', {},
+        h('td', { colspan: '7', class: 'empty', style: 'text-align: center; padding: 24px;' },
+          'No sites registered. Use POST /v1/sites to register one.'),
+      ));
+      return;
+    }
+    sitesTbody.replaceChildren(...sites.map(s => {
+      const p = Math.round(s.avg_bot_probability);
+      const pCls = probabilityClass(p);
+      return h('tr', { style: 'cursor: default;' },
+        h('td', {}, s.name),
+        h('td', { class: 'mono', title: s.site_key }, s.site_key.slice(0, 8) + '…'),
+        h('td', { class: 'mono' }, new Date(s.created_at).toLocaleString()),
+        h('td', { class: 'mono' }, String(s.puzzle_count)),
+        h('td', { class: 'mono' }, String(s.verify_count)),
+        s.puzzle_count > 0
+          ? h('td', {}, h('span', { class: `pill ${pCls}` }, `${p}%`))
+          : h('td', { class: 'mono' }, '—'),
+        h('td', { class: 'mono' }, s.last_seen ? new Date(s.last_seen).toLocaleString() : '—'),
+      );
     }));
   };
 
@@ -317,36 +440,14 @@ function renderApp(token) {
     h('header', {},
       h('h1', {}, 'rust-captcha'),
       h('span', { class: 'muted' }, 'validation dashboard'),
+      h('span', { class: 'tabs' }, sessionsTabBtn, sitesTabBtn),
       h('span', { class: 'grow' }),
       statusEl,
       h('button', { onclick: () => refresh() }, 'Refresh'),
-      h('button', { class: 'danger', onclick: () => clearAll() }, 'Clear all'),
+      clearBtn,
       h('button', { onclick: () => { sessionStorage.removeItem(TOKEN_KEY); location.reload(); } }, 'Sign out'),
     ),
-    h('main', {},
-      h('div', { class: 'left' },
-        statsPanel,
-        h('div', { class: 'table-wrap' },
-          h('table', {},
-            h('thead', {},
-              h('tr', {},
-                h('th', {}, 'time'),
-                h('th', {}, 'ip'),
-                h('th', {}, 'bot %'),
-                h('th', {}, 'tier'),
-                h('th', {}, 'puzzle'),
-                h('th', {}, 'verify'),
-                h('th', {}, 'p score'),
-                h('th', {}, 'v score'),
-                h('th', {}, 'challenge'),
-              ),
-            ),
-            tbody,
-          ),
-        ),
-      ),
-      aside,
-    ),
+    mainEl,
   );
 }
 

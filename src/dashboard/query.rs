@@ -3,12 +3,13 @@
 //! readers do not contend with the writer. Volume here is operator-driven
 //! (a handful of polls per second at most) so connection overhead is fine.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row};
 
 use super::types::{
-    OutcomeCounts, PuzzleBreakdownDto, PuzzleSignalSums, Session, Stats, TierCounts,
+    OutcomeCounts, PuzzleBreakdownDto, PuzzleSignalSums, Session, SiteActivity, Stats, TierCounts,
     VerifyBreakdownDto, VerifySection, VerifySignalSums,
 };
 
@@ -58,6 +59,22 @@ impl Sessions {
             let conn = open_ro(&path)?;
             stats_blocking(&conn)
         })
+        .await?
+        .map_err(QueryError::Sqlite)
+    }
+
+    /// Aggregate counts grouped by site_key. Returns a map keyed by the
+    /// site_key string so the caller can merge it with the in-memory site
+    /// registry without re-scanning. Sites with zero recorded sessions are
+    /// simply absent from the map.
+    pub async fn site_activity(&self) -> Result<HashMap<String, SiteActivity>, QueryError> {
+        let path = self.db_path.clone();
+        tokio::task::spawn_blocking(
+            move || -> Result<HashMap<String, SiteActivity>, rusqlite::Error> {
+                let conn = open_ro(&path)?;
+                site_activity_blocking(&conn)
+            },
+        )
         .await?
         .map_err(QueryError::Sqlite)
     }
@@ -280,4 +297,44 @@ fn stats_blocking(conn: &Connection) -> rusqlite::Result<Stats> {
 // type error when the target is `i64`. Read as Option and default to 0.
 fn opt_i64(row: &Row<'_>, idx: usize) -> rusqlite::Result<i64> {
     Ok(row.get::<_, Option<i64>>(idx)?.unwrap_or(0))
+}
+
+#[allow(clippy::cast_sign_loss)]
+fn site_activity_blocking(conn: &Connection) -> rusqlite::Result<HashMap<String, SiteActivity>> {
+    // Group puzzle decisions by site_key, then left-join verify decisions
+    // through challenge_id so we get verify_count and a combined bot
+    // probability per site in one pass.
+    let mut stmt = conn.prepare(
+        "SELECT
+            p.site_key,
+            COUNT(*),
+            COUNT(v.id),
+            MAX(p.ts),
+            COALESCE(AVG(MIN(MAX(p.score, COALESCE(v.score, 0)), 100)), 0.0)
+         FROM puzzle_decisions p
+         LEFT JOIN verify_decisions v ON v.challenge_id = p.challenge_id
+         GROUP BY p.site_key",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let site_key: String = row.get(0)?;
+        let puzzle_count: i64 = row.get(1)?;
+        let verify_count: i64 = row.get(2)?;
+        let last_seen: Option<String> = row.get(3)?;
+        let avg_bot_probability: f64 = row.get(4)?;
+        Ok((
+            site_key,
+            SiteActivity {
+                puzzle_count: puzzle_count as u64,
+                verify_count: verify_count as u64,
+                last_seen,
+                avg_bot_probability,
+            },
+        ))
+    })?;
+    let mut out = HashMap::new();
+    for row in rows {
+        let (k, v) = row?;
+        out.insert(k, v);
+    }
+    Ok(out)
 }

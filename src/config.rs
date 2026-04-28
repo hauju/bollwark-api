@@ -59,6 +59,12 @@ pub struct AppConfig {
     /// CORS headers — others get a same-origin response that browsers
     /// will block. Other endpoints never have CORS enabled.
     pub cors_allowed_origins: Option<String>,
+    /// **Dev/test only.** When true, `POST /v1/sites` skips the
+    /// `ADMIN_TOKEN` bearer check so local-dev pages and Playwright e2e
+    /// can register sites anonymously. Refused outside `cfg!(debug_assertions)`
+    /// builds — release binaries log a warning and ignore the flag. The
+    /// admin dashboard endpoints (`/v1/admin/*`) are NOT bypassed.
+    pub dev_disable_admin_auth: bool,
 }
 
 impl AppConfig {
@@ -126,8 +132,18 @@ impl AppConfig {
             admin_token: env::var("ADMIN_TOKEN").ok(),
             site_db_path: env::var("SITE_DB_PATH").ok(),
             cors_allowed_origins: env::var("CORS_ALLOWED_ORIGINS").ok(),
+            dev_disable_admin_auth: parse_truthy(
+                env::var("DEV_DISABLE_ADMIN_AUTH").ok().as_deref(),
+            ),
         }
     }
+}
+
+fn parse_truthy(v: Option<&str>) -> bool {
+    matches!(
+        v.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
 }
 
 impl Default for AppConfig {
@@ -156,6 +172,7 @@ impl Default for AppConfig {
             admin_token: None,
             site_db_path: None,
             cors_allowed_origins: None,
+            dev_disable_admin_auth: false,
         }
     }
 }

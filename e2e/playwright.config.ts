@@ -48,6 +48,10 @@ export default defineConfig({
           // no-pointer pattern still adds enough on top to cross 110, so the
           // bot/human distinction holds; honeypot (+100) still dominates.
           VERIFY_BLOCK_MIN: "110",
+          // Let the testsite's autoSetup() call POST /v1/sites without an
+          // ADMIN_TOKEN. Debug-build only — the server refuses to honour
+          // this in a release binary.
+          DEV_DISABLE_ADMIN_AUTH: "1",
         },
         url: `${baseURL}/static/testsite.html`,
         reuseExistingServer: true,

@@ -385,6 +385,14 @@ pub async fn create_site(
 /// isn't set so the endpoint's existence isn't disclosed in unprotected
 /// deployments. Token comparison is length-then-constant-time.
 fn require_admin_token(state: &SharedState, headers: &HeaderMap) -> Result<(), CaptchaError> {
+    // Dev escape hatch: when DEV_DISABLE_ADMIN_AUTH=1 in a debug build, skip
+    // the bearer check entirely so e2e and the testsite can call /v1/sites
+    // anonymously. main.rs ignores the flag in release builds, but we
+    // re-check `cfg!(debug_assertions)` here so this can never bypass auth
+    // in a release binary even if the field is somehow true.
+    if state.config.dev_disable_admin_auth && cfg!(debug_assertions) {
+        return Ok(());
+    }
     let Some(expected) = state.admin_token.as_ref() else {
         return Err(CaptchaError::NotFound);
     };

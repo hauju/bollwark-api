@@ -348,6 +348,19 @@
       logRiskRow("widget", tier, d.difficulty);
     });
 
+    // POST /v1/sites is gated by ADMIN_TOKEN (404 when unset, 401 on bad
+    // token). Reuse the same sessionStorage key the admin dashboard uses so
+    // a single sign-in covers both pages in this tab.
+    const ADMIN_TOKEN_KEY = "rust_captcha_admin_token";
+    function getAdminToken({ forcePrompt = false } = {}) {
+      let tk = forcePrompt ? null : sessionStorage.getItem(ADMIN_TOKEN_KEY);
+      if (!tk) {
+        tk = prompt("Enter ADMIN_TOKEN to register a test site:");
+        if (tk) sessionStorage.setItem(ADMIN_TOKEN_KEY, tk);
+      }
+      return tk;
+    }
+
     async function autoSetup() {
       const btn = document.getElementById("setup-btn");
       const info = document.getElementById("site-info");
@@ -355,11 +368,30 @@
       btn.textContent = "Creating...";
 
       try {
-        const resp = await fetch("/v1/sites", {
+        let token = getAdminToken();
+        if (!token) throw new Error("Admin token required");
+        let resp = await fetch("/v1/sites", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + token,
+          },
           body: JSON.stringify({ name: "test-site" }),
         });
+        if (resp.status === 401) {
+          // Stored token is wrong or rotated — drop it and re-prompt once.
+          sessionStorage.removeItem(ADMIN_TOKEN_KEY);
+          token = getAdminToken({ forcePrompt: true });
+          if (!token) throw new Error("Admin token required");
+          resp = await fetch("/v1/sites", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": "Bearer " + token,
+            },
+            body: JSON.stringify({ name: "test-site" }),
+          });
+        }
         if (!resp.ok) throw new Error("Failed: " + resp.status);
         const data = await resp.json();
 

@@ -141,3 +141,29 @@ pub struct TierCounts {
     pub visual_challenge: u64,
     pub block: u64,
 }
+
+/// Aggregate counts for a single site, drawn from the decision log.
+/// Keyed by `site_key` (string-formatted UUID) so the route handler can
+/// merge it with the in-memory site registry by lookup.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SiteActivity {
+    pub puzzle_count: u64,
+    pub verify_count: u64,
+    pub last_seen: Option<String>,
+    pub avg_bot_probability: f64,
+}
+
+/// Wire format for `GET /v1/admin/sites`. Combines the registered site
+/// (from `InMemoryStore`) with activity aggregates from the decision log.
+/// `secret_key` is intentionally omitted — secrets are revealed once at
+/// registration time and the dashboard has no need to display them.
+#[derive(Debug, Clone, Serialize)]
+pub struct SiteSummary {
+    pub site_key: String,
+    pub name: String,
+    pub created_at: String,
+    pub puzzle_count: u64,
+    pub verify_count: u64,
+    pub last_seen: Option<String>,
+    pub avg_bot_probability: f64,
+}

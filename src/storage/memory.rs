@@ -88,6 +88,16 @@ impl InMemoryStore {
             .map(|m| m.len())
             .unwrap_or_default()
     }
+
+    /// Snapshot of every registered site, sorted by `created_at` ascending.
+    /// Used by the admin dashboard. Cloning is cheap (a few strings per site)
+    /// and keeps the read lock held for as little time as possible.
+    pub fn list_sites(&self) -> Result<Vec<Site>, CaptchaError> {
+        let map = self.sites_by_key.read().map_err(lock_err)?;
+        let mut out: Vec<Site> = map.values().cloned().collect();
+        out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        Ok(out)
+    }
 }
 
 fn load_all_sites(conn: &Connection) -> Result<Vec<Site>, CaptchaError> {

@@ -49,7 +49,22 @@ async fn main() {
         tracing::info!("Loaded environment from {}", path.display());
     }
 
-    let config = AppConfig::from_env();
+    let mut config = AppConfig::from_env();
+
+    if config.dev_disable_admin_auth {
+        if cfg!(debug_assertions) {
+            tracing::warn!(
+                "⚠️  DEV_DISABLE_ADMIN_AUTH=1 — POST /v1/sites is OPEN to anonymous callers. \
+                 This is a dev/test-only flag; never enable it in production."
+            );
+        } else {
+            tracing::error!(
+                "DEV_DISABLE_ADMIN_AUTH=1 ignored: this is a release build. \
+                 The flag only takes effect in debug builds."
+            );
+            config.dev_disable_admin_auth = false;
+        }
+    }
 
     let puzzle_config = PuzzleConfig {
         algorithm: config.puzzle_algorithm,
@@ -183,6 +198,7 @@ async fn main() {
                     sessions,
                     log,
                     token: Arc::new(token.clone()),
+                    store: Arc::clone(&store),
                 },
             ))
         }
