@@ -136,12 +136,16 @@
       this.row.appendChild(brand);
       this.container.appendChild(this.row);
 
-      // Honeypot: invisible input, off-screen, with a name that looks like a
-      // real form field. A naive form-spamming bot fills every input and trips it.
+      // Honeypot: invisible input a naive form-spamming bot fills.
+      // The name MUST NOT contain semantic tokens like email/name/phone/
+      // address — Chrome/Safari/password managers ignore autocomplete="off"
+      // for those and autofill the hidden field with the user's real data,
+      // tripping the honeypot for every legitimate user. Randomize per
+      // instance so autofill heuristics can't memorize the name either.
       this.honeypot = document.createElement("input");
       this.honeypot.type = "text";
-      this.honeypot.name = "rc_email_confirm";
-      this.honeypot.autocomplete = "off";
+      this.honeypot.name = "rc_" + Math.random().toString(36).slice(2, 10);
+      this.honeypot.autocomplete = "new-password";
       this.honeypot.tabIndex = -1;
       this.honeypot.setAttribute("aria-hidden", "true");
       this.honeypot.style.cssText =
