@@ -46,9 +46,8 @@ impl TierThresholds {
 }
 
 /// Map a chosen tier to a PoW difficulty adjustment relative to the base.
-///
-/// Phase 1: Checkbox adds no UI change in the widget and behaves as a mild
-/// difficulty bump; VisualChallenge/Block do not issue a PoW.
+/// Returns `None` for tiers that don't issue a PoW (`VisualChallenge` is
+/// served as an image-text captcha, `Block` is rejected with 429).
 pub fn difficulty_for(
     tier: EscalationTier,
     default_difficulty: u32,

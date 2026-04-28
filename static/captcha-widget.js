@@ -149,9 +149,35 @@
       this.label.className = "rc-captcha-label";
       this.label.textContent = "I'm not a robot";
 
+      // Brand corner: clickable name → about page, tiny Privacy / Terms
+      // links beneath. Mirrors the reCAPTCHA / hCaptcha pattern so the
+      // privacy notice stays directly accessible from the widget (GDPR
+      // Art. 13 "easily accessible" expectation) without a bottom footer.
       const brand = document.createElement("span");
       brand.className = "rc-captcha-brand";
-      brand.innerHTML = "<strong>RustCaptcha</strong>PoW";
+      const linkBase = this.serverUrl || "";
+      const brandLink = document.createElement("a");
+      brandLink.className = "rc-captcha-brand-name";
+      brandLink.href = linkBase + "/static/about.html";
+      brandLink.target = "_blank";
+      brandLink.rel = "noopener noreferrer";
+      brandLink.textContent = "RustCaptcha";
+      const brandLinks = document.createElement("span");
+      brandLinks.className = "rc-captcha-brand-links";
+      [
+        ["Privacy", "/static/privacy.html"],
+        ["Terms", "/static/terms.html"],
+      ].forEach(([text, path], i) => {
+        if (i > 0) brandLinks.appendChild(document.createTextNode(" · "));
+        const a = document.createElement("a");
+        a.href = linkBase + path;
+        a.textContent = text;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        brandLinks.appendChild(a);
+      });
+      brand.appendChild(brandLink);
+      brand.appendChild(brandLinks);
 
       this.row.appendChild(this.checkbox);
       this.row.appendChild(this.label);

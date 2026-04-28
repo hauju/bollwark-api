@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privacy — RustCaptcha</title>
+  <link rel="stylesheet" href="/static/info-pages.css">
+</head>
+<body>
+  <div class="page">
+    <div class="brand"><strong>RustCaptcha</strong> · Privacy</div>
+    <h1>Privacy notice</h1>
+    <p class="lede">
+      What RustCaptcha sees when it verifies your request, and what it
+      doesn't.
+    </p>
+
+    <div class="note">
+      RustCaptcha is self-hosted. The site you're visiting runs its own
+      installation, so the data described here stays with that operator.
+      It is not shared with us, with advertising networks, or with any
+      third party.
+    </div>
+
+    <div class="card">
+      <h2>What RustCaptcha receives</h2>
+      <p>
+        To decide whether to challenge a request, the widget sends — and the
+        server records — the following:
+      </p>
+      <ul>
+        <li><strong>IP address</strong> — used to rate-limit and to look up
+          known abusive networks.</li>
+        <li><strong>Request headers</strong> — the <code>User-Agent</code>,
+          <code>Accept-Language</code>, and <code>Accept-Encoding</code>
+          your browser already sends with every request, used to detect
+          obviously malformed clients.</li>
+        <li><strong>Trust cookie</strong> (optional, when enabled) — a
+          single signed cookie named <code>__captcha_trust</code> that
+          records the time of your last successful verification, so repeat
+          visitors aren't re-challenged unnecessarily. It contains no
+          personal data.</li>
+        <li><strong>Behavioural counters</strong> — the number of times
+          your mouse moved, scrolled, or you pressed a key while the page
+          was open. These are <em>counts only</em> — no positions, no
+          paths, no keystrokes are recorded.</li>
+        <li><strong>Time on page</strong> — how many milliseconds elapsed
+          between the page loading and you submitting the form.</li>
+      </ul>
+
+      <h2>What RustCaptcha does not collect</h2>
+      <ul>
+        <li>No browser fingerprinting beyond standard request headers.</li>
+        <li>No cursor positions, click coordinates, or keystroke content.</li>
+        <li>No third-party tracking or advertising identifiers.</li>
+        <li>No cross-site profiles. The cookie is scoped to the captcha
+          domain and contains a single timestamp.</li>
+      </ul>
+
+      <h2>Retention</h2>
+      <p>
+        Individual challenges are short-lived and expire after a few
+        minutes. Decision logs, if the operator enables them, are intended
+        for abuse investigation and are kept according to that operator's
+        retention policy — RustCaptcha imposes no remote retention on its
+        own.
+      </p>
+
+      <h2>Cookies</h2>
+      <p>
+        The optional <code>__captcha_trust</code> cookie is set only when
+        the operator enables it and only after a successful verification.
+        It is signed (not encrypted), readable only by the captcha service,
+        and contains a timestamp — nothing else.
+      </p>
+
+      <h2>Your rights</h2>
+      <p>
+        Because RustCaptcha is operated by the site you're visiting, any
+        access, correction, or deletion requests should go to that site's
+        operator. See their privacy policy for contact details.
+      </p>
+    </div>
+
+    <div class="nav">
+      <a href="/static/about.html">About</a>
+      <a href="/static/terms.html">Terms</a>
+    </div>
+  </div>
+</body>
+</html>

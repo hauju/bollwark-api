@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>About — RustCaptcha</title>
+  <link rel="stylesheet" href="/static/info-pages.css">
+</head>
+<body>
+  <div class="page">
+    <div class="brand"><strong>RustCaptcha</strong> · About</div>
+    <h1>Why am I seeing this?</h1>
+    <p class="lede">
+      RustCaptcha is a verification check that helps the site you're visiting
+      tell humans apart from automated traffic. It runs in your browser and
+      doesn't ask you to solve unrelated puzzles or identify objects in
+      photos.
+    </p>
+
+    <div class="card">
+      <h2>What it does</h2>
+      <p>
+        When you load a page that uses RustCaptcha, the widget asks the server
+        for a small task. Depending on how risky the request looks, the server
+        picks one of these:
+      </p>
+      <ul>
+        <li><strong>Silent verification.</strong> Most visitors never see a
+          checkbox — your browser solves a short proof-of-work puzzle in the
+          background and the page just continues.</li>
+        <li><strong>"I'm not a robot" checkbox.</strong> A single click; the
+          actual proof-of-work runs after you click.</li>
+        <li><strong>Image text challenge.</strong> If the request looks
+          unusually risky, you may be asked to type the characters shown in
+          a small image.</li>
+      </ul>
+
+      <h2>What proof-of-work means</h2>
+      <p>
+        Your browser performs a small computation — finding a number that,
+        when hashed, has a certain pattern. It's free for one human, but
+        expensive at scale, which is what discourages automated abuse.
+        Solving it doesn't reveal anything about you; only the answer is
+        sent back.
+      </p>
+
+      <h2>Privacy-respecting by design</h2>
+      <p>
+        RustCaptcha doesn't load tracking pixels, doesn't share data with
+        advertising networks, and doesn't fingerprint your browser beyond
+        the bare minimum needed to score the request. See the
+        <a href="/static/privacy.html">privacy notice</a> for details on
+        what is and isn't collected.
+      </p>
+
+      <h2>Open source &amp; self-hosted</h2>
+      <p>
+        RustCaptcha is open-source software. The site you're visiting runs
+        its own copy on its own servers — no third party sees your check.
+        The operator of this site is responsible for the
+        <a href="/static/terms.html">terms</a> under which it's used.
+      </p>
+    </div>
+
+    <div class="nav">
+      <a href="/static/privacy.html">Privacy</a>
+      <a href="/static/terms.html">Terms</a>
+    </div>
+  </div>
+</body>
+</html>
