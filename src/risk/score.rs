@@ -6,6 +6,7 @@ use axum::http::HeaderMap;
 use super::reputation::{CidrListReputation, score_ip_reputation};
 use super::signals::{CookiePresence, score_cookie_age, score_header_anomaly, score_rate};
 use super::tier::{EscalationTier, TierThresholds};
+use super::tls_fingerprint::{FingerprintBlocklist, TlsFingerprint, score_tls_fingerprint};
 
 pub struct SignalContext<'a> {
     pub ip: IpAddr,
@@ -13,6 +14,7 @@ pub struct SignalContext<'a> {
     pub ip_count: u32,
     pub site_count: u32,
     pub cookie: CookiePresence,
+    pub tls_fingerprint: TlsFingerprint<'a>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -21,6 +23,7 @@ pub struct SignalBreakdown {
     pub header_anomaly: u32,
     pub ip_reputation: u32,
     pub cookie_age: u32,
+    pub tls_fingerprint: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -33,13 +36,19 @@ pub struct RiskScore {
 pub struct RiskScorer {
     thresholds: TierThresholds,
     reputation: Arc<CidrListReputation>,
+    tls_blocklist: Arc<FingerprintBlocklist>,
 }
 
 impl RiskScorer {
-    pub fn new(thresholds: TierThresholds, reputation: Arc<CidrListReputation>) -> Self {
+    pub fn new(
+        thresholds: TierThresholds,
+        reputation: Arc<CidrListReputation>,
+        tls_blocklist: Arc<FingerprintBlocklist>,
+    ) -> Self {
         Self {
             thresholds,
             reputation,
+            tls_blocklist,
         }
     }
 
@@ -49,11 +58,13 @@ impl RiskScorer {
             header_anomaly: score_header_anomaly(ctx.headers),
             ip_reputation: score_ip_reputation(self.reputation.lookup(ctx.ip)),
             cookie_age: score_cookie_age(ctx.cookie),
+            tls_fingerprint: score_tls_fingerprint(ctx.tls_fingerprint, &self.tls_blocklist),
         };
         let total = breakdown.rate
             + breakdown.header_anomaly
             + breakdown.ip_reputation
-            + breakdown.cookie_age;
+            + breakdown.cookie_age
+            + breakdown.tls_fingerprint;
         let tier = self.thresholds.classify(total);
         RiskScore {
             total,
@@ -73,6 +84,7 @@ mod tests {
         RiskScorer::new(
             TierThresholds::default(),
             Arc::new(CidrListReputation::empty()),
+            Arc::new(FingerprintBlocklist::empty()),
         )
     }
 
@@ -80,6 +92,15 @@ mod tests {
         RiskScorer::new(
             TierThresholds::default(),
             Arc::new(CidrListReputation::parse(content).unwrap()),
+            Arc::new(FingerprintBlocklist::empty()),
+        )
+    }
+
+    fn scorer_with_tls_blocklist(content: &str) -> RiskScorer {
+        RiskScorer::new(
+            TierThresholds::default(),
+            Arc::new(CidrListReputation::empty()),
+            Arc::new(FingerprintBlocklist::parse(content).unwrap()),
         )
     }
 
@@ -111,6 +132,7 @@ mod tests {
             ip_count,
             site_count,
             cookie: CookiePresence::Disabled,
+            tls_fingerprint: TlsFingerprint::Skipped,
         }
     }
 
@@ -204,5 +226,25 @@ mod tests {
         c.cookie = CookiePresence::Present(7200);
         let result = scorer().score(&c);
         assert_eq!(result.breakdown.cookie_age, 0);
+    }
+
+    #[test]
+    fn known_bad_tls_fingerprint_adds_score() {
+        let headers = clean_headers();
+        let s = scorer_with_tls_blocklist("badfp\n");
+        let mut c = ctx(&headers, "127.0.0.1", 1, 1);
+        c.tls_fingerprint = TlsFingerprint::Provided("badfp");
+        let result = s.score(&c);
+        assert_eq!(result.breakdown.tls_fingerprint, 35);
+    }
+
+    #[test]
+    fn unknown_tls_fingerprint_adds_zero() {
+        let headers = clean_headers();
+        let s = scorer_with_tls_blocklist("badfp\n");
+        let mut c = ctx(&headers, "127.0.0.1", 1, 1);
+        c.tls_fingerprint = TlsFingerprint::Provided("legit-chrome-fp");
+        let result = s.score(&c);
+        assert_eq!(result.breakdown.tls_fingerprint, 0);
     }
 }

@@ -8,7 +8,10 @@ use axum::response::IntoResponse;
 
 use crate::error::CaptchaError;
 use crate::risk::cookie::{extract_cookie, now_secs, set_cookie_header};
-use crate::risk::{CookiePresence, SignalContext, difficulty_for};
+use crate::risk::{
+    BehaviorPresence, CookiePresence, SignalContext, TlsFingerprint, VerifyContext, VerifyDecision,
+    difficulty_for,
+};
 use crate::site::types::Site;
 use crate::storage::Store;
 
@@ -55,6 +58,19 @@ pub async fn get_puzzle(
         }
     }
 
+    // TLS fingerprint: only honor the header when the immediate peer is in
+    // the trusted-proxies CIDR. Direct clients can otherwise spoof the value.
+    let tls_fingerprint = match (
+        &state.tls_fingerprint_header,
+        state.trusted_proxies.contains(ip),
+    ) {
+        (Some(header_name), true) => match headers.get(header_name).and_then(|v| v.to_str().ok()) {
+            Some(value) if !value.is_empty() => TlsFingerprint::Provided(value),
+            _ => TlsFingerprint::Skipped,
+        },
+        _ => TlsFingerprint::Skipped,
+    };
+
     // Score the request and pick an escalation tier
     let ctx = SignalContext {
         ip,
@@ -62,6 +78,7 @@ pub async fn get_puzzle(
         ip_count,
         site_count,
         cookie,
+        tls_fingerprint,
     };
     let score = state.risk.score(&ctx);
 
@@ -74,7 +91,9 @@ pub async fn get_puzzle(
         signals.header_anomaly = score.breakdown.header_anomaly,
         signals.ip_reputation = score.breakdown.ip_reputation,
         signals.cookie_age = score.breakdown.cookie_age,
+        signals.tls_fingerprint = score.breakdown.tls_fingerprint,
         cookie.presence = ?cookie,
+        tls.fingerprint = ?tls_fingerprint,
         "Risk scored"
     );
 
@@ -130,13 +149,6 @@ pub async fn verify(
         .await?
         .ok_or(CaptchaError::Unauthorized)?;
 
-    // Honeypot: any non-empty value is an instant fail. Bots that scrape the
-    // widget DOM and fill every input will populate this. Real users never see it.
-    if body.honeypot.as_deref().is_some_and(|s| !s.is_empty()) {
-        tracing::info!("Verify rejected: honeypot tripped");
-        return Ok(Json(VerifyResponse { success: false }));
-    }
-
     // Look up challenge
     let challenge = state
         .store
@@ -162,11 +174,80 @@ pub async fn verify(
         return Ok(Json(VerifyResponse { success: false }));
     }
 
-    // Mark challenge as used
+    // Mark challenge as used (PoW solved correctly)
     state.store.mark_solution_used(&challenge.id).await?;
     state.store.delete_challenge(&challenge.id).await?;
 
-    Ok(Json(VerifyResponse { success: true }))
+    // Verify-time risk scoring: time-on-page, cookie age at verify, honeypot.
+    // The decision can promote a PoW-valid request to ShadowFail (success=true,
+    // logged) or Block (success=false) based on behavioral signals.
+    let now = now_secs();
+    let cookie = if let Some(signer) = &state.cookie_signer {
+        let token = headers
+            .get(axum::http::header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(extract_cookie);
+        match token.and_then(|t| signer.verify(t, now)) {
+            Some(issued_at) => CookiePresence::Present(now.saturating_sub(issued_at)),
+            None => CookiePresence::Missing,
+        }
+    } else {
+        CookiePresence::Disabled
+    };
+
+    let honeypot_tripped = body.honeypot.as_deref().is_some_and(|s| !s.is_empty());
+    let behavior = match body.behavior {
+        Some(report) => BehaviorPresence::Present(report),
+        None => BehaviorPresence::Absent,
+    };
+    let vctx = VerifyContext {
+        honeypot_tripped,
+        time_on_page_ms: body.time_on_page_ms,
+        cookie,
+        behavior,
+    };
+    let vscore = state.verify_scorer.score(&vctx);
+
+    match vscore.decision {
+        VerifyDecision::Pass => {
+            tracing::debug!(
+                challenge_id = %challenge.id,
+                verify.score = vscore.total,
+                "Verify passed"
+            );
+            Ok(Json(VerifyResponse { success: true }))
+        }
+        VerifyDecision::ShadowFail => {
+            // Return success but flag for offline review. No persistent
+            // quarantine store yet — the structured log is the audit trail.
+            tracing::warn!(
+                challenge_id = %challenge.id,
+                verify.score = vscore.total,
+                verify.honeypot = vscore.breakdown.honeypot,
+                verify.time_on_page = vscore.breakdown.time_on_page,
+                verify.cookie_age = vscore.breakdown.cookie_age,
+                verify.behavior = vscore.breakdown.behavior,
+                time_on_page_ms = ?body.time_on_page_ms,
+                cookie.presence = ?cookie,
+                "Verify shadow-failed (success returned, request quarantined)"
+            );
+            Ok(Json(VerifyResponse { success: true }))
+        }
+        VerifyDecision::Block => {
+            tracing::info!(
+                challenge_id = %challenge.id,
+                verify.score = vscore.total,
+                verify.honeypot = vscore.breakdown.honeypot,
+                verify.time_on_page = vscore.breakdown.time_on_page,
+                verify.cookie_age = vscore.breakdown.cookie_age,
+                verify.behavior = vscore.breakdown.behavior,
+                time_on_page_ms = ?body.time_on_page_ms,
+                cookie.presence = ?cookie,
+                "Verify blocked"
+            );
+            Ok(Json(VerifyResponse { success: false }))
+        }
+    }
 }
 
 pub async fn create_site(

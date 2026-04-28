@@ -20,6 +20,20 @@ pub struct AppConfig {
     pub cookie_signing_secret: Option<String>,
     /// Set the `Secure` attribute on issued cookies. Defaults to false (local dev / HTTP).
     pub cookie_secure: bool,
+    /// Verify-time score at/above which the request is shadow-failed (success
+    /// returned, log emitted). Default 30.
+    pub verify_shadow_min: u32,
+    /// Verify-time score at/above which the request is hard-rejected. Default 60.
+    pub verify_block_min: u32,
+    /// Header name carrying the TLS fingerprint set by a trusted reverse proxy
+    /// (e.g. `x-ja4`). If unset, the TLS fingerprint signal is disabled.
+    pub tls_fingerprint_header: Option<String>,
+    /// Path to a file listing known-bad TLS fingerprints (one per line, `#` comments).
+    pub tls_fingerprint_file: Option<String>,
+    /// CIDR allowlist of upstream proxies whose `tls_fingerprint_header` we
+    /// trust. Comma- or whitespace-separated. Required when the TLS feature is
+    /// enabled — without it, no peer is trusted and the signal never fires.
+    pub trusted_proxies: Option<String>,
 }
 
 impl AppConfig {
@@ -71,6 +85,17 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(false),
+            verify_shadow_min: env::var("VERIFY_SHADOW_MIN")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
+            verify_block_min: env::var("VERIFY_BLOCK_MIN")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60),
+            tls_fingerprint_header: env::var("TLS_FINGERPRINT_HEADER").ok(),
+            tls_fingerprint_file: env::var("TLS_FINGERPRINT_FILE").ok(),
+            trusted_proxies: env::var("TRUSTED_PROXIES").ok(),
         }
     }
 }
@@ -91,6 +116,11 @@ impl Default for AppConfig {
             ip_reputation_file: None,
             cookie_signing_secret: None,
             cookie_secure: false,
+            verify_shadow_min: 30,
+            verify_block_min: 60,
+            tls_fingerprint_header: None,
+            tls_fingerprint_file: None,
+            trusted_proxies: None,
         }
     }
 }

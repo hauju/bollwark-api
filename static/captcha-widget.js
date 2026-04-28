@@ -18,9 +18,59 @@
       this.solveStartTime = null;
       this.puzzle = null;
       this.tier = null;
+      this.pageLoadAt = Date.now(); // ms since epoch; feeds the time-on-page signal at verify time
+
+      // Behavioural telemetry: counters for the verify-time `behavior` blob.
+      // We only count, never record paths or content — privacy and bandwidth.
+      this._behavior = {
+        mouse_moves: 0,
+        touches: 0,
+        interactions: 0,
+        first_interaction_ms: null,
+      };
+      this._behaviorListeners = [];
+      this._installBehaviorListeners();
 
       this._render();
       this._initFlow();
+    }
+
+    _installBehaviorListeners() {
+      const opts = { passive: true, capture: true };
+      const noteInteraction = () => {
+        this._behavior.interactions++;
+        if (this._behavior.first_interaction_ms === null) {
+          this._behavior.first_interaction_ms = Date.now() - this.pageLoadAt;
+        }
+      };
+      const onMouseMove = () => {
+        this._behavior.mouse_moves++;
+      };
+      const onTouchStart = () => {
+        this._behavior.touches++;
+        if (this._behavior.first_interaction_ms === null) {
+          this._behavior.first_interaction_ms = Date.now() - this.pageLoadAt;
+        }
+      };
+
+      const bind = (target, type, handler) => {
+        target.addEventListener(type, handler, opts);
+        this._behaviorListeners.push(() =>
+          target.removeEventListener(type, handler, opts)
+        );
+      };
+
+      bind(document, "mousemove", onMouseMove);
+      bind(document, "touchstart", onTouchStart);
+      bind(document, "click", noteInteraction);
+      bind(document, "keydown", noteInteraction);
+      bind(document, "scroll", noteInteraction);
+      bind(window, "focus", noteInteraction);
+    }
+
+    _teardownBehaviorListeners() {
+      for (const off of this._behaviorListeners) off();
+      this._behaviorListeners = [];
     }
 
     // Fetch the puzzle eagerly so we know the tier before any user interaction.
@@ -270,7 +320,12 @@
         input.name = "captcha-token";
         form.appendChild(input);
       }
-      const payload = { challenge_id: challengeId, nonce };
+      const payload = {
+        challenge_id: challengeId,
+        nonce,
+        time_on_page_ms: Date.now() - this.pageLoadAt,
+        behavior: { ...this._behavior },
+      };
       const honeypotValue = this.honeypot ? this.honeypot.value : "";
       if (honeypotValue) payload.honeypot = honeypotValue;
       input.value = JSON.stringify(payload);
@@ -283,11 +338,20 @@
         this.worker.terminate();
         this.worker = null;
       }
+      this._teardownBehaviorListeners();
       this.state = "idle";
       this.puzzle = null;
       this.tier = null;
+      this.pageLoadAt = Date.now();
       this._powProgress = undefined;
       this._solveTime = undefined;
+      this._behavior = {
+        mouse_moves: 0,
+        touches: 0,
+        interactions: 0,
+        first_interaction_ms: null,
+      };
+      this._installBehaviorListeners();
       this._render();
       this._initFlow();
     }

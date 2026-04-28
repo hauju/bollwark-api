@@ -1,0 +1,255 @@
+# Configuration
+
+All runtime configuration is via environment variables. Every setting is optional with a sensible default — the service starts cleanly with `cargo run` and no env vars set, running with the puzzle pipeline only (rate + header anomaly signals active).
+
+## Quick reference
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LISTEN_ADDR` | `0.0.0.0:3000` | Socket address to bind |
+| `RUST_LOG` | `info` | Tracing filter |
+| `DEFAULT_DIFFICULTY` | `20` | Base PoW difficulty (leading zero bits) |
+| `MIN_DIFFICULTY` | `16` | Lower clamp on adaptive difficulty |
+| `MAX_DIFFICULTY` | `28` | Upper clamp on adaptive difficulty |
+| `CHALLENGE_TTL_SECS` | `300` | How long an issued puzzle is valid |
+| `CLEANUP_INTERVAL_SECS` | `60` | How often expired challenges are swept |
+| `TIER_CHECKBOX_MIN` | `20` | Score at/above which tier becomes `checkbox` |
+| `TIER_HARD_POW_MIN` | `40` | …becomes `hard_pow` |
+| `TIER_VISUAL_MIN` | `65` | …becomes `visual_challenge` (returns 429) |
+| `TIER_BLOCK_MIN` | `85` | …becomes `block` (returns 429) |
+| `VERIFY_SHADOW_MIN` | `30` | Verify-time score for shadow-fail (success returned, log emitted) |
+| `VERIFY_BLOCK_MIN` | `60` | Verify-time score for hard rejection |
+| `IP_REPUTATION_FILE` | _unset_ | Path to CIDR reputation list (signal off if unset) |
+| `COOKIE_SIGNING_SECRET` | _unset_ | HMAC secret for trust cookies (≥16 bytes; signal off if unset) |
+| `COOKIE_SECURE` | `false` | Set the `Secure` attribute on issued cookies |
+| `TLS_FINGERPRINT_HEADER` | _unset_ | Header to read TLS fingerprint from (signal off if unset) |
+| `TLS_FINGERPRINT_FILE` | _unset_ | Path to known-bad fingerprint blocklist |
+| `TRUSTED_PROXIES` | _unset_ | CIDR allowlist of peers whose `TLS_FINGERPRINT_HEADER` we honor |
+
+---
+
+## Server basics
+
+### `LISTEN_ADDR`
+Socket address the HTTP server binds to.
+
+- Default: `0.0.0.0:3000`
+- Format: `<ip>:<port>` (`SocketAddr` parser — accepts IPv4 and IPv6)
+
+### `RUST_LOG`
+Standard `tracing-subscriber` env filter. Useful targets:
+
+- `rust_captcha=info` — high-level events
+- `rust_captcha::api::handlers=debug` — adds per-request scoring detail (Pass-tier verifies)
+- `rust_captcha=trace` — everything
+
+---
+
+## PoW configuration
+
+PoW difficulty is the number of **leading zero bits** the SHA-256 hash of `prefix || nonce` must have. Each additional bit roughly doubles the expected solve time.
+
+### `DEFAULT_DIFFICULTY` (default `20`)
+Base difficulty for `invisible_pass` tier. ~1s on a modern CPU at 20.
+
+### `MIN_DIFFICULTY` (default `16`) / `MAX_DIFFICULTY` (default `28`)
+Clamp the final difficulty. The risk tier can bump difficulty above `DEFAULT_DIFFICULTY`:
+- `invisible_pass` → `DEFAULT_DIFFICULTY`
+- `checkbox` → `DEFAULT_DIFFICULTY + 2`
+- `hard_pow` → `DEFAULT_DIFFICULTY + 4`
+
+The result is clamped to `MAX_DIFFICULTY`. `MIN_DIFFICULTY` exists for the legacy `DifficultyCalculator` and currently has no effect on the risk pipeline (kept for backwards-compatible env API).
+
+### `CHALLENGE_TTL_SECS` (default `300`)
+A challenge is valid for this many seconds after issuance. Verify with an expired challenge returns `410 Gone`.
+
+### `CLEANUP_INTERVAL_SECS` (default `60`)
+How often the background sweeper deletes expired challenges and stale rate-window counters.
+
+---
+
+## Risk tier thresholds (puzzle-time)
+
+The puzzle-time scorer adds up contributions from each enabled signal and maps the total to an `EscalationTier`. Tier thresholds are inclusive: `score >= threshold` selects that tier.
+
+| Score range | Tier | Behavior |
+|---|---|---|
+| `0` — `TIER_CHECKBOX_MIN-1` | `invisible_pass` | Issue puzzle at base difficulty; widget solves silently |
+| `TIER_CHECKBOX_MIN` — `TIER_HARD_POW_MIN-1` | `checkbox` | Difficulty +2; widget renders "I'm not a robot" checkbox |
+| `TIER_HARD_POW_MIN` — `TIER_VISUAL_MIN-1` | `hard_pow` | Difficulty +4; same widget UX as checkbox |
+| `TIER_VISUAL_MIN` — `TIER_BLOCK_MIN-1` | `visual_challenge` | Returns `429 Too Many Requests` (visual challenge not implemented) |
+| `TIER_BLOCK_MIN` — | `block` | Returns `429 Too Many Requests` |
+
+Defaults: `20` / `40` / `65` / `85`.
+
+### Puzzle-time signals
+
+| Signal | Max contribution | Enabled by |
+|---|---|---|
+| Rate (per-IP + per-site, 60s window) | 45 | Always on |
+| Header anomaly (UA / Accept-Language / Accept-Encoding) | 50 | Always on |
+| IP reputation | 40 | `IP_REPUTATION_FILE` |
+| Cookie age | 20 | `COOKIE_SIGNING_SECRET` |
+| TLS fingerprint | 35 | `TLS_FINGERPRINT_HEADER` + `TRUSTED_PROXIES` |
+
+Tuning the per-signal score weights requires a code change (see `src/risk/signals.rs` and the per-signal modules); only the **tier thresholds** are env-tunable.
+
+---
+
+## Verify-time scoring
+
+After a PoW solution is verified, a second scoring pass runs against verify-time-only signals (time-on-page, cookie age at verify, honeypot). The result is one of three decisions:
+
+| Score range | Decision | Response | Side effect |
+|---|---|---|---|
+| `0` — `VERIFY_SHADOW_MIN-1` | `Pass` | `success: true` | DEBUG log |
+| `VERIFY_SHADOW_MIN` — `VERIFY_BLOCK_MIN-1` | `ShadowFail` | `success: true` | WARN log, `quarantined` field |
+| `VERIFY_BLOCK_MIN` — | `Block` | `success: false` | INFO log |
+
+### `VERIFY_SHADOW_MIN` (default `30`)
+At/above this, the request is shadow-failed: success is still returned to the caller (they see no failure), but a structured WARN log fires for offline review. No persistent quarantine store yet — the log is the audit trail.
+
+### `VERIFY_BLOCK_MIN` (default `60`)
+At/above this, the request is hard-rejected (`success: false`).
+
+### Verify-time signals
+
+| Signal | Score |
+|---|---|
+| Honeypot field non-empty | +100 (always blocks) |
+| Time-on-page < 500ms | +50 |
+| Time-on-page < 2000ms | +25 |
+| Cookie missing (when feature on) | +5 |
+| Cookie present, age < 60s | +20 |
+| Cookie present, age < 5min | +10 |
+| Cookie present, age < 1h | +5 |
+
+---
+
+## IP reputation signal
+
+### `IP_REPUTATION_FILE`
+Path to a CIDR reputation file. Unset → signal contributes 0 for all IPs.
+
+**File format:**
+```
+# comments and blank lines are ignored
+<cidr> <category>
+<cidr> <category> # inline comment
+```
+
+**Categories** (case-insensitive, plus aliases):
+
+| Category | Aliases | Score |
+|---|---|---|
+| `tor` | — | 40 |
+| `datacenter` | `dc`, `hosting` | 30 |
+| `vpn` | `proxy` | 20 |
+| `residential` | `isp` | 0 |
+
+**Example:**
+```
+# Tor exit nodes (refresh from official list)
+185.220.100.0/22 tor
+2a0b:f4c0::/29 tor
+
+# Major cloud providers
+3.0.0.0/8 datacenter
+35.190.0.0/16 datacenter
+
+# Commercial VPNs
+146.70.0.0/16 vpn
+```
+
+Lookup is first-match-wins on the order in the file. Unknown categories on otherwise well-formed lines are skipped with a WARN log at boot.
+
+---
+
+## Cookie age signal
+
+### `COOKIE_SIGNING_SECRET`
+HMAC-SHA256 secret for the `__captcha_trust` cookie. Unset → cookies are not issued, signal contributes 0. Must be **at least 16 bytes** when set; shorter values are silently ignored at boot with a WARN log.
+
+The cookie is opaque and stateless — the server doesn't track issued cookies anywhere; the HMAC self-validates.
+
+**Cookie format:** `__captcha_trust=<hex(timestamp)>.<hex(hmac)>`
+- `Max-Age`: 30 days
+- `HttpOnly`, `SameSite=Lax`
+- `Secure` only when `COOKIE_SECURE=true`
+
+### `COOKIE_SECURE` (default `false`)
+Set the `Secure` attribute on issued cookies. Set to `true` in production behind TLS. Leave `false` for local HTTP dev.
+
+### Cross-origin caveat
+Cookies only flow on **same-origin** requests by default. For widgets embedded on a different origin from the captcha service, the operator needs to configure CORS (the default `CorsLayer::permissive()` strips credentialed cookies). Without that, the cookie signal contributes the "Missing" score (+5) for every request.
+
+---
+
+## TLS fingerprint signal
+
+Native TLS inspection (JA3/JA4 in Rust) is intrusive and brittle. This service instead reads a fingerprint set by a trusted reverse proxy. **All three settings below must be set together** for the signal to fire.
+
+### `TLS_FINGERPRINT_HEADER`
+Header name to read, e.g. `x-ja4`. Unset → signal disabled. Header is only read when the request's immediate peer IP is in `TRUSTED_PROXIES` — otherwise direct clients could spoof it.
+
+### `TLS_FINGERPRINT_FILE`
+Path to a file listing known-bad fingerprint values, one per line. `#` comments and blank lines ignored.
+
+**Example:**
+```
+# Bot framework defaults
+t13d1715h2_5b57614c22b0_5c2c66f702b6   # python-requests
+t13d301100_286b2c61aa14_e74b73c89e6c   # go default
+```
+
+Match → +35 to score. Lookup is exact-match on the full fingerprint string.
+
+### `TRUSTED_PROXIES`
+CIDR allowlist of upstream proxies whose `TLS_FINGERPRINT_HEADER` we honor. Comma- or whitespace-separated.
+
+**Example:**
+```
+TRUSTED_PROXIES="10.0.0.0/8,fd00::/8"
+```
+
+Empty/unset → no peer is trusted → signal never fires (boot log will WARN if `TLS_FINGERPRINT_HEADER` is set without trusted proxies).
+
+---
+
+## Putting it all together
+
+A production-leaning configuration:
+
+```bash
+LISTEN_ADDR=0.0.0.0:3000
+DEFAULT_DIFFICULTY=20
+
+# Adaptive escalation tuned a bit more aggressively
+TIER_CHECKBOX_MIN=15
+TIER_HARD_POW_MIN=35
+TIER_BLOCK_MIN=80
+
+# Behavioral checks on
+COOKIE_SIGNING_SECRET=$(openssl rand -hex 32)
+COOKIE_SECURE=true
+VERIFY_SHADOW_MIN=25
+VERIFY_BLOCK_MIN=55
+
+# IP reputation from a maintained list
+IP_REPUTATION_FILE=/etc/rust-captcha/ip_reputation.txt
+
+# TLS fingerprint via Cloudflare
+TLS_FINGERPRINT_HEADER=cf-ja4
+TLS_FINGERPRINT_FILE=/etc/rust-captcha/ja4_blocklist.txt
+TRUSTED_PROXIES="173.245.48.0/20,103.21.244.0/22,..."  # CF ranges
+
+RUST_LOG=rust_captcha=info
+```
+
+For local development, the bare minimum (just the testsite + scoring scaffold):
+
+```bash
+DEFAULT_DIFFICULTY=8 cargo run
+```
+
+Add `COOKIE_SIGNING_SECRET=<16+chars>` to exercise the cookie path in the testsite.

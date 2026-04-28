@@ -432,6 +432,7 @@
               challenge_id: token.challenge_id,
               nonce: token.nonce,
               honeypot: token.honeypot,
+              time_on_page_ms: token.time_on_page_ms,
             }),
           });
           verification = await resp.json();

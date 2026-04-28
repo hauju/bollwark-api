@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::puzzle::types::Algorithm;
-use crate::risk::EscalationTier;
+use crate::risk::{BehaviorReport, EscalationTier};
 
 // --- Requests ---
 
@@ -17,6 +17,14 @@ pub struct VerifyRequest {
     pub nonce: u64,
     #[serde(default)]
     pub honeypot: Option<String>,
+    /// Milliseconds elapsed between widget mount and form submit. Optional —
+    /// callers that don't use the bundled widget may not send this.
+    #[serde(default)]
+    pub time_on_page_ms: Option<u64>,
+    /// Compact behavioural telemetry collected by the widget between mount
+    /// and submit. Absent for non-widget integrations.
+    #[serde(default)]
+    pub behavior: Option<BehaviorReport>,
 }
 
 #[derive(Debug, Deserialize)]
