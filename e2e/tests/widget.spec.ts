@@ -25,6 +25,11 @@ test("happy path: widget solves PoW and verify returns success=true", async ({
     timeout: 30_000,
   });
 
+  // Time-on-page <500ms scores +50 at verify-time. Sit on the page long
+  // enough for that band to fall to 0, otherwise webdriver(+30) + time(+50)
+  // already lands at the verify-time block threshold (60).
+  await page.waitForTimeout(2_500);
+
   await page.fill("#name", "Jane Doe");
   await page.fill("#email", "jane@example.com");
 

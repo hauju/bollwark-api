@@ -92,6 +92,11 @@ test("browser-harness-simulator: organic interactions (mouse + keystrokes) shoul
     timeout: 30_000,
   });
 
+  // Time-on-page <500ms scores +50; combined with webdriver(+30) it crosses
+  // the verify-time block threshold even for an organic Playwright session.
+  // Wait past the 2s short-band cutoff so time-on-page falls to 0 here.
+  await page.waitForTimeout(2_500);
+
   // Real mouse movement + keystrokes
   await page.mouse.move(100, 100);
   await page.mouse.move(200, 200);

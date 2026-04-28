@@ -42,12 +42,11 @@ export default defineConfig({
           TIER_HARD_POW_MIN: "15",
           TIER_VISUAL_MIN: "200",
           TIER_BLOCK_MIN: "250",
-          // Bump verify-time block threshold for tests: Playwright runs much
-          // faster than a real user, so time<500 (+50) + instant (+20) +
-          // webdriver (+30) = 100 every time. The simulator's flatline /
-          // no-pointer pattern still adds enough on top to cross 110, so the
-          // bot/human distinction holds; honeypot (+100) still dominates.
-          VERIFY_BLOCK_MIN: "110",
+          // Verify-time thresholds left at default (shadow_min=30, block_min=60)
+          // so the browser-harness-simulator bot signature (webdriver=30 +
+          // no_pointer=15 + time<500=50 = 95) blocks. Legit tests insert a
+          // waitForTimeout(>2s) before submit so time-on-page lands in the
+          // "0 score" band and they stay below block_min.
           // Let the testsite's autoSetup() call POST /v1/sites without an
           // ADMIN_TOKEN. Debug-build only — the server refuses to honour
           // this in a release binary.
