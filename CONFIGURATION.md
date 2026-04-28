@@ -21,7 +21,7 @@ A `.env` file in the working directory is loaded automatically at startup (via `
 | `CLEANUP_INTERVAL_SECS` | `60` | How often expired challenges are swept |
 | `TIER_CHECKBOX_MIN` | `20` | Score at/above which tier becomes `checkbox` |
 | `TIER_HARD_POW_MIN` | `40` | …becomes `hard_pow` |
-| `TIER_VISUAL_MIN` | `65` | …becomes `visual_challenge` (returns 429) |
+| `TIER_VISUAL_MIN` | `65` | …becomes `visual_challenge` (server returns an image-text captcha; user types the answer) |
 | `TIER_BLOCK_MIN` | `85` | …becomes `block` (returns 429) |
 | `VERIFY_SHADOW_MIN` | `30` | Verify-time score for shadow-fail (success returned, log emitted) |
 | `VERIFY_BLOCK_MIN` | `60` | Verify-time score for hard rejection |
@@ -98,7 +98,7 @@ The puzzle-time scorer adds up contributions from each enabled signal and maps t
 | `0` — `TIER_CHECKBOX_MIN-1` | `invisible_pass` | Issue puzzle at base difficulty; widget solves silently |
 | `TIER_CHECKBOX_MIN` — `TIER_HARD_POW_MIN-1` | `checkbox` | Difficulty +2; widget renders "I'm not a robot" checkbox |
 | `TIER_HARD_POW_MIN` — `TIER_VISUAL_MIN-1` | `hard_pow` | Difficulty +4; same widget UX as checkbox |
-| `TIER_VISUAL_MIN` — `TIER_BLOCK_MIN-1` | `visual_challenge` | Returns `429 Too Many Requests` (visual challenge not implemented) |
+| `TIER_VISUAL_MIN` — `TIER_BLOCK_MIN-1` | `visual_challenge` | Returns `kind=image` puzzle with a base64 PNG (`captcha-rs`, 5 chars). Widget renders image + input; user types the characters and `/v1/verify` validates `text_answer`. No PoW for these. |
 | `TIER_BLOCK_MIN` — | `block` | Returns `429 Too Many Requests` |
 
 Defaults: `20` / `40` / `65` / `85`.

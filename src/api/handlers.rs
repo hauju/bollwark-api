@@ -9,10 +9,11 @@ use axum::response::IntoResponse;
 use crate::config::CookieSameSiteCfg;
 use crate::dashboard::types::{PuzzleRecord, VerifyRecord};
 use crate::error::CaptchaError;
+use crate::puzzle::types::ChallengeKind;
 use crate::risk::cookie::{CookieSameSite, extract_cookie, now_secs, set_cookie_header};
 use crate::risk::{
-    BehaviorPresence, CookiePresence, SignalContext, TlsFingerprint, VerifyContext, VerifyDecision,
-    client_ip, difficulty_for,
+    BehaviorPresence, CookiePresence, EscalationTier, SignalContext, TlsFingerprint,
+    VerifyContext, VerifyDecision, client_ip, difficulty_for,
 };
 use crate::site::types::Site;
 use crate::storage::Store;
@@ -88,16 +89,17 @@ pub async fn get_puzzle(
     };
     let score = state.risk.score(&ctx);
 
-    // Tiers that don't issue a puzzle short-circuit here.
+    // Tiers that don't issue a PoW puzzle (Block always rejects with 429;
+    // VisualChallenge issues an image instead — see below). PoW tiers map
+    // to a difficulty here.
     let maybe_difficulty = difficulty_for(
         score.tier,
         state.config.default_difficulty,
         state.config.max_difficulty,
     );
-    let outcome = if maybe_difficulty.is_some() {
-        "issued"
-    } else {
-        "rejected"
+    let outcome = match score.tier {
+        EscalationTier::Block => "rejected",
+        _ => "issued",
     };
 
     tracing::info!(
@@ -127,8 +129,7 @@ pub async fn get_puzzle(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    let Some(difficulty) = maybe_difficulty else {
-        // VisualChallenge and Block both reject in Phase 1.
+    if score.tier == EscalationTier::Block {
         if let Some(log) = &state.decision_log {
             log.record_puzzle(PuzzleRecord {
                 challenge_id: None,
@@ -147,9 +148,17 @@ pub async fn get_puzzle(
             });
         }
         return Err(CaptchaError::RateLimited);
-    };
+    }
 
-    let challenge = state.engine.generate(params.site_key, difficulty);
+    // Build the challenge. VisualChallenge tier issues an image-text
+    // puzzle (no PoW); every other tier issues a PoW at the tier's
+    // difficulty.
+    let challenge = if score.tier == EscalationTier::VisualChallenge {
+        state.engine.generate_visual(params.site_key)
+    } else {
+        let difficulty = maybe_difficulty.expect("PoW tiers must have a difficulty");
+        state.engine.generate(params.site_key, difficulty)
+    };
 
     if let Some(log) = &state.decision_log {
         log.record_puzzle(PuzzleRecord {
@@ -160,7 +169,7 @@ pub async fn get_puzzle(
             site_count,
             score: score.total,
             tier: score.tier,
-            difficulty,
+            difficulty: challenge.difficulty,
             outcome: "issued",
             breakdown: score.breakdown,
             cookie_presence: format!("{cookie:?}"),
@@ -171,9 +180,11 @@ pub async fn get_puzzle(
 
     let response = PuzzleResponse {
         challenge_id: challenge.id,
+        kind: challenge.kind,
         algorithm: challenge.algorithm,
         prefix: challenge.prefix.clone(),
         difficulty: challenge.difficulty,
+        image: challenge.visual_image.clone(),
         expires_at: challenge.expires_at.to_rfc3339(),
         tier: score.tier,
     };
@@ -235,13 +246,26 @@ pub async fn verify(
         return Err(CaptchaError::ChallengeAlreadyUsed);
     }
 
-    // Verify proof-of-work
-    let pow_valid = state.engine.verify(&challenge, body.nonce);
+    // Verify the puzzle. PoW challenges check the nonce against the
+    // hash target; image challenges compare the typed text to the
+    // server-stored expected answer. The "puzzle invalid" outcome is
+    // logged with a kind-aware label so the dashboard can distinguish
+    // brute-force misses from typos.
+    let (puzzle_valid, invalid_outcome) = match challenge.kind {
+        ChallengeKind::Pow => (state.engine.verify(&challenge, body.nonce), "pow_invalid"),
+        ChallengeKind::Image => {
+            let answer = body.text_answer.as_deref().unwrap_or("");
+            (
+                state.engine.verify_visual(&challenge, answer),
+                "visual_invalid",
+            )
+        }
+    };
 
-    if !pow_valid {
+    if !puzzle_valid {
         tracing::info!(
             event = "verify_decision",
-            outcome = "pow_invalid",
+            outcome = invalid_outcome,
             challenge_id = %challenge.id,
             success = false,
             "Verify decision"
@@ -250,7 +274,7 @@ pub async fn verify(
             log.record_verify(VerifyRecord {
                 challenge_id: challenge.id,
                 success: false,
-                outcome: "pow_invalid",
+                outcome: invalid_outcome,
                 score: 0,
                 breakdown: Default::default(),
                 time_on_page_ms: body.time_on_page_ms,

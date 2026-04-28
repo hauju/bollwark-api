@@ -20,7 +20,7 @@ A `justfile` wraps these (`just build`, `just test`, `just lint`, `just ci`). `j
 
 ### Observability & validation harnesses
 
-- `LOG_FORMAT=json cargo run` emits structured JSONL on stderr. Decision events: `event=puzzle_decision` (per `/v1/puzzle`, with score / tier / signal breakdown / outcome=`issued|rejected`) and `event=verify_decision` (per `/v1/verify`, with score / decision-derived outcome=`pass|shadow_fail|block|pow_invalid` and the verify-side breakdown). Use `jq -c 'select(.event == "puzzle_decision")'` for clean parsing.
+- `LOG_FORMAT=json cargo run` emits structured JSONL on stderr. Decision events: `event=puzzle_decision` (per `/v1/puzzle`, with score / tier / signal breakdown / outcome=`issued|rejected`; visual-tier puzzles log `outcome=issued` with `difficulty=0`) and `event=verify_decision` (per `/v1/verify`, with score / decision-derived outcome=`pass|shadow_fail|block|pow_invalid|visual_invalid` and the verify-side breakdown). Use `jq -c 'select(.event == "puzzle_decision")'` for clean parsing.
 - `cargo run --release --example loadgen -- --base http://127.0.0.1:3000 --requests 200 --concurrency 16` drives 4 synthetic scenarios (`happy`, `no_ua`, `burst`, `full_solve`) and prints latency percentiles + tier distribution per scenario. Use `--only` to pick a subset. `full_solve` does real PoW on the client, so run the server with `DEFAULT_DIFFICULTY=12 MIN_DIFFICULTY=8 MAX_DIFFICULTY=16` to keep solve times sub-second.
 - `cd e2e && bun install && bunx playwright install chromium && bun run test` runs Playwright against `static/testsite.html`. Auto-spawns `cargo run` itself; set `CAPTCHA_REUSE_SERVER=1` to reuse a server you already started (so you can capture its JSONL).
 
@@ -45,12 +45,12 @@ Self-hostable proof-of-work CAPTCHA service. Clients solve SHA-256 puzzles (find
 
 Two scoring passes bracket every successful solve:
 
-1. **Puzzle-time** (`GET /v1/puzzle`): score the request, pick an `EscalationTier`, either issue a puzzle at a tier-adjusted difficulty or short-circuit with `429`.
-2. **Verify-time** (`POST /v1/verify`): after the PoW check passes, run a second scoring pass on signals only available at submit (time-on-page, cookie age now, honeypot, behavioural telemetry). Decision is `Pass` / `ShadowFail` (return `success: true` but emit a WARN log) / `Block` (return `success: false`).
+1. **Puzzle-time** (`GET /v1/puzzle`): score the request, pick an `EscalationTier`, then either issue a PoW puzzle at a tier-adjusted difficulty, issue an image-text (visual) challenge for the `VisualChallenge` tier, or short-circuit with `429` for the `Block` tier.
+2. **Verify-time** (`POST /v1/verify`): after the puzzle check passes (PoW nonce or visual text), run a second scoring pass on signals only available at submit (time-on-page, cookie age now, honeypot, behavioural telemetry). Decision is `Pass` / `ShadowFail` (return `success: true` but emit a WARN log) / `Block` (return `success: false`).
 
 ### Module Layout
 
-- **`puzzle/`** — Core PoW engine. `challenge.rs` generates challenges and verifies solutions, dispatching on `Algorithm` (SHA-256 via `compute_sha256` or Argon2id via `compute_argon2id`) and reusing `has_leading_zero_bits()` for both. `difficulty.rs` is the legacy adaptive-difficulty calculator (still constructed in `AppState` but superseded by the risk pipeline). `solve_challenge()` / `solve_argon2id_challenge()` are brute-force solvers used only in tests.
+- **`puzzle/`** — Core puzzle engine. `challenge.rs` generates and verifies puzzles. PoW: `generate()` + `verify()` dispatch on `Algorithm` (SHA-256 via `compute_sha256` or Argon2id via `compute_argon2id`) and reuse `has_leading_zero_bits()` for both. Visual: `generate_visual()` builds an image-text captcha via the `captcha-rs` crate (5-character, 220×60px PNG) and stores both the rendered image and the lowercased expected answer on the `Challenge`; `verify_visual()` does a normalised constant-time compare. `Challenge.kind` (`Pow` / `Image`) is the discriminator at verify-time. `difficulty.rs` is the legacy adaptive-difficulty calculator (still constructed in `AppState` but superseded by the risk pipeline). `solve_challenge()` / `solve_argon2id_challenge()` are brute-force solvers used only in tests.
 - **`risk/`** — Scoring + escalation. Each signal lives in its own module so it can be disabled by config:
   - `signals.rs` — always-on scorers: `score_rate` (per-IP + per-site, 60s window) and `score_header_anomaly` (UA / Accept-Language / Accept-Encoding). Also defines `CookiePresence` and `score_cookie_age`.
   - `reputation.rs` — `CidrListReputation` loaded from `IP_REPUTATION_FILE`; categories `tor`/`datacenter`/`vpn`/`residential`.
@@ -72,8 +72,8 @@ Two scoring passes bracket every successful solve:
 
 | Endpoint | Auth | Purpose |
 |---|---|---|
-| `GET /v1/puzzle?site_key=<uuid>` | None | Score request, issue a PoW challenge (or 429 if tier ≥ `VisualChallenge`). May set `__captcha_trust` cookie. |
-| `POST /v1/verify` | Bearer (site secret) | Verify a solution server-to-server. Body fields: `challenge_id`, `nonce`, optional `honeypot`, optional `time_on_page_ms`, optional `behavior`. |
+| `GET /v1/puzzle?site_key=<uuid>` | None | Score request and issue a puzzle. Returns `kind=pow` (with `algorithm`/`prefix`/`difficulty`) for tiers up to `HardPow`, `kind=image` (with a base64 PNG `image` data URL) for `VisualChallenge`, or `429` for `Block`. May set `__captcha_trust` cookie. |
+| `POST /v1/verify` | Bearer (site secret) | Verify a solution server-to-server. Body fields: `challenge_id`, plus either `nonce` (for `kind=pow`) or `text_answer` (for `kind=image`). Optional `honeypot`, `time_on_page_ms`, `behavior`. |
 | `POST /v1/sites` | Bearer (`ADMIN_TOKEN`) | Register a site, returns site_key + secret. Returns 404 when `ADMIN_TOKEN` is unset. |
 | `GET /healthz` | None | Liveness probe. Returns `200 ok`. |
 | `GET /v1/admin/sessions` | Bearer (`ADMIN_TOKEN`) | List recent puzzle/verify sessions for the dashboard. Only mounted when `ADMIN_DB_PATH` is set. |

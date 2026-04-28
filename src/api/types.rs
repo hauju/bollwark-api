@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::puzzle::types::Algorithm;
+use crate::puzzle::types::{Algorithm, ChallengeKind};
 use crate::risk::{BehaviorReport, EscalationTier};
 
 // --- Requests ---
@@ -14,7 +14,15 @@ pub struct GetPuzzleParams {
 #[derive(Debug, Deserialize)]
 pub struct VerifyRequest {
     pub challenge_id: Uuid,
+    /// PoW nonce. Required for `kind=pow` challenges; ignored for
+    /// `kind=image` (defaults to 0 so visual-only clients don't need to
+    /// send a placeholder).
+    #[serde(default)]
     pub nonce: u64,
+    /// User-typed answer for visual (image-text) challenges. Required when
+    /// the challenge is `kind=image`; ignored for `kind=pow`.
+    #[serde(default)]
+    pub text_answer: Option<String>,
     #[serde(default)]
     pub honeypot: Option<String>,
     /// Milliseconds elapsed between widget mount and form submit. Optional —
@@ -37,9 +45,19 @@ pub struct CreateSiteRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PuzzleResponse {
     pub challenge_id: Uuid,
+    /// Discriminator for the puzzle type. `pow` (default for backward-compat)
+    /// uses `algorithm`/`prefix`/`difficulty` and is solved by the worker;
+    /// `image` uses `image` (a base64 PNG data URL) and is solved by the
+    /// user reading and typing the characters.
+    #[serde(default)]
+    pub kind: ChallengeKind,
     pub algorithm: Algorithm,
     pub prefix: String,
     pub difficulty: u32,
+    /// Base64 PNG data URL of a visual challenge. Present only when
+    /// `kind == image`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
     pub expires_at: String,
     pub tier: EscalationTier,
 }

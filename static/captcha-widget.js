@@ -189,6 +189,13 @@
 
     // Branch the visible UI based on the tier the server assigned.
     _renderForTier() {
+      // Visual challenge: server returned an image-text captcha. Hide the
+      // checkbox row and render the image + input UI; the user reads the
+      // characters and types the answer instead of running PoW.
+      if (this.puzzle && this.puzzle.kind === "image") {
+        this._renderVisualChallenge();
+        return;
+      }
       if (this.tier === "invisible_pass") {
         this.row.style.display = "none";
         this.label.textContent = "Verifying…";
@@ -198,6 +205,90 @@
         // checkbox / hard_pow / unknown future tier → user clicks to solve
         this.row.style.display = "";
         this._updateUI();
+      }
+    }
+
+    // Render the image-text challenge UI: a captcha PNG, a text input,
+    // and a submit button. The user types what they see; on submit the
+    // widget stores the answer in the form-bound hidden input so the
+    // host page can forward it to /v1/verify exactly like the PoW path.
+    _renderVisualChallenge() {
+      this.row.style.display = "none";
+      this.statusEl.textContent = "";
+
+      // Idempotent: tear down a previous visual UI if `reset()` cycled us.
+      if (this._visualEl) {
+        this._visualEl.remove();
+        this._visualEl = null;
+      }
+
+      const wrap = document.createElement("div");
+      wrap.className = "rc-captcha-visual";
+
+      const prompt = document.createElement("div");
+      prompt.className = "rc-captcha-visual-prompt";
+      prompt.textContent = "Type the characters you see:";
+
+      const img = document.createElement("img");
+      img.className = "rc-captcha-visual-image";
+      img.alt = "captcha";
+      img.src = this.puzzle.image;
+
+      const form = document.createElement("form");
+      form.className = "rc-captcha-visual-form";
+      form.addEventListener("submit", (e) => {
+        e.preventDefault();
+        this._onVisualSubmit();
+      });
+
+      const input = document.createElement("input");
+      input.type = "text";
+      input.className = "rc-captcha-visual-input";
+      input.autocomplete = "off";
+      input.autocapitalize = "off";
+      input.spellcheck = false;
+      input.maxLength = 16;
+      input.placeholder = "ABCDE";
+
+      const button = document.createElement("button");
+      button.type = "submit";
+      button.className = "rc-captcha-visual-button";
+      button.textContent = "Verify";
+
+      form.appendChild(input);
+      form.appendChild(button);
+
+      wrap.appendChild(prompt);
+      wrap.appendChild(img);
+      wrap.appendChild(form);
+
+      // Insert before the status element so debug details stay at the bottom.
+      this.container.insertBefore(wrap, this.statusEl);
+      this._visualEl = wrap;
+      this._visualInput = input;
+      this._visualButton = button;
+      input.focus();
+    }
+
+    _onVisualSubmit() {
+      if (!this.puzzle || !this._visualInput) return;
+      const answer = this._visualInput.value.trim();
+      if (!answer) {
+        this.statusEl.textContent = "Please type the characters above.";
+        return;
+      }
+      this._textAnswer = answer;
+      this.state = "verified";
+      this._visualButton.disabled = true;
+      this._visualInput.disabled = true;
+      this.statusEl.textContent = "Submitting answer…";
+      this._injectToken(this.puzzle.challenge_id, 0);
+      if (this.onVerify) {
+        this.onVerify({
+          challenge_id: this.puzzle.challenge_id,
+          text_answer: answer,
+          tier: this.tier,
+        });
       }
     }
 
@@ -413,6 +504,7 @@
         time_on_page_ms: Date.now() - this.pageLoadAt,
         behavior: { ...this._behavior },
       };
+      if (this._textAnswer) payload.text_answer = this._textAnswer;
       const honeypotValue = this.honeypot ? this.honeypot.value : "";
       if (honeypotValue) payload.honeypot = honeypotValue;
       this._tokenInput.value = JSON.stringify(payload);
@@ -423,6 +515,13 @@
     reset() {
       this._destroyWorker();
       this._teardownBehaviorListeners();
+      if (this._visualEl) {
+        this._visualEl.remove();
+        this._visualEl = null;
+        this._visualInput = null;
+        this._visualButton = null;
+      }
+      this._textAnswer = null;
       this.state = "idle";
       this.puzzle = null;
       this.tier = null;
