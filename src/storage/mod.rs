@@ -39,6 +39,23 @@ pub trait Store: Send + Sync + 'static {
         secret: &str,
     ) -> impl Future<Output = Result<Option<Site>, CaptchaError>> + Send;
 
+    /// Replace the site's secret_key. Returns the new secret on success.
+    /// Returns `NotFound` if the site doesn't exist. The old secret is
+    /// invalidated immediately — any in-flight `/v1/verify` calls using
+    /// the old secret will fail.
+    fn rotate_site_secret(
+        &self,
+        site_key: &Uuid,
+        new_secret: String,
+    ) -> impl Future<Output = Result<(), CaptchaError>> + Send;
+
+    /// Delete a site. Returns `NotFound` if the site doesn't exist.
+    /// Existing challenges issued to this site are not retroactively
+    /// invalidated — they'll fail at `/v1/verify` time on the secret
+    /// lookup, which is sufficient.
+    fn delete_site(&self, site_key: &Uuid)
+    -> impl Future<Output = Result<(), CaptchaError>> + Send;
+
     fn increment_ip_count(
         &self,
         ip: &IpAddr,

@@ -14,6 +14,7 @@ use serde_json::json;
 
 use super::types::SiteSummary;
 use super::{DecisionLog, Sessions};
+use crate::storage::Store;
 use crate::storage::memory::InMemoryStore;
 
 #[derive(Clone)]
@@ -33,6 +34,11 @@ pub fn router(state: AdminState) -> Router {
         .route("/v1/admin/sessions/{id}", get(get_session))
         .route("/v1/admin/stats", get(get_stats))
         .route("/v1/admin/sites", get(list_sites))
+        .route("/v1/admin/sites/{id}", axum::routing::delete(delete_site))
+        .route(
+            "/v1/admin/sites/{id}/rotate",
+            axum::routing::post(rotate_site),
+        )
         .with_state(state)
 }
 
@@ -152,6 +158,66 @@ async fn list_sites(State(state): State<AdminState>, headers: HeaderMap) -> impl
         .collect();
 
     Json(json!({ "sites": summaries })).into_response()
+}
+
+async fn rotate_site(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_auth(&state, &headers) {
+        return resp;
+    }
+    let site_key = match uuid::Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid site_key").into_response(),
+    };
+    let new_secret = hex::encode(rand::random::<[u8; 32]>());
+    match state
+        .store
+        .rotate_site_secret(&site_key, new_secret.clone())
+        .await
+    {
+        Ok(()) => {
+            tracing::info!(site_key = %site_key, "admin: rotated site secret");
+            Json(json!({ "site_key": site_key.to_string(), "secret_key": new_secret }))
+                .into_response()
+        }
+        Err(crate::error::CaptchaError::NotFound) => {
+            (StatusCode::NOT_FOUND, "site not found").into_response()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "admin rotate_site failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "rotate failed").into_response()
+        }
+    }
+}
+
+async fn delete_site(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_auth(&state, &headers) {
+        return resp;
+    }
+    let site_key = match uuid::Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid site_key").into_response(),
+    };
+    match state.store.delete_site(&site_key).await {
+        Ok(()) => {
+            tracing::info!(site_key = %site_key, "admin: deleted site");
+            Json(json!({ "ok": true })).into_response()
+        }
+        Err(crate::error::CaptchaError::NotFound) => {
+            (StatusCode::NOT_FOUND, "site not found").into_response()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "admin delete_site failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "delete failed").into_response()
+        }
+    }
 }
 
 #[allow(clippy::result_large_err)]

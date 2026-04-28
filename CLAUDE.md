@@ -75,9 +75,20 @@ Two scoring passes bracket every successful solve:
 | `GET /v1/puzzle?site_key=<uuid>` | None | Score request, issue a PoW challenge (or 429 if tier ≥ `VisualChallenge`). May set `__captcha_trust` cookie. |
 | `POST /v1/verify` | Bearer (site secret) | Verify a solution server-to-server. Body fields: `challenge_id`, `nonce`, optional `honeypot`, optional `time_on_page_ms`, optional `behavior`. |
 | `POST /v1/sites` | Bearer (`ADMIN_TOKEN`) | Register a site, returns site_key + secret. Returns 404 when `ADMIN_TOKEN` is unset. |
+| `GET /healthz` | None | Liveness probe. Returns `200 ok`. |
 | `GET /v1/admin/sessions` | Bearer (`ADMIN_TOKEN`) | List recent puzzle/verify sessions for the dashboard. Only mounted when `ADMIN_DB_PATH` is set. |
 | `GET /v1/admin/sessions/:id` | Bearer (`ADMIN_TOKEN`) | Detail for a single session. |
+| `GET /v1/admin/sites` | Bearer (`ADMIN_TOKEN`) | List registered sites with decision-log activity aggregates. Only mounted when `ADMIN_DB_PATH` is set. |
+| `POST /v1/admin/sites/:id/rotate` | Bearer (`ADMIN_TOKEN`) | Issue a new `secret_key` for a site; old one invalidated immediately. |
+| `DELETE /v1/admin/sites/:id` | Bearer (`ADMIN_TOKEN`) | Delete a site. |
 | `GET /v1/admin/sites` | Bearer (`ADMIN_TOKEN`) | List registered sites (no secrets) merged with per-site activity from the decision log. |
+
+### Operational notes
+
+- `main.rs` installs SIGINT + SIGTERM handlers and serves with `with_graceful_shutdown`, so in-flight requests drain on stop. `/healthz` is the liveness probe.
+- The decision-log channel is **bounded** (capacity 8192). The hot path uses `try_send`; on `Full` the record is dropped and a counter increments. Power-of-two thresholds emit a WARN so a sustained backlog is visible without log spam.
+- `COOKIE_SAMESITE=None` is opt-in for cross-origin embeds and requires `COOKIE_SECURE=true` — the boot validator panics on the unsafe combination.
+- Default `DEFAULT_DIFFICULTY` is `18` (was `20`) to keep low-end mobile in the few-seconds range. Tests still use `8` for speed.
 
 ### Key Design Decisions
 

@@ -438,6 +438,22 @@ async fn test_create_site_missing_authorization_unauthorized() {
 }
 
 #[tokio::test]
+async fn test_healthz_ok() {
+    let app = test_app();
+    let req = Request::builder()
+        .method("GET")
+        .uri("/healthz")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&body[..], b"ok");
+}
+
+#[tokio::test]
 async fn test_xff_honored_only_from_trusted_peer() {
     // Trusted-proxy peer (127.0.0.1 in 127/8) sends XFF claiming the
     // original client is 8.8.8.8. The puzzle handler should use 8.8.8.8

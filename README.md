@@ -53,7 +53,9 @@ Open `http://localhost:3000/static/testsite.html` for a working harness that exe
 <script src="https://your-host/static/captcha-widget.js"></script>
 ```
 
-The widget evaluates its risk tier once on mount (matching Turnstile / hCaptcha behaviour), solves the PoW off-thread, and writes the resulting token into a hidden `cf-turnstile-response`-style input on submit. Your backend then calls `POST /v1/verify` with the site secret to confirm.
+The widget evaluates its risk tier once on mount (matching Turnstile / hCaptcha behaviour), solves the PoW off-thread, and writes the resulting token into a hidden `<input name="captcha-token">` on submit. Your backend then calls `POST /v1/verify` with the site secret to confirm.
+
+> **Token contract:** Unlike Turnstile/hCaptcha which return an opaque string, this widget writes a **JSON blob** of the form `{"challenge_id": "...", "nonce": 12345, "time_on_page_ms": 4200, "behavior": {...}, "honeypot": ""}` into the hidden input. Your form handler must `JSON.parse` it server-side and forward the fields verbatim in the `/v1/verify` body. (The opaque-token wrapper is a planned change — see issues.)
 
 ## API
 
@@ -62,7 +64,11 @@ The widget evaluates its risk tier once on mount (matching Turnstile / hCaptcha 
 | `POST /v1/sites` | Bearer (`ADMIN_TOKEN`) | Register a site. Returns `{ site_key, secret_key }`. Returns 404 when `ADMIN_TOKEN` is unset. |
 | `GET /v1/puzzle?site_key=<uuid>` | None | Score the request and either issue a puzzle or short-circuit with `429` when the tier is `visual_challenge` or `block`. May set the `__captcha_trust` cookie. |
 | `POST /v1/verify` | Bearer (site secret) | Verify a solution. Body: `challenge_id`, `nonce`, optional `honeypot`, `time_on_page_ms`, `behavior`. |
+| `GET /healthz` | None | Liveness probe. Always returns `200 ok`. |
 | `GET /v1/admin/sessions[/:id]` | Bearer (`ADMIN_TOKEN`) | Decision log read API. Mounted only when `ADMIN_DB_PATH` is set. |
+| `GET /v1/admin/sites` | Bearer (`ADMIN_TOKEN`) | List registered sites with activity aggregates from the decision log. |
+| `POST /v1/admin/sites/:id/rotate` | Bearer (`ADMIN_TOKEN`) | Generate a new `secret_key` for a site; the old one is invalidated immediately. |
+| `DELETE /v1/admin/sites/:id` | Bearer (`ADMIN_TOKEN`) | Delete a site. Future `/v1/verify` calls with its secret will fail. |
 
 Static assets (`captcha-widget.js`, `captcha-widget.css`, `captcha-worker.js`, `admin.html`, `testsite.html`) are served from `/static/`.
 

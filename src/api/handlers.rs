@@ -6,9 +6,10 @@ use axum::http::HeaderMap;
 use axum::http::header::{AUTHORIZATION, COOKIE, HeaderValue, SET_COOKIE, USER_AGENT};
 use axum::response::IntoResponse;
 
+use crate::config::CookieSameSiteCfg;
 use crate::dashboard::types::{PuzzleRecord, VerifyRecord};
 use crate::error::CaptchaError;
-use crate::risk::cookie::{extract_cookie, now_secs, set_cookie_header};
+use crate::risk::cookie::{CookieSameSite, extract_cookie, now_secs, set_cookie_header};
 use crate::risk::{
     BehaviorPresence, CookiePresence, SignalContext, TlsFingerprint, VerifyContext, VerifyDecision,
     client_ip, difficulty_for,
@@ -181,7 +182,11 @@ pub async fn get_puzzle(
 
     let mut response_headers = HeaderMap::new();
     if let Some(token) = new_cookie_token {
-        let cookie = set_cookie_header(&token, state.config.cookie_secure);
+        let same_site = match state.config.cookie_samesite {
+            CookieSameSiteCfg::Lax => CookieSameSite::Lax,
+            CookieSameSiteCfg::None => CookieSameSite::None,
+        };
+        let cookie = set_cookie_header(&token, state.config.cookie_secure, same_site);
         if let Ok(value) = HeaderValue::from_str(&cookie) {
             response_headers.insert(SET_COOKIE, value);
         }

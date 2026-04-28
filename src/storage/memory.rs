@@ -216,6 +216,76 @@ impl Store for InMemoryStore {
         }
     }
 
+    async fn rotate_site_secret(
+        &self,
+        site_key: &Uuid,
+        new_secret: String,
+    ) -> Result<(), CaptchaError> {
+        // Persist first; on success, swap in-memory. On UNIQUE collision
+        // (vanishingly rare for 32-byte random secrets) the in-memory
+        // state is unchanged.
+        if let Some(persist) = &self.site_persistence {
+            let conn = persist.lock().map_err(lock_err)?;
+            let updated = conn
+                .execute(
+                    "UPDATE sites SET secret_key = ?1 WHERE site_key = ?2",
+                    params![new_secret, site_key.to_string()],
+                )
+                .map_err(|e| CaptchaError::Storage(format!("rotate site secret: {e}")))?;
+            if updated == 0 {
+                return Err(CaptchaError::NotFound);
+            }
+        }
+
+        let mut by_key = self.sites_by_key.write().map_err(lock_err)?;
+        let mut by_secret = self.sites_by_secret.write().map_err(lock_err)?;
+        let Some(site) = by_key.get_mut(site_key) else {
+            // The persistence layer already accepted the UPDATE — but the
+            // in-memory map doesn't know about this site. That's a state
+            // inconsistency we should never hit in practice (rows in the
+            // DB are loaded into memory at boot, every store_site writes
+            // both). Surface as Storage rather than NotFound.
+            if self.site_persistence.is_some() {
+                return Err(CaptchaError::Storage(
+                    "site persisted update with no in-memory row".into(),
+                ));
+            }
+            return Err(CaptchaError::NotFound);
+        };
+        let old_secret = std::mem::replace(&mut site.secret_key, new_secret.clone());
+        by_secret.remove(&old_secret);
+        by_secret.insert(new_secret, *site_key);
+        Ok(())
+    }
+
+    async fn delete_site(&self, site_key: &Uuid) -> Result<(), CaptchaError> {
+        if let Some(persist) = &self.site_persistence {
+            let conn = persist.lock().map_err(lock_err)?;
+            let deleted = conn
+                .execute(
+                    "DELETE FROM sites WHERE site_key = ?1",
+                    params![site_key.to_string()],
+                )
+                .map_err(|e| CaptchaError::Storage(format!("delete site: {e}")))?;
+            if deleted == 0 {
+                return Err(CaptchaError::NotFound);
+            }
+        }
+
+        let mut by_key = self.sites_by_key.write().map_err(lock_err)?;
+        let mut by_secret = self.sites_by_secret.write().map_err(lock_err)?;
+        let Some(site) = by_key.remove(site_key) else {
+            if self.site_persistence.is_some() {
+                return Err(CaptchaError::Storage(
+                    "site persisted delete with no in-memory row".into(),
+                ));
+            }
+            return Err(CaptchaError::NotFound);
+        };
+        by_secret.remove(&site.secret_key);
+        Ok(())
+    }
+
     async fn increment_ip_count(&self, ip: &IpAddr) -> Result<u32, CaptchaError> {
         let mut map = self.ip_rates.write().map_err(lock_err)?;
         let now = Utc::now().timestamp();
@@ -299,9 +369,12 @@ mod tests {
     }
 
     fn make_site() -> Site {
+        // Random secret so two sites in the same test don't collide on
+        // the UNIQUE constraint when persistence is enabled.
+        let secret = format!("secret-{}", Uuid::new_v4().simple());
         Site {
             site_key: Uuid::new_v4(),
-            secret_key: "secret123".into(),
+            secret_key: secret,
             name: "Test Site".into(),
             created_at: Utc::now(),
         }
@@ -397,6 +470,110 @@ mod tests {
 
         assert_eq!(store.increment_site_count(&site_key).await.unwrap(), 1);
         assert_eq!(store.increment_site_count(&site_key).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_rotate_site_secret_in_memory() {
+        let store = InMemoryStore::new();
+        let site = make_site();
+        store.store_site(&site).await.unwrap();
+
+        let new_secret = "rotated-secret".to_string();
+        store
+            .rotate_site_secret(&site.site_key, new_secret.clone())
+            .await
+            .unwrap();
+
+        // Old secret no longer resolves.
+        assert!(
+            store
+                .get_site_by_secret(&site.secret_key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // New secret resolves.
+        let by_new = store
+            .get_site_by_secret(&new_secret)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_new.site_key, site.site_key);
+        assert_eq!(by_new.secret_key, new_secret);
+    }
+
+    #[tokio::test]
+    async fn test_rotate_site_secret_not_found() {
+        let store = InMemoryStore::new();
+        let result = store.rotate_site_secret(&Uuid::new_v4(), "x".into()).await;
+        assert!(matches!(result, Err(CaptchaError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn test_delete_site_in_memory() {
+        let store = InMemoryStore::new();
+        let site = make_site();
+        store.store_site(&site).await.unwrap();
+
+        store.delete_site(&site.site_key).await.unwrap();
+
+        assert!(
+            store
+                .get_site_by_key(&site.site_key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .get_site_by_secret(&site.secret_key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_site_not_found() {
+        let store = InMemoryStore::new();
+        let result = store.delete_site(&Uuid::new_v4()).await;
+        assert!(matches!(result, Err(CaptchaError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn test_rotate_and_delete_persist_across_reopen() {
+        let dir = tempdir();
+        let path = dir.join("sites.db");
+
+        let site_a = make_site();
+        let site_b = make_site();
+        {
+            let store = InMemoryStore::with_site_persistence(&path).unwrap();
+            store.store_site(&site_a).await.unwrap();
+            store.store_site(&site_b).await.unwrap();
+            store
+                .rotate_site_secret(&site_a.site_key, "rotated".into())
+                .await
+                .unwrap();
+            store.delete_site(&site_b.site_key).await.unwrap();
+        }
+
+        let store = InMemoryStore::with_site_persistence(&path).unwrap();
+        assert_eq!(store.site_count(), 1);
+        let reloaded = store
+            .get_site_by_secret("rotated")
+            .await
+            .unwrap()
+            .expect("rotated secret resolves after reopen");
+        assert_eq!(reloaded.site_key, site_a.site_key);
+        assert!(
+            store
+                .get_site_by_key(&site_b.site_key)
+                .await
+                .unwrap()
+                .is_none(),
+            "deleted site should not reload"
+        );
     }
 
     #[tokio::test]

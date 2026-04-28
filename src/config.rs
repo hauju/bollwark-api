@@ -3,6 +3,15 @@ use std::net::SocketAddr;
 
 use crate::puzzle::types::{Algorithm, Argon2idParams};
 
+/// Operator-facing `SameSite` setting. Mirrors `risk::cookie::CookieSameSite`
+/// but lives in config so the cookie module doesn't depend on env parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CookieSameSiteCfg {
+    #[default]
+    Lax,
+    None,
+}
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub listen_addr: SocketAddr,
@@ -27,6 +36,13 @@ pub struct AppConfig {
     pub cookie_signing_secret: Option<String>,
     /// Set the `Secure` attribute on issued cookies. Defaults to false (local dev / HTTP).
     pub cookie_secure: bool,
+    /// `SameSite` attribute on the issued trust cookie. `Lax` (default) means
+    /// the cookie is omitted on cross-origin embeds; `None` makes it flow on
+    /// every cross-site request and is required when the captcha widget is
+    /// hosted on a different origin from the embedding form. Browsers refuse
+    /// `SameSite=None` without `Secure`, so the service refuses to start in
+    /// that combination.
+    pub cookie_samesite: CookieSameSiteCfg,
     /// Verify-time score at/above which the request is shadow-failed (success
     /// returned, log emitted). Default 30.
     pub verify_shadow_min: u32,
@@ -78,7 +94,7 @@ impl AppConfig {
             default_difficulty: env::var("DEFAULT_DIFFICULTY")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(20),
+                .unwrap_or(18),
             min_difficulty: env::var("MIN_DIFFICULTY")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -117,6 +133,7 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(false),
+            cookie_samesite: parse_samesite(env::var("COOKIE_SAMESITE").ok().as_deref()),
             verify_shadow_min: env::var("VERIFY_SHADOW_MIN")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -146,12 +163,23 @@ fn parse_truthy(v: Option<&str>) -> bool {
     )
 }
 
+fn parse_samesite(v: Option<&str>) -> CookieSameSiteCfg {
+    match v.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("none") => CookieSameSiteCfg::None,
+        Some("lax") | None => CookieSameSiteCfg::Lax,
+        Some(other) => {
+            eprintln!("COOKIE_SAMESITE={other:?} is unknown — defaulting to Lax");
+            CookieSameSiteCfg::Lax
+        }
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
             puzzle_algorithm: Algorithm::Sha256,
-            default_difficulty: 20,
+            default_difficulty: 18,
             min_difficulty: 16,
             max_difficulty: 28,
             challenge_ttl_secs: 300,
@@ -163,6 +191,7 @@ impl Default for AppConfig {
             ip_reputation_file: None,
             cookie_signing_secret: None,
             cookie_secure: false,
+            cookie_samesite: CookieSameSiteCfg::Lax,
             verify_shadow_min: 30,
             verify_block_min: 60,
             tls_fingerprint_header: None,

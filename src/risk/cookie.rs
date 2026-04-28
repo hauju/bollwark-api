@@ -68,11 +68,33 @@ pub fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// `SameSite` attribute for the trust cookie. `Lax` (default) means the
+/// cookie only flows on top-level same-origin navigation; widget iframes
+/// embedded on a different origin won't see it. `None` makes the cookie
+/// flow on every cross-origin request — required for cross-origin embeds —
+/// but browsers reject `SameSite=None` without `Secure`, so the cookie
+/// signal silently breaks if HTTPS isn't terminated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CookieSameSite {
+    Lax,
+    None,
+}
+
+impl CookieSameSite {
+    fn as_attribute(&self) -> &'static str {
+        match self {
+            Self::Lax => "Lax",
+            Self::None => "None",
+        }
+    }
+}
+
 /// Build the `Set-Cookie` header value for a freshly-issued trust cookie.
 /// `secure=false` for local dev (HTTP); set true behind TLS.
-pub fn set_cookie_header(token: &str, secure: bool) -> String {
+pub fn set_cookie_header(token: &str, secure: bool, same_site: CookieSameSite) -> String {
     let mut s = format!(
-        "{COOKIE_NAME}={token}; Max-Age={COOKIE_MAX_AGE_SECS}; Path=/; HttpOnly; SameSite=Lax"
+        "{COOKIE_NAME}={token}; Max-Age={COOKIE_MAX_AGE_SECS}; Path=/; HttpOnly; SameSite={}",
+        same_site.as_attribute()
     );
     if secure {
         s.push_str("; Secure");
@@ -164,13 +186,20 @@ mod tests {
 
     #[test]
     fn set_cookie_format() {
-        let s = set_cookie_header("tok", false);
+        let s = set_cookie_header("tok", false, CookieSameSite::Lax);
         assert!(s.contains("__captcha_trust=tok"));
         assert!(s.contains("HttpOnly"));
         assert!(s.contains("SameSite=Lax"));
         assert!(!s.contains("Secure"));
 
-        let s2 = set_cookie_header("tok", true);
+        let s2 = set_cookie_header("tok", true, CookieSameSite::Lax);
         assert!(s2.contains("Secure"));
+    }
+
+    #[test]
+    fn set_cookie_samesite_none() {
+        let s = set_cookie_header("tok", true, CookieSameSite::None);
+        assert!(s.contains("SameSite=None"));
+        assert!(s.contains("Secure"));
     }
 }

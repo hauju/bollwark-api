@@ -14,7 +14,7 @@ A `.env` file in the working directory is loaded automatically at startup (via `
 | `ARGON2_M_COST` | `8192` | Argon2id memory cost in KiB (when `PUZZLE_ALGORITHM=argon2id`) |
 | `ARGON2_T_COST` | `2` | Argon2id iteration count |
 | `ARGON2_P_COST` | `1` | Argon2id lanes / parallelism |
-| `DEFAULT_DIFFICULTY` | `20` | Base PoW difficulty (leading zero bits). For Argon2id, drop to `4`–`6`. |
+| `DEFAULT_DIFFICULTY` | `18` | Base PoW difficulty (leading zero bits). ~250–500ms on a modern CPU; ~3–5s on low-end mobile in a Web Worker. For Argon2id, drop to `4`–`6`. |
 | `MIN_DIFFICULTY` | `16` | Lower clamp on adaptive difficulty |
 | `MAX_DIFFICULTY` | `28` | Upper clamp on adaptive difficulty |
 | `CHALLENGE_TTL_SECS` | `300` | How long an issued puzzle is valid |
@@ -28,6 +28,7 @@ A `.env` file in the working directory is loaded automatically at startup (via `
 | `IP_REPUTATION_FILE` | _unset_ | Path to CIDR reputation list (signal off if unset) |
 | `COOKIE_SIGNING_SECRET` | _unset_ | HMAC secret for trust cookies (≥16 bytes; signal off if unset) |
 | `COOKIE_SECURE` | `false` | Set the `Secure` attribute on issued cookies |
+| `COOKIE_SAMESITE` | `Lax` | `Lax` or `None`. Use `None` for cross-origin embeds; requires `COOKIE_SECURE=true` (boot panics otherwise). |
 | `TLS_FINGERPRINT_HEADER` | _unset_ | Header to read TLS fingerprint from (signal off if unset) |
 | `TLS_FINGERPRINT_FILE` | _unset_ | Path to known-bad fingerprint blocklist |
 | `TRUSTED_PROXIES` | _unset_ | CIDR allowlist of peers whose `TLS_FINGERPRINT_HEADER` we honor |
@@ -60,8 +61,17 @@ Standard `tracing-subscriber` env filter. Useful targets:
 
 PoW difficulty is the number of **leading zero bits** the SHA-256 hash of `prefix || nonce` must have. Each additional bit roughly doubles the expected solve time.
 
-### `DEFAULT_DIFFICULTY` (default `20`)
-Base difficulty for `invisible_pass` tier. ~1s on a modern CPU at 20.
+### `DEFAULT_DIFFICULTY` (default `18`)
+Base difficulty for `invisible_pass` tier. Each additional bit doubles expected solve time:
+
+| Difficulty | Modern CPU | Low-end mobile (Web Worker) |
+|---|---|---|
+| 16 | ~100ms | ~1–2s |
+| 18 | ~300ms | ~3–5s |
+| 20 | ~1s | ~10–15s |
+| 22 | ~4s | timeout territory |
+
+The default `18` trades a bit of bot resistance for materially better mobile UX. Bump to `20` if you have telemetry showing your audience is desktop-heavy.
 
 ### `MIN_DIFFICULTY` (default `16`) / `MAX_DIFFICULTY` (default `28`)
 Clamp the final difficulty. The risk tier can bump difficulty above `DEFAULT_DIFFICULTY`:
@@ -191,8 +201,11 @@ The cookie is opaque and stateless — the server doesn't track issued cookies a
 ### `COOKIE_SECURE` (default `false`)
 Set the `Secure` attribute on issued cookies. Set to `true` in production behind TLS. Leave `false` for local HTTP dev.
 
-### Cross-origin caveat
-Cookies only flow on **same-origin** requests by default. For widgets embedded on a different origin from the captcha service, the operator needs to configure CORS (the default `CorsLayer::permissive()` strips credentialed cookies). Without that, the cookie signal contributes the "Missing" score (+5) for every request.
+### `COOKIE_SAMESITE` (default `Lax`)
+- `Lax` — cookie only flows on top-level same-origin navigation. Embedded widgets on a different origin from the captcha service won't see it; the cookie signal silently degrades to "missing" (+5) for those requests.
+- `None` — cookie flows on every cross-site request. Required for cross-origin embeds. Browsers refuse `SameSite=None` without `Secure`, so the service **panics at boot** if `COOKIE_SAMESITE=None` is combined with `COOKIE_SECURE=false`.
+
+For cross-origin embeds you also need to set `CORS_ALLOWED_ORIGINS` to the embedder's origin (a wildcard origin can't be combined with credentials).
 
 ---
 
@@ -270,9 +283,22 @@ Cloudflare's `CF-Connecting-IP` is **not** read; configure the upstream to put t
 
 ---
 
+## Liveness & shutdown
+
+### `GET /healthz`
+Always returns `200 ok`. No auth, no state read — suitable as a Kubernetes / Docker / load-balancer liveness probe. Doesn't gate on dependency health (a degraded SQLite shouldn't pull the pod out of rotation; the dashboard surfaces backend errors via tracing instead).
+
+### Graceful shutdown
+The server installs SIGINT (Ctrl-C) and SIGTERM handlers and shuts down via `axum::serve(...).with_graceful_shutdown(...)`. In-flight requests complete; new connections are refused after the signal. Operators using systemd / Kubernetes should expect a clean drain on stop.
+
+---
+
 ## Validation dashboard
 
 A self-hosted dashboard that lets you inspect every puzzle and verify decision in a browser. Persists to SQLite so history survives restarts.
+
+### Decision-log channel
+Decisions are written from the request handler through a **bounded** mpsc channel (capacity 8192) to a dedicated SQLite writer thread. The hot path uses `try_send`, so when the writer falls behind the queue fills and subsequent records are dropped (with a rate-limited WARN — emitted at every power-of-two threshold so logs don't drown). Operators can read `DecisionLog::dropped_count()` if they want to surface it; in steady state this should be zero.
 
 ### `ADMIN_DB_PATH`
 Path to the SQLite database file. Created on first run; uses WAL mode so reads don't block writes. When unset, decision logging and admin endpoints are both disabled.

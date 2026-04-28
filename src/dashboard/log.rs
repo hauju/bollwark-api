@@ -1,15 +1,26 @@
 //! Decision writer. Owns a single SQLite connection on a dedicated thread
-//! and consumes decisions from an unbounded channel. Handlers never block
-//! on disk: `record_*` is a non-fallible channel send.
+//! and consumes decisions from a bounded channel. Handlers never block on
+//! disk: `record_*` is a non-blocking `try_send` — when the writer is
+//! falling behind and the queue is full, decisions are dropped (with a
+//! rate-limited WARN) rather than allowed to push back on the request
+//! handler or grow RAM unbounded.
 
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 use rusqlite::{Connection, params};
-use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::{Sender, channel, error::TrySendError};
 use tokio::sync::oneshot;
 
 use super::types::{PuzzleRecord, VerifyRecord};
+
+/// Bounded channel capacity. At ~200 bytes per record this is ~1.6 MB of
+/// queued state, which absorbs short bursts (10k decisions in a few seconds)
+/// without OOMing the process. Steady-state throughput is determined by
+/// SQLite write speed, not the channel.
+const CHANNEL_CAPACITY: usize = 8192;
 
 const SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS puzzle_decisions (
@@ -66,8 +77,11 @@ enum Msg {
 
 #[derive(Clone)]
 pub struct DecisionLog {
-    sender: UnboundedSender<Msg>,
+    sender: Sender<Msg>,
     db_path: String,
+    /// Monotonic count of records dropped because the channel was full.
+    /// Exposed for `/v1/admin/stats` and inspection from operators.
+    dropped: Arc<AtomicU64>,
 }
 
 impl DecisionLog {
@@ -80,7 +94,7 @@ impl DecisionLog {
         writer.pragma_update(None, "journal_mode", "WAL")?;
         writer.pragma_update(None, "synchronous", "NORMAL")?;
 
-        let (tx, mut rx) = unbounded_channel::<Msg>();
+        let (tx, mut rx) = channel::<Msg>(CHANNEL_CAPACITY);
 
         // Dedicated OS thread; rusqlite::Connection is not Send across awaits
         // and we want a long-lived owner for the writer.
@@ -115,6 +129,7 @@ impl DecisionLog {
         Ok(Self {
             sender: tx,
             db_path: path_str,
+            dropped: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -122,20 +137,54 @@ impl DecisionLog {
         &self.db_path
     }
 
+    /// Number of records dropped because the writer queue was full.
+    /// Useful for capacity planning — a non-zero value means SQLite
+    /// can't keep up with the request rate.
+    pub fn dropped_count(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+
     pub fn record_puzzle(&self, record: PuzzleRecord) {
-        let _ = self.sender.send(Msg::Puzzle(record));
+        self.try_send(Msg::Puzzle(record), "puzzle");
     }
 
     pub fn record_verify(&self, record: VerifyRecord) {
-        let _ = self.sender.send(Msg::Verify(record));
+        self.try_send(Msg::Verify(record), "verify");
+    }
+
+    /// Non-blocking send. The hot path can't await — we'd hold up the
+    /// request handler waiting on disk. On `Full`, increment the drop
+    /// counter and emit a WARN at every power-of-two threshold so the
+    /// log doesn't drown in repeats during a sustained backlog.
+    fn try_send(&self, msg: Msg, kind: &'static str) {
+        match self.sender.try_send(msg) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                let n = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                if n.is_power_of_two() {
+                    tracing::warn!(
+                        kind,
+                        dropped_total = n,
+                        capacity = CHANNEL_CAPACITY,
+                        "decision-log: queue full, dropping record"
+                    );
+                }
+            }
+            Err(TrySendError::Closed(_)) => {
+                // Writer thread has exited — service is shutting down.
+                // Silent drop: nothing useful to log.
+            }
+        }
     }
 
     /// Wipe all puzzle/verify rows. Resolves once the writer thread has
     /// finished the truncate, so the next list query is guaranteed to see
-    /// an empty table.
+    /// an empty table. Uses an awaiting `send` (not `try_send`) because
+    /// `clear` is operator-initiated and we'd rather block briefly than
+    /// silently fail under burst.
     pub async fn clear(&self) -> rusqlite::Result<()> {
         let (tx, rx) = oneshot::channel();
-        if self.sender.send(Msg::Clear(tx)).is_err() {
+        if self.sender.send(Msg::Clear(tx)).await.is_err() {
             return Err(rusqlite::Error::InvalidQuery);
         }
         rx.await.unwrap_or(Err(rusqlite::Error::InvalidQuery))

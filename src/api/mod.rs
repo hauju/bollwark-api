@@ -6,6 +6,7 @@ pub mod types;
 use axum::Router;
 use axum::http::HeaderValue;
 use axum::http::Method;
+use axum::http::StatusCode;
 use axum::http::header;
 use axum::routing::{get, post};
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -35,6 +36,12 @@ pub fn router(state: SharedState, admin: Option<AdminState>) -> Router {
         .with_state(state);
 
     let mut app = Router::new()
+        // Liveness probe for load balancers / orchestrators. No auth, no
+        // state read — returns immediately. We deliberately don't expose
+        // dependency health (SQLite, etc.) here: a degraded backend
+        // shouldn't pull the pod out of rotation, and the dashboard already
+        // surfaces store errors via tracing.
+        .route("/healthz", get(healthz))
         .merge(public)
         .merge(internal)
         .nest_service("/static", ServeDir::new("static"));
@@ -45,6 +52,10 @@ pub fn router(state: SharedState, admin: Option<AdminState>) -> Router {
     }
 
     app.layer(TraceLayer::new_for_http())
+}
+
+async fn healthz() -> (StatusCode, &'static str) {
+    (StatusCode::OK, "ok")
 }
 
 /// Build the CORS layer for the public puzzle endpoint.

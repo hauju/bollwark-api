@@ -7,7 +7,7 @@ use rust_captcha::api;
 use rust_captcha::api::state::{
     AppState, tier_thresholds_from_config, verify_thresholds_from_config,
 };
-use rust_captcha::config::AppConfig;
+use rust_captcha::config::{AppConfig, CookieSameSiteCfg};
 use rust_captcha::dashboard::{DecisionLog, Sessions, routes::AdminState};
 use rust_captcha::puzzle::challenge::PuzzleEngine;
 use rust_captcha::puzzle::difficulty::DifficultyCalculator;
@@ -50,6 +50,16 @@ async fn main() {
     }
 
     let mut config = AppConfig::from_env();
+
+    // Browsers refuse SameSite=None without Secure. Validate before binding
+    // the listener — if we proceed, the cookie signal silently breaks for
+    // every embedder, which is the worst kind of silent regression.
+    if config.cookie_samesite == CookieSameSiteCfg::None && !config.cookie_secure {
+        panic!(
+            "COOKIE_SAMESITE=None requires COOKIE_SECURE=true — browsers reject the cookie otherwise. \
+             Either terminate TLS and set COOKIE_SECURE=true, or use SameSite=Lax."
+        );
+    }
 
     if config.dev_disable_admin_auth {
         if cfg!(debug_assertions) {
@@ -255,6 +265,37 @@ async fn main() {
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await
     .unwrap();
+
+    tracing::info!("Shutdown complete");
+}
+
+/// Wait for SIGINT (Ctrl-C) or SIGTERM (orchestrator stop). Either signal
+/// completes the future; whichever fires first is the signal we shut down on.
+/// SIGTERM is the one Kubernetes / Docker / systemd send on stop, so it must
+/// be handled — without it, in-flight requests are killed mid-flight and the
+/// process is SIGKILLed after the grace period.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("install ctrl_c handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => tracing::info!("Received SIGINT (Ctrl-C), shutting down"),
+        () = terminate => tracing::info!("Received SIGTERM, shutting down"),
+    }
 }
