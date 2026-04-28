@@ -27,6 +27,10 @@
         touches: 0,
         interactions: 0,
         first_interaction_ms: null,
+        // navigator.webdriver is set by CDP-driven Chromium (Playwright,
+        // Puppeteer, Selenium, browser-harness in default mode). Captured
+        // at mount because some stealth patches restore it later.
+        webdriver: typeof navigator !== "undefined" && navigator.webdriver === true,
       };
       this._behaviorListeners = [];
       this._installBehaviorListeners();
@@ -291,6 +295,10 @@
             this.worker.terminate();
             this.worker = null;
             resolve({ nonce: e.data.nonce });
+          } else if (e.data.type === "error") {
+            this.worker.terminate();
+            this.worker = null;
+            reject(new Error(e.data.message));
           }
         };
 
@@ -303,6 +311,7 @@
         this.worker.postMessage({
           prefix: puzzle.prefix,
           difficulty: puzzle.difficulty,
+          algorithm: puzzle.algorithm,
         });
       });
     }
@@ -320,15 +329,35 @@
         input.name = "captcha-token";
         form.appendChild(input);
       }
+
+      this._challengeId = challengeId;
+      this._nonce = nonce;
+      this._tokenInput = input;
+      this._refreshTokenInput();
+
+      // Refresh the token at submit time so `time_on_page_ms` and the
+      // behavior counters reflect actual user interaction — not the
+      // moment the worker happened to finish solving the PoW. Critical
+      // for invisible_pass tier where PoW completes before any user
+      // interaction.
+      if (!this._submitListenerInstalled) {
+        const handler = () => this._refreshTokenInput();
+        form.addEventListener("submit", handler, { capture: true });
+        this._submitListenerInstalled = true;
+      }
+    }
+
+    _refreshTokenInput() {
+      if (!this._tokenInput) return;
       const payload = {
-        challenge_id: challengeId,
-        nonce,
+        challenge_id: this._challengeId,
+        nonce: this._nonce,
         time_on_page_ms: Date.now() - this.pageLoadAt,
         behavior: { ...this._behavior },
       };
       const honeypotValue = this.honeypot ? this.honeypot.value : "";
       if (honeypotValue) payload.honeypot = honeypotValue;
-      input.value = JSON.stringify(payload);
+      this._tokenInput.value = JSON.stringify(payload);
     }
 
     // ── Public Methods ──
@@ -350,6 +379,7 @@
         touches: 0,
         interactions: 0,
         first_interaction_ms: null,
+        webdriver: typeof navigator !== "undefined" && navigator.webdriver === true,
       };
       this._installBehaviorListeners();
       this._render();

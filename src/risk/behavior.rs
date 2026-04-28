@@ -39,6 +39,13 @@ pub struct BehaviorReport {
     /// means no such interaction occurred before submit.
     #[serde(default)]
     pub first_interaction_ms: Option<u64>,
+    /// `navigator.webdriver` snapshot at widget mount. `Some(true)` is the
+    /// W3C-defined CDP-driven-Chrome marker (Playwright, Puppeteer,
+    /// Selenium, browser-harness in default mode all set it). Trivial to
+    /// patch out, but a useful filter for the long tail of unsophisticated
+    /// agents. `None` = older widget that didn't include the field.
+    #[serde(default)]
+    pub webdriver: Option<bool>,
 }
 
 /// Distinguishes "no client behavior block at all" (older widget,
@@ -60,6 +67,11 @@ pub const BEHAVIOR_NO_POINTER_SCORE: u32 = 15;
 // a one-click form takes longer than that for a human.
 pub const BEHAVIOR_INSTANT_INTERACTION_MS: u64 = 50;
 pub const BEHAVIOR_INSTANT_INTERACTION_SCORE: u32 = 20;
+// `navigator.webdriver === true`. Calibrated so that *alone* it lands at
+// the shadow-fail threshold (success=true, logged) — webdriver can be
+// patched out, so we don't hard-block on it. Combined with any other
+// behaviour penalty it crosses the block threshold.
+pub const BEHAVIOR_WEBDRIVER_SCORE: u32 = 30;
 
 pub fn score_behavior(presence: BehaviorPresence) -> u32 {
     let BehaviorPresence::Present(b) = presence else {
@@ -80,6 +92,10 @@ pub fn score_behavior(presence: BehaviorPresence) -> u32 {
         score += BEHAVIOR_INSTANT_INTERACTION_SCORE;
     }
 
+    if matches!(b.webdriver, Some(true)) {
+        score += BEHAVIOR_WEBDRIVER_SCORE;
+    }
+
     score
 }
 
@@ -93,6 +109,7 @@ mod tests {
             touches: 0,
             interactions: 3,
             first_interaction_ms: Some(800),
+            webdriver: Some(false),
         }
     }
 
@@ -130,6 +147,7 @@ mod tests {
             touches: 0,
             interactions: 1,
             first_interaction_ms: Some(1_500),
+            ..Default::default()
         };
         assert_eq!(
             score_behavior(BehaviorPresence::Present(r)),
@@ -144,6 +162,7 @@ mod tests {
             touches: 0,
             interactions: 1,
             first_interaction_ms: Some(10),
+            ..Default::default()
         };
         // no_pointer (15) + instant (20)
         assert_eq!(
@@ -159,6 +178,7 @@ mod tests {
             touches: 0,
             interactions: 1,
             first_interaction_ms: Some(BEHAVIOR_INSTANT_INTERACTION_MS),
+            ..Default::default()
         };
         // Exactly at threshold: not penalised
         assert_eq!(score_behavior(BehaviorPresence::Present(r)), 0);
@@ -171,6 +191,60 @@ mod tests {
             touches: 0,
             interactions: 0,
             first_interaction_ms: None,
+            ..Default::default()
+        };
+        assert_eq!(score_behavior(BehaviorPresence::Present(r)), 0);
+    }
+
+    #[test]
+    fn webdriver_flag_alone_lands_in_shadow_band() {
+        let r = BehaviorReport {
+            mouse_moves: 30,
+            interactions: 5,
+            first_interaction_ms: Some(1_500),
+            webdriver: Some(true),
+            ..Default::default()
+        };
+        // Otherwise organic, but webdriver=true → 30 → shadow_min boundary.
+        assert_eq!(
+            score_behavior(BehaviorPresence::Present(r)),
+            BEHAVIOR_WEBDRIVER_SCORE
+        );
+    }
+
+    #[test]
+    fn webdriver_plus_flatline_scores_block_band() {
+        let r = BehaviorReport {
+            webdriver: Some(true),
+            ..Default::default()
+        };
+        // Flatline (30) + webdriver (30) = 60 → block_min boundary.
+        assert_eq!(
+            score_behavior(BehaviorPresence::Present(r)),
+            BEHAVIOR_FLATLINE_SCORE + BEHAVIOR_WEBDRIVER_SCORE
+        );
+    }
+
+    #[test]
+    fn webdriver_false_does_not_score() {
+        let r = BehaviorReport {
+            mouse_moves: 30,
+            interactions: 5,
+            first_interaction_ms: Some(1_500),
+            webdriver: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(score_behavior(BehaviorPresence::Present(r)), 0);
+    }
+
+    #[test]
+    fn webdriver_missing_does_not_score() {
+        let r = BehaviorReport {
+            mouse_moves: 30,
+            interactions: 5,
+            first_interaction_ms: Some(1_500),
+            webdriver: None,
+            ..Default::default()
         };
         assert_eq!(score_behavior(BehaviorPresence::Present(r)), 0);
     }

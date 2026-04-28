@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::config::AppConfig;
+use crate::dashboard::DecisionLog;
 use crate::puzzle::challenge::PuzzleEngine;
 use crate::puzzle::difficulty::DifficultyCalculator;
 use crate::risk::{
@@ -23,6 +24,9 @@ pub struct AppState {
     /// Trusted proxies whose TLS fingerprint header we honor. Empty if the
     /// feature isn't enabled or no proxies are configured.
     pub trusted_proxies: Arc<TrustedProxies>,
+    /// Validation dashboard log. When `Some`, every puzzle/verify decision is
+    /// also persisted to SQLite for the admin dashboard.
+    pub decision_log: Option<DecisionLog>,
     pub config: AppConfig,
 }
 

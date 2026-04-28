@@ -8,6 +8,7 @@ use rust_captcha::api::state::{
     AppState, tier_thresholds_from_config, verify_thresholds_from_config,
 };
 use rust_captcha::config::AppConfig;
+use rust_captcha::dashboard::{DecisionLog, Sessions, routes::AdminState};
 use rust_captcha::puzzle::challenge::PuzzleEngine;
 use rust_captcha::puzzle::difficulty::DifficultyCalculator;
 use rust_captcha::puzzle::types::PuzzleConfig;
@@ -20,18 +21,44 @@ use rust_captcha::storage::memory::InMemoryStore;
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
+    // Load .env if present so operators can keep ADMIN_TOKEN, secrets, etc.
+    // out of their shell history. Existing env vars take precedence.
+    let dotenv_loaded = dotenvy::dotenv().ok();
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    let json_logs = std::env::var("LOG_FORMAT")
+        .map(|v| v.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+    if json_logs {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .json()
+            .flatten_event(true)
+            .with_current_span(false)
+            .with_span_list(false)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .init();
+    }
+
+    if let Some(path) = dotenv_loaded {
+        tracing::info!("Loaded environment from {}", path.display());
+    }
 
     let config = AppConfig::from_env();
 
     let puzzle_config = PuzzleConfig {
+        algorithm: config.puzzle_algorithm,
         default_difficulty: config.default_difficulty,
         min_difficulty: config.min_difficulty,
         max_difficulty: config.max_difficulty,
         ttl_secs: config.challenge_ttl_secs,
     };
+    tracing::info!(algorithm = ?config.puzzle_algorithm, "Puzzle engine initialised");
 
     let store = Arc::new(InMemoryStore::new());
 
@@ -120,6 +147,35 @@ async fn main() {
         }
     }
 
+    // Validation dashboard: open the SQLite log and (if a token is set) build
+    // the admin sub-router. We refuse to start with a path but no token —
+    // that would expose the admin endpoints anonymously.
+    let admin_state = match (&config.admin_db_path, &config.admin_token) {
+        (Some(path), Some(token)) if !token.is_empty() => {
+            let log = DecisionLog::open(path)
+                .unwrap_or_else(|e| panic!("failed to open ADMIN_DB_PATH={path}: {e}"));
+            tracing::info!("Validation dashboard enabled (db={path})");
+            let sessions = Sessions::new(log.db_path().to_string());
+            Some((
+                log.clone(),
+                AdminState {
+                    sessions,
+                    log,
+                    token: Arc::new(token.clone()),
+                },
+            ))
+        }
+        (Some(_), _) => {
+            panic!("ADMIN_DB_PATH is set but ADMIN_TOKEN is missing — refusing to start");
+        }
+        _ => None,
+    };
+
+    let (decision_log, admin_routes) = match admin_state {
+        Some((log, admin)) => (Some(log), Some(admin)),
+        None => (None, None),
+    };
+
     let state = Arc::new(AppState {
         store,
         engine: PuzzleEngine::new(puzzle_config),
@@ -133,10 +189,11 @@ async fn main() {
         cookie_signer,
         tls_fingerprint_header: config.tls_fingerprint_header.clone(),
         trusted_proxies,
+        decision_log,
         config: config.clone(),
     });
 
-    let app = api::router(state);
+    let app = api::router(state, admin_routes);
 
     let listener = TcpListener::bind(config.listen_addr).await.unwrap();
     tracing::info!("Listening on {}", config.listen_addr);

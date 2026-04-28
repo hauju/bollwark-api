@@ -3,9 +3,10 @@ use std::net::IpAddr;
 use axum::Json;
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::HeaderMap;
-use axum::http::header::{AUTHORIZATION, COOKIE, HeaderValue, SET_COOKIE};
+use axum::http::header::{AUTHORIZATION, COOKIE, HeaderValue, SET_COOKIE, USER_AGENT};
 use axum::response::IntoResponse;
 
+use crate::dashboard::types::{PuzzleRecord, VerifyRecord};
 use crate::error::CaptchaError;
 use crate::risk::cookie::{extract_cookie, now_secs, set_cookie_header};
 use crate::risk::{
@@ -82,32 +83,86 @@ pub async fn get_puzzle(
     };
     let score = state.risk.score(&ctx);
 
-    tracing::info!(
-        ip = %ip,
-        site_key = %params.site_key,
-        risk.score = score.total,
-        risk.tier = ?score.tier,
-        signals.rate = score.breakdown.rate,
-        signals.header_anomaly = score.breakdown.header_anomaly,
-        signals.ip_reputation = score.breakdown.ip_reputation,
-        signals.cookie_age = score.breakdown.cookie_age,
-        signals.tls_fingerprint = score.breakdown.tls_fingerprint,
-        cookie.presence = ?cookie,
-        tls.fingerprint = ?tls_fingerprint,
-        "Risk scored"
-    );
-
     // Tiers that don't issue a puzzle short-circuit here.
-    let Some(difficulty) = difficulty_for(
+    let maybe_difficulty = difficulty_for(
         score.tier,
         state.config.default_difficulty,
         state.config.max_difficulty,
-    ) else {
+    );
+    let outcome = if maybe_difficulty.is_some() {
+        "issued"
+    } else {
+        "rejected"
+    };
+
+    tracing::info!(
+        event = "puzzle_decision",
+        outcome = outcome,
+        ip = %ip,
+        site_key = %params.site_key,
+        ip_count,
+        site_count,
+        score = score.total,
+        tier = ?score.tier,
+        difficulty = maybe_difficulty.unwrap_or(0),
+        sig_rate = score.breakdown.rate,
+        sig_header_anomaly = score.breakdown.header_anomaly,
+        sig_ip_reputation = score.breakdown.ip_reputation,
+        sig_cookie_age = score.breakdown.cookie_age,
+        sig_tls_fingerprint = score.breakdown.tls_fingerprint,
+        cookie_presence = ?cookie,
+        tls_fingerprint = ?tls_fingerprint,
+        "Puzzle decision"
+    );
+
+    // Snapshot the User-Agent for the dashboard before we hit any branch
+    // that returns. The header may be missing — that's fine, it still scores.
+    let ua = headers
+        .get(USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let Some(difficulty) = maybe_difficulty else {
         // VisualChallenge and Block both reject in Phase 1.
+        if let Some(log) = &state.decision_log {
+            log.record_puzzle(PuzzleRecord {
+                challenge_id: None,
+                site_key: params.site_key,
+                ip: ip.to_string(),
+                ip_count,
+                site_count,
+                score: score.total,
+                tier: score.tier,
+                difficulty: 0,
+                outcome: "rejected",
+                breakdown: score.breakdown,
+                cookie_presence: format!("{cookie:?}"),
+                tls_fingerprint: format!("{tls_fingerprint:?}"),
+                user_agent: ua,
+            });
+        }
         return Err(CaptchaError::RateLimited);
     };
 
     let challenge = state.engine.generate(params.site_key, difficulty);
+
+    if let Some(log) = &state.decision_log {
+        log.record_puzzle(PuzzleRecord {
+            challenge_id: Some(challenge.id),
+            site_key: params.site_key,
+            ip: ip.to_string(),
+            ip_count,
+            site_count,
+            score: score.total,
+            tier: score.tier,
+            difficulty,
+            outcome: "issued",
+            breakdown: score.breakdown,
+            cookie_presence: format!("{cookie:?}"),
+            tls_fingerprint: format!("{tls_fingerprint:?}"),
+            user_agent: ua,
+        });
+    }
 
     let response = PuzzleResponse {
         challenge_id: challenge.id,
@@ -171,6 +226,25 @@ pub async fn verify(
     let pow_valid = state.engine.verify(&challenge, body.nonce);
 
     if !pow_valid {
+        tracing::info!(
+            event = "verify_decision",
+            outcome = "pow_invalid",
+            challenge_id = %challenge.id,
+            success = false,
+            "Verify decision"
+        );
+        if let Some(log) = &state.decision_log {
+            log.record_verify(VerifyRecord {
+                challenge_id: challenge.id,
+                success: false,
+                outcome: "pow_invalid",
+                score: 0,
+                breakdown: Default::default(),
+                time_on_page_ms: body.time_on_page_ms,
+                cookie_presence: "Unknown".into(),
+                webdriver: "n/a",
+            });
+        }
         return Ok(Json(VerifyResponse { success: false }));
     }
 
@@ -208,46 +282,63 @@ pub async fn verify(
     };
     let vscore = state.verify_scorer.score(&vctx);
 
-    match vscore.decision {
-        VerifyDecision::Pass => {
-            tracing::debug!(
+    let (success, outcome) = match vscore.decision {
+        VerifyDecision::Pass => (true, "pass"),
+        VerifyDecision::ShadowFail => (true, "shadow_fail"),
+        VerifyDecision::Block => (false, "block"),
+    };
+
+    // Surface the raw webdriver flag for log analysis: the aggregate
+    // `sig_behavior` score doesn't tell you which sub-signal contributed,
+    // and webdriver is the most operationally-interesting one.
+    let webdriver_flag = match body.behavior {
+        Some(b) => match b.webdriver {
+            Some(true) => "true",
+            Some(false) => "false",
+            None => "absent",
+        },
+        None => "no_blob",
+    };
+
+    macro_rules! emit_decision {
+        ($lvl:expr) => {
+            tracing::event!(
+                $lvl,
+                event = "verify_decision",
+                outcome = outcome,
                 challenge_id = %challenge.id,
-                verify.score = vscore.total,
-                "Verify passed"
-            );
-            Ok(Json(VerifyResponse { success: true }))
-        }
-        VerifyDecision::ShadowFail => {
-            // Return success but flag for offline review. No persistent
-            // quarantine store yet — the structured log is the audit trail.
-            tracing::warn!(
-                challenge_id = %challenge.id,
-                verify.score = vscore.total,
-                verify.honeypot = vscore.breakdown.honeypot,
-                verify.time_on_page = vscore.breakdown.time_on_page,
-                verify.cookie_age = vscore.breakdown.cookie_age,
-                verify.behavior = vscore.breakdown.behavior,
-                time_on_page_ms = ?body.time_on_page_ms,
-                cookie.presence = ?cookie,
-                "Verify shadow-failed (success returned, request quarantined)"
-            );
-            Ok(Json(VerifyResponse { success: true }))
-        }
-        VerifyDecision::Block => {
-            tracing::info!(
-                challenge_id = %challenge.id,
-                verify.score = vscore.total,
-                verify.honeypot = vscore.breakdown.honeypot,
-                verify.time_on_page = vscore.breakdown.time_on_page,
-                verify.cookie_age = vscore.breakdown.cookie_age,
-                verify.behavior = vscore.breakdown.behavior,
-                time_on_page_ms = ?body.time_on_page_ms,
-                cookie.presence = ?cookie,
-                "Verify blocked"
-            );
-            Ok(Json(VerifyResponse { success: false }))
-        }
+                success = success,
+                score = vscore.total,
+                sig_honeypot = vscore.breakdown.honeypot,
+                sig_time_on_page = vscore.breakdown.time_on_page,
+                sig_cookie_age = vscore.breakdown.cookie_age,
+                sig_behavior = vscore.breakdown.behavior,
+                webdriver = webdriver_flag,
+                time_on_page_ms = body.time_on_page_ms.unwrap_or(0),
+                cookie_presence = ?cookie,
+                "Verify decision"
+            )
+        };
     }
+    match vscore.decision {
+        VerifyDecision::ShadowFail => emit_decision!(tracing::Level::WARN),
+        _ => emit_decision!(tracing::Level::INFO),
+    }
+
+    if let Some(log) = &state.decision_log {
+        log.record_verify(VerifyRecord {
+            challenge_id: challenge.id,
+            success,
+            outcome,
+            score: vscore.total,
+            breakdown: vscore.breakdown,
+            time_on_page_ms: body.time_on_page_ms,
+            cookie_presence: format!("{cookie:?}"),
+            webdriver: webdriver_flag,
+        });
+    }
+
+    Ok(Json(VerifyResponse { success }))
 }
 
 pub async fn create_site(

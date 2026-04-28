@@ -1,0 +1,74 @@
+default:
+    @just --list
+
+# Install JS deps + Chromium browser binary
+install:
+    bun install
+    bunx playwright install chromium
+
+# Run the e2e suite (auto-spawns `cargo run` itself)
+test:
+    bun run test
+
+# Run with browser windows visible (debugging)
+test-headed:
+    bun run test:headed
+
+# Run a single test by title substring
+test-one NAME:
+    bunx playwright test -g "{{ NAME }}"
+
+# Reuse an already-running server on http://127.0.0.1:3000
+test-reuse:
+    CAPTCHA_REUSE_SERVER=1 bun run test
+
+# Open the HTML report from the last run
+report:
+    bun run report
+
+# Drop test-results / playwright-report
+clean:
+    rm -rf node_modules playwright-report test-results
+
+# Boot the server with JSON logs, run loadgen + e2e against it, then print a tier/outcome summary from the captured JSONL.
+validate REQUESTS="200":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd ..
+    rm -f e2e/run.jsonl
+
+    # tracing-subscriber's fmt subscriber writes to stdout — capture both streams
+    # since cargo also prints status messages to stderr.
+    LOG_FORMAT=json RUST_LOG=info,rust_captcha=debug \
+      DEFAULT_DIFFICULTY=12 MIN_DIFFICULTY=8 MAX_DIFFICULTY=16 \
+      cargo run --quiet &> e2e/run.jsonl &
+    SERVER=$!
+    trap "kill $SERVER 2>/dev/null || true; wait 2>/dev/null || true" EXIT
+
+    # Wait for the server to listen.
+    for i in $(seq 1 50); do
+      if curl -sf http://127.0.0.1:3000/static/testsite.html >/dev/null; then break; fi
+      sleep 0.2
+    done
+
+    cargo run --release --example loadgen --quiet -- \
+      --base http://127.0.0.1:3000 --requests {{ REQUESTS }}
+
+    cd e2e
+    # Don't abort the recipe on e2e failure — we still want the JSONL summary.
+    set +e
+    CAPTCHA_REUSE_SERVER=1 bun run test
+    E2E_RC=$?
+    set -e
+
+    echo
+    echo "── puzzle_decision: tier × outcome ──"
+    jq -c 'select(.event == "puzzle_decision") | {tier, outcome}' run.jsonl \
+      | sort | uniq -c | sort -rn
+
+    echo
+    echo "── verify_decision: outcome ──"
+    jq -c 'select(.event == "verify_decision") | {outcome}' run.jsonl \
+      | sort | uniq -c | sort -rn
+
+    exit $E2E_RC

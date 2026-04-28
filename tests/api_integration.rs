@@ -11,9 +11,12 @@ use rust_captcha::api::state::{
 };
 use rust_captcha::api::types::{CreateSiteResponse, PuzzleResponse, VerifyResponse};
 use rust_captcha::config::AppConfig;
-use rust_captcha::puzzle::challenge::{PuzzleEngine, solve_challenge};
+use rust_captcha::puzzle::challenge::{
+    PuzzleEngine, compute_argon2id, has_leading_zero_bits, solve_argon2id_challenge,
+    solve_challenge,
+};
 use rust_captcha::puzzle::difficulty::DifficultyCalculator;
-use rust_captcha::puzzle::types::PuzzleConfig;
+use rust_captcha::puzzle::types::{Algorithm, Argon2idParams, PuzzleConfig};
 use rust_captcha::risk::{
     CidrListReputation, CookieSigner, EscalationTier, FingerprintBlocklist, RiskScorer,
     TrustedProxies, VerifyScorer,
@@ -37,22 +40,34 @@ struct TestAppBuilder {
     tls_blocklist: Option<String>,
     tls_header: Option<&'static str>,
     trusted_proxies: Option<&'static str>,
+    algorithm: Option<Algorithm>,
 }
 
 impl TestAppBuilder {
     fn build(self) -> axum::Router {
+        let algorithm = self.algorithm.unwrap_or(Algorithm::Sha256);
+        // Argon2id needs a much lower default difficulty than SHA-256 — even
+        // 4 leading zero bits at minimum-cost params already takes a few
+        // hundred ms in the test solver, which is fine but anything higher
+        // makes tests slow.
+        let default_difficulty = match algorithm {
+            Algorithm::Sha256 => 8,
+            Algorithm::Argon2id(_) => 4,
+        };
         let config = AppConfig {
-            default_difficulty: 8,
-            min_difficulty: 4,
+            puzzle_algorithm: algorithm,
+            default_difficulty,
+            min_difficulty: 1,
             max_difficulty: 16,
             challenge_ttl_secs: 300,
             tls_fingerprint_header: self.tls_header.map(String::from),
             ..AppConfig::default()
         };
         let puzzle_config = PuzzleConfig {
-            default_difficulty: 8,
-            min_difficulty: 4,
-            max_difficulty: 16,
+            algorithm: config.puzzle_algorithm,
+            default_difficulty: config.default_difficulty,
+            min_difficulty: config.min_difficulty,
+            max_difficulty: config.max_difficulty,
             ttl_secs: 300,
         };
         let reputation = std::sync::Arc::new(match self.reputation_cidrs {
@@ -85,9 +100,10 @@ impl TestAppBuilder {
             cookie_signer,
             tls_fingerprint_header: self.tls_header.map(String::from),
             trusted_proxies,
+            decision_log: None,
             config,
         });
-        api::router(state)
+        api::router(state, None)
     }
 }
 
@@ -684,6 +700,101 @@ async fn test_suspicious_ua_without_spam_stays_below_block() {
     assert_eq!(puzzle.unwrap().tier, EscalationTier::Checkbox);
 }
 
+// --- Argon2id end-to-end ---
+
+#[tokio::test]
+async fn test_argon2id_full_flow() {
+    // Server configured for Argon2id with minimum-cost params (kept tiny so
+    // the test brute-force solver returns in a few hundred ms).
+    let params = Argon2idParams {
+        m_cost: 8,
+        t_cost: 1,
+        p_cost: 1,
+    };
+    let app = test_app_with(|b| {
+        b.algorithm = Some(Algorithm::Argon2id(params));
+    });
+    let site = create_test_site(&app).await;
+
+    let (status, puzzle) = get_test_puzzle(&app, &site.site_key.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    let puzzle = puzzle.unwrap();
+
+    // Wire format: Argon2id serialises as a tagged object so the worker
+    // knows which params to use.
+    let algorithm_json = serde_json::to_value(puzzle.algorithm).unwrap();
+    assert!(
+        algorithm_json.get("argon2id").is_some(),
+        "wire format includes argon2id key, got {algorithm_json}"
+    );
+
+    let nonce = solve_argon2id_challenge(&puzzle.prefix, puzzle.difficulty, params);
+    let verify_body = serde_json::json!({
+        "challenge_id": puzzle.challenge_id,
+        "nonce": nonce,
+        "time_on_page_ms": 5_000,
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/verify")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", site.secret_key))
+        .body(Body::from(serde_json::to_vec(&verify_body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: VerifyResponse = serde_json::from_slice(&body).unwrap();
+    assert!(result.success, "valid Argon2id solve should verify");
+}
+
+#[tokio::test]
+async fn test_argon2id_wrong_nonce_fails() {
+    let params = Argon2idParams {
+        m_cost: 8,
+        t_cost: 1,
+        p_cost: 1,
+    };
+    let app = test_app_with(|b| {
+        b.algorithm = Some(Algorithm::Argon2id(params));
+    });
+    let site = create_test_site(&app).await;
+    let (_, puzzle) = get_test_puzzle(&app, &site.site_key.to_string()).await;
+    let puzzle = puzzle.unwrap();
+
+    // At difficulty 4, ~1/16 random nonces satisfy the challenge by luck.
+    // Pick one we've locally verified does NOT satisfy so the rejection path
+    // is exercised deterministically.
+    let mut bad_nonce = 1u64;
+    loop {
+        let hash = compute_argon2id(&puzzle.prefix, bad_nonce, params).unwrap();
+        if !has_leading_zero_bits(&hash, puzzle.difficulty) {
+            break;
+        }
+        bad_nonce += 1;
+    }
+    let verify_body = serde_json::json!({
+        "challenge_id": puzzle.challenge_id,
+        "nonce": bad_nonce,
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/verify")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", site.secret_key))
+        .body(Body::from(serde_json::to_vec(&verify_body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: VerifyResponse = serde_json::from_slice(&body).unwrap();
+    assert!(!result.success);
+}
+
 // --- Behavior signal tests ---
 
 #[tokio::test]
@@ -721,6 +832,86 @@ async fn test_behavior_flatline_with_fast_submit_blocks() {
         .unwrap();
     let result: VerifyResponse = serde_json::from_slice(&body).unwrap();
     assert!(!result.success, "flatline + fast submit should block");
+}
+
+#[tokio::test]
+async fn test_webdriver_flag_alone_shadow_fails() {
+    // webdriver=true alone scores 30 → exactly at shadow_min, so the
+    // request still returns success=true but the WARN log records it.
+    let app = test_app();
+    let site = create_test_site(&app).await;
+    let (_, puzzle) = get_test_puzzle(&app, &site.site_key.to_string()).await;
+    let puzzle = puzzle.unwrap();
+    let nonce = solve_challenge(&puzzle.prefix, puzzle.difficulty);
+
+    let verify_body = serde_json::json!({
+        "challenge_id": puzzle.challenge_id,
+        "nonce": nonce,
+        "time_on_page_ms": 5_000,
+        "behavior": {
+            "mouse_moves": 25,
+            "interactions": 3,
+            "first_interaction_ms": 1_200,
+            "webdriver": true,
+        },
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/verify")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", site.secret_key))
+        .body(Body::from(serde_json::to_vec(&verify_body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: VerifyResponse = serde_json::from_slice(&body).unwrap();
+    // ShadowFail returns success=true (caller is the form host; the log
+    // is the audit trail).
+    assert!(
+        result.success,
+        "webdriver alone should shadow-fail, not block"
+    );
+}
+
+#[tokio::test]
+async fn test_webdriver_plus_flatline_blocks() {
+    // CDP-driven Chrome with no mouse interaction — exactly the
+    // browser-harness baseline pattern: flatline (30) + webdriver (30) = 60
+    // → block_min boundary → success=false.
+    let app = test_app();
+    let site = create_test_site(&app).await;
+    let (_, puzzle) = get_test_puzzle(&app, &site.site_key.to_string()).await;
+    let puzzle = puzzle.unwrap();
+    let nonce = solve_challenge(&puzzle.prefix, puzzle.difficulty);
+
+    let verify_body = serde_json::json!({
+        "challenge_id": puzzle.challenge_id,
+        "nonce": nonce,
+        "time_on_page_ms": 5_000,
+        "behavior": {
+            "mouse_moves": 0,
+            "touches": 0,
+            "interactions": 0,
+            "webdriver": true,
+        },
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/verify")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", site.secret_key))
+        .body(Body::from(serde_json::to_vec(&verify_body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: VerifyResponse = serde_json::from_slice(&body).unwrap();
+    assert!(!result.success, "webdriver + flatline should block");
 }
 
 #[tokio::test]

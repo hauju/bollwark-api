@@ -1,9 +1,16 @@
 use std::env;
 use std::net::SocketAddr;
 
+use crate::puzzle::types::{Algorithm, Argon2idParams};
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub listen_addr: SocketAddr,
+    /// PoW algorithm for new challenges. `sha256` (default) or `argon2id`.
+    /// When set to `argon2id`, lower the difficulty knobs accordingly —
+    /// each Argon2id hash is orders of magnitude slower than SHA-256, so
+    /// 4–6 leading zero bits is comparable to SHA-256's default 20 bits.
+    pub puzzle_algorithm: Algorithm,
     pub default_difficulty: u32,
     pub min_difficulty: u32,
     pub max_difficulty: u32,
@@ -34,6 +41,13 @@ pub struct AppConfig {
     /// trust. Comma- or whitespace-separated. Required when the TLS feature is
     /// enabled — without it, no peer is trusted and the signal never fires.
     pub trusted_proxies: Option<String>,
+    /// Path to the SQLite database used to persist puzzle/verify decisions for
+    /// the validation dashboard. When unset, dashboard logging and the admin
+    /// endpoints are both disabled.
+    pub admin_db_path: Option<String>,
+    /// Bearer token required by the `/v1/admin/*` endpoints. Required when
+    /// `admin_db_path` is set; the service refuses to start without it.
+    pub admin_token: Option<String>,
 }
 
 impl AppConfig {
@@ -43,6 +57,7 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 3000))),
+            puzzle_algorithm: parse_algorithm_from_env(),
             default_difficulty: env::var("DEFAULT_DIFFICULTY")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -96,6 +111,8 @@ impl AppConfig {
             tls_fingerprint_header: env::var("TLS_FINGERPRINT_HEADER").ok(),
             tls_fingerprint_file: env::var("TLS_FINGERPRINT_FILE").ok(),
             trusted_proxies: env::var("TRUSTED_PROXIES").ok(),
+            admin_db_path: env::var("ADMIN_DB_PATH").ok(),
+            admin_token: env::var("ADMIN_TOKEN").ok(),
         }
     }
 }
@@ -104,6 +121,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
+            puzzle_algorithm: Algorithm::Sha256,
             default_difficulty: 20,
             min_difficulty: 16,
             max_difficulty: 28,
@@ -121,6 +139,39 @@ impl Default for AppConfig {
             tls_fingerprint_header: None,
             tls_fingerprint_file: None,
             trusted_proxies: None,
+            admin_db_path: None,
+            admin_token: None,
+        }
+    }
+}
+
+/// Parse `PUZZLE_ALGORITHM` (default `sha256`). When `argon2id`, also reads
+/// `ARGON2_M_COST`, `ARGON2_T_COST`, `ARGON2_P_COST`. Unknown values fall
+/// back to SHA-256 with a warning printed to stderr at boot — the rest of
+/// the service uses tracing, but this runs before the subscriber is up.
+fn parse_algorithm_from_env() -> Algorithm {
+    match env::var("PUZZLE_ALGORITHM").as_deref() {
+        Ok("sha256") | Err(_) => Algorithm::Sha256,
+        Ok("argon2id") => {
+            let defaults = Argon2idParams::default();
+            Algorithm::Argon2id(Argon2idParams {
+                m_cost: env::var("ARGON2_M_COST")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(defaults.m_cost),
+                t_cost: env::var("ARGON2_T_COST")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(defaults.t_cost),
+                p_cost: env::var("ARGON2_P_COST")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(defaults.p_cost),
+            })
+        }
+        Ok(other) => {
+            eprintln!("PUZZLE_ALGORITHM={other:?} is unknown — defaulting to sha256");
+            Algorithm::Sha256
         }
     }
 }

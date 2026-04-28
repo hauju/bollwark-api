@@ -214,6 +214,7 @@ mod tests {
             touches: 0,
             interactions: 2,
             first_interaction_ms: Some(800),
+            ..Default::default()
         });
         let s = scorer().score(&c);
         assert_eq!(s.breakdown.behavior, 0);

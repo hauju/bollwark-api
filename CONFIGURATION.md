@@ -2,13 +2,19 @@
 
 All runtime configuration is via environment variables. Every setting is optional with a sensible default — the service starts cleanly with `cargo run` and no env vars set, running with the puzzle pipeline only (rate + header anomaly signals active).
 
+A `.env` file in the working directory is loaded automatically at startup (via `dotenvy`). Existing shell env vars take precedence, so you can override values without editing the file. Copy `.env.example` to `.env` to get started.
+
 ## Quick reference
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `LISTEN_ADDR` | `0.0.0.0:3000` | Socket address to bind |
 | `RUST_LOG` | `info` | Tracing filter |
-| `DEFAULT_DIFFICULTY` | `20` | Base PoW difficulty (leading zero bits) |
+| `PUZZLE_ALGORITHM` | `sha256` | PoW algorithm: `sha256` or `argon2id` |
+| `ARGON2_M_COST` | `8192` | Argon2id memory cost in KiB (when `PUZZLE_ALGORITHM=argon2id`) |
+| `ARGON2_T_COST` | `2` | Argon2id iteration count |
+| `ARGON2_P_COST` | `1` | Argon2id lanes / parallelism |
+| `DEFAULT_DIFFICULTY` | `20` | Base PoW difficulty (leading zero bits). For Argon2id, drop to `4`–`6`. |
 | `MIN_DIFFICULTY` | `16` | Lower clamp on adaptive difficulty |
 | `MAX_DIFFICULTY` | `28` | Upper clamp on adaptive difficulty |
 | `CHALLENGE_TTL_SECS` | `300` | How long an issued puzzle is valid |
@@ -25,6 +31,8 @@ All runtime configuration is via environment variables. Every setting is optiona
 | `TLS_FINGERPRINT_HEADER` | _unset_ | Header to read TLS fingerprint from (signal off if unset) |
 | `TLS_FINGERPRINT_FILE` | _unset_ | Path to known-bad fingerprint blocklist |
 | `TRUSTED_PROXIES` | _unset_ | CIDR allowlist of peers whose `TLS_FINGERPRINT_HEADER` we honor |
+| `ADMIN_DB_PATH` | _unset_ | Path to the SQLite database for the validation dashboard. Enables decision logging + admin endpoints. |
+| `ADMIN_TOKEN` | _unset_ | Bearer token for `/v1/admin/*`. Required when `ADMIN_DB_PATH` is set. |
 
 ---
 
@@ -213,6 +221,33 @@ TRUSTED_PROXIES="10.0.0.0/8,fd00::/8"
 ```
 
 Empty/unset → no peer is trusted → signal never fires (boot log will WARN if `TLS_FINGERPRINT_HEADER` is set without trusted proxies).
+
+---
+
+## Validation dashboard
+
+A self-hosted dashboard that lets you inspect every puzzle and verify decision in a browser. Persists to SQLite so history survives restarts.
+
+### `ADMIN_DB_PATH`
+Path to the SQLite database file. Created on first run; uses WAL mode so reads don't block writes. When unset, decision logging and admin endpoints are both disabled.
+
+### `ADMIN_TOKEN`
+Bearer token required by all `/v1/admin/*` routes. **Required** when `ADMIN_DB_PATH` is set — the service refuses to start without one to avoid exposing the dashboard anonymously.
+
+Generate a strong token, e.g.:
+```bash
+ADMIN_TOKEN=$(openssl rand -hex 32)
+```
+
+### Endpoints (when enabled)
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/admin/sessions?limit=N` | List recent sessions (puzzle decision joined with matching verify, if any). `limit` capped at 1000, default 100. |
+| `GET /v1/admin/sessions/:id` | Detail for a single session id. |
+| `GET /static/admin.html` | Browser dashboard (paste the token to sign in). |
+
+Each session row includes the puzzle score, tier, signal breakdown, verify result (when present), and a derived `bot_probability` (max of puzzle and verify scores, capped at 100). Decision writes go through an unbounded channel to a dedicated writer thread, so the hot path is never blocked on disk.
 
 ---
 

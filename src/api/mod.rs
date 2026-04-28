@@ -9,18 +9,24 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
+use crate::dashboard::routes::AdminState;
 use state::SharedState;
 
-pub fn router(state: SharedState) -> Router {
+pub fn router(state: SharedState, admin: Option<AdminState>) -> Router {
     let api = Router::new()
         .route("/v1/puzzle", get(handlers::get_puzzle))
         .route("/v1/verify", post(handlers::verify))
         .route("/v1/sites", post(handlers::create_site))
         .with_state(state);
 
-    Router::new()
+    let mut app = Router::new()
         .merge(api)
-        .nest_service("/static", ServeDir::new("static"))
-        .layer(CorsLayer::permissive())
+        .nest_service("/static", ServeDir::new("static"));
+
+    if let Some(admin) = admin {
+        app = app.merge(crate::dashboard::routes::router(admin));
+    }
+
+    app.layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
 }

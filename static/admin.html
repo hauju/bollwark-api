@@ -1,0 +1,568 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>rust-captcha · validation dashboard</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --panel-2: #1f262e;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --good: #3fb950;
+    --warn: #d29922;
+    --bad: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 18px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  header h1 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+  }
+  header .muted { color: var(--muted); font-size: 13px; }
+  header .grow { flex: 1; }
+  header input, header button {
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font: inherit;
+  }
+  header button { cursor: pointer; }
+  header button:hover { border-color: var(--accent); }
+  header button.danger:hover { border-color: var(--bad); color: var(--bad); }
+  main {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 480px;
+    gap: 0;
+    height: calc(100vh - 49px);
+  }
+  .left { display: flex; flex-direction: column; min-width: 0; border-right: 1px solid var(--border); }
+  .stats-panel {
+    padding: 12px 18px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+    flex: 0 0 auto;
+  }
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 14px;
+    margin-bottom: 12px;
+  }
+  .stat { font-size: 12px; color: var(--muted); }
+  .stat .v { font-size: 18px; font-weight: 600; color: var(--text); font-family: ui-monospace, monospace; }
+  .stat .v.has-pill { font-size: 13px; }
+  .stats-row { display: grid; grid-template-columns: 110px 1fr; gap: 10px; align-items: center; margin-bottom: 6px; font-size: 12px; }
+  .stats-row .lbl { color: var(--muted); }
+  .stats-row .stacked-bar { margin: 0; height: 12px; }
+  .stats-row .pill { font-size: 11px; }
+  .dist-row { display: flex; gap: 6px; flex-wrap: wrap; font-size: 12px; }
+  .dist-chip { padding: 2px 8px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border); }
+  .dist-chip .n { color: var(--text); font-family: ui-monospace, monospace; margin-left: 4px; }
+  .table-wrap { overflow: auto; flex: 1 1 auto; min-height: 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td {
+    padding: 8px 10px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  th {
+    position: sticky;
+    top: 0;
+    background: var(--panel);
+    color: var(--muted);
+    font-weight: 500;
+    z-index: 1;
+  }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: var(--panel-2); }
+  tbody tr.selected { background: rgba(88, 166, 255, 0.08); }
+  td.mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  .pill {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 500;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+  }
+  .pill.good { color: var(--good); border-color: rgba(63, 185, 80, 0.4); }
+  .pill.warn { color: var(--warn); border-color: rgba(210, 153, 34, 0.4); }
+  .pill.bad  { color: var(--bad);  border-color: rgba(248, 81, 73, 0.4); }
+  .bar {
+    display: inline-block;
+    width: 60px;
+    height: 6px;
+    background: var(--panel-2);
+    border-radius: 3px;
+    overflow: hidden;
+    vertical-align: middle;
+    margin-right: 6px;
+  }
+  .bar > div { height: 100%; background: var(--good); transition: width .2s; }
+  .bar > div.warn { background: var(--warn); }
+  .bar > div.bad  { background: var(--bad); }
+  aside {
+    overflow: auto;
+    background: var(--panel);
+    padding: 18px 20px;
+  }
+  aside h2 { margin: 0 0 6px; font-size: 14px; font-weight: 600; }
+  aside h3 { margin: 18px 0 6px; font-size: 12px; text-transform: uppercase; color: var(--muted); letter-spacing: 0.04em; }
+  aside dl { display: grid; grid-template-columns: 130px 1fr; gap: 4px 12px; margin: 0; font-size: 13px; }
+  aside dt { color: var(--muted); }
+  aside dd { margin: 0; font-family: ui-monospace, monospace; word-break: break-all; }
+  aside .empty { color: var(--muted); font-style: italic; }
+  .breakdown { display: grid; grid-template-columns: 1fr auto; gap: 2px 14px; font-size: 13px; }
+  .breakdown .lbl { color: var(--muted); }
+  .breakdown .val { font-family: ui-monospace, monospace; text-align: right; }
+  .stacked-bar {
+    display: flex;
+    height: 14px;
+    width: 100%;
+    border-radius: 4px;
+    overflow: hidden;
+    background: var(--panel-2);
+    margin: 8px 0 4px;
+  }
+  .stacked-bar .seg { transition: opacity .15s; min-width: 2px; }
+  .stacked-bar .seg:hover { opacity: 0.75; }
+  .stacked-bar.empty { background: var(--panel-2); }
+  .sig-table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 4px; }
+  .sig-table td { padding: 4px 4px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .sig-table tr:last-child td { border-bottom: none; }
+  .sig-table .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+  .sig-table .mini-bar { display: inline-block; width: 80px; height: 5px; background: var(--panel-2); border-radius: 3px; vertical-align: middle; overflow: hidden; }
+  .sig-table .mini-bar > div { height: 100%; transition: width .15s; }
+  .sig-table .v { font-family: ui-monospace, monospace; text-align: right; color: var(--muted); }
+  .sig-table .v.has { color: var(--text); }
+  .sig-table .pct { font-family: ui-monospace, monospace; text-align: right; color: var(--muted); width: 44px; }
+  .sig-empty { color: var(--muted); font-style: italic; font-size: 12.5px; padding: 4px 0; }
+  #status { color: var(--muted); font-size: 12px; }
+  .login {
+    max-width: 360px;
+    margin: 80px auto;
+    padding: 28px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+  .login h2 { margin: 0 0 16px; }
+  .login label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  .login input { width: 100%; margin-bottom: 14px; }
+  .login button { width: 100%; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+const TOKEN_KEY = 'rust_captcha_admin_token';
+
+const $ = (sel, root = document) => root.querySelector(sel);
+const h = (tag, attrs = {}, ...kids) => {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'class') el.className = v;
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (v !== false && v != null) el.setAttribute(k, v);
+  }
+  for (const k of kids.flat()) {
+    if (k == null || k === false) continue;
+    el.append(k.nodeType ? k : document.createTextNode(k));
+  }
+  return el;
+};
+
+function probabilityClass(p) {
+  if (p >= 60) return 'bad';
+  if (p >= 30) return 'warn';
+  return 'good';
+}
+function outcomeClass(o) {
+  if (o === 'pass' || o === 'issued') return 'good';
+  if (o === 'shadow_fail') return 'warn';
+  if (o === 'block' || o === 'rejected' || o === 'pow_invalid') return 'bad';
+  return '';
+}
+
+function renderLogin(onSubmit) {
+  const tokenInput = h('input', { type: 'password', autocomplete: 'off', placeholder: 'ADMIN_TOKEN' });
+  const errEl = h('div', { class: 'empty', style: 'color: var(--bad); margin-bottom: 8px;' });
+  const form = h('form', { class: 'login', onsubmit: e => {
+    e.preventDefault();
+    onSubmit(tokenInput.value, msg => { errEl.textContent = msg; });
+  } },
+    h('h2', {}, 'Validation Dashboard'),
+    errEl,
+    h('label', { for: 'tk' }, 'Admin token'),
+    tokenInput,
+    h('button', { type: 'submit' }, 'Sign in'),
+  );
+  return form;
+}
+
+function renderApp(token) {
+  const tbody = h('tbody');
+  const aside = h('aside', {}, h('div', { class: 'empty' }, 'Select a session to inspect.'));
+  const statusEl = h('span', { id: 'status' }, 'loading…');
+  const statsPanel = h('div', { class: 'stats-panel' }, h('span', { class: 'stat' }, 'loading stats…'));
+  let selectedId = null;
+  let timer = null;
+
+  const refresh = async () => {
+    try {
+      const [sRes, statsRes] = await Promise.all([
+        fetch('/v1/admin/sessions?limit=200', { headers: { Authorization: `Bearer ${token}` } }),
+        fetch('/v1/admin/stats', { headers: { Authorization: `Bearer ${token}` } }),
+      ]);
+      if (sRes.status === 401 || statsRes.status === 401) {
+        sessionStorage.removeItem(TOKEN_KEY);
+        location.reload();
+        return;
+      }
+      if (!sRes.ok) throw new Error(`HTTP ${sRes.status}`);
+      if (!statsRes.ok) throw new Error(`HTTP ${statsRes.status}`);
+      const data = await sRes.json();
+      const stats = await statsRes.json();
+      renderRows(data.sessions);
+      statsPanel.replaceChildren(...renderStats(stats));
+      statusEl.textContent = `${data.sessions.length} sessions · refreshed ${new Date().toLocaleTimeString()}`;
+    } catch (e) {
+      statusEl.textContent = `error: ${e.message}`;
+    }
+  };
+
+  const renderRows = (sessions) => {
+    tbody.replaceChildren(...sessions.map(s => {
+      const p = s.bot_probability;
+      const pCls = probabilityClass(p);
+      const tr = h('tr', { 'data-id': s.id, onclick: () => selectRow(s) },
+        h('td', { class: 'mono' }, new Date(s.ts).toLocaleTimeString()),
+        h('td', { class: 'mono' }, s.ip),
+        h('td', {},
+          h('span', { class: 'bar' }, h('div', { class: pCls, style: `width:${p}%` })),
+          `${p}%`,
+        ),
+        h('td', {}, h('span', { class: `pill ${pCls}` }, s.tier)),
+        h('td', {}, h('span', { class: `pill ${outcomeClass(s.puzzle_outcome)}` }, s.puzzle_outcome)),
+        h('td', {}, s.verify
+          ? h('span', { class: `pill ${outcomeClass(s.verify.outcome)}` }, s.verify.outcome)
+          : h('span', { class: 'pill' }, '—')),
+        h('td', { class: 'mono' }, String(s.puzzle_score)),
+        h('td', { class: 'mono' }, s.verify ? String(s.verify.score) : '—'),
+        h('td', { class: 'mono' }, s.challenge_id ? s.challenge_id.slice(0, 8) : '—'),
+      );
+      if (s.id === selectedId) tr.classList.add('selected');
+      return tr;
+    }));
+  };
+
+  const selectRow = (s) => {
+    selectedId = s.id;
+    for (const tr of tbody.children) {
+      tr.classList.toggle('selected', Number(tr.dataset.id) === s.id);
+    }
+    aside.replaceChildren(renderDetail(s));
+  };
+
+  const clearAll = async () => {
+    if (!confirm('Delete all puzzle and verify decisions? This cannot be undone.')) return;
+    try {
+      const res = await fetch('/v1/admin/sessions', {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      selectedId = null;
+      aside.replaceChildren(h('div', { class: 'empty' }, 'Select a session to inspect.'));
+      await refresh();
+    } catch (e) {
+      statusEl.textContent = `clear failed: ${e.message}`;
+    }
+  };
+
+  // Initial fetch + 3s autopoll. Tab visibility-aware so a backgrounded tab
+  // doesn't keep hitting the API.
+  const startPolling = () => {
+    clearInterval(timer);
+    timer = setInterval(() => { if (!document.hidden) refresh(); }, 3000);
+  };
+  refresh().then(startPolling);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+
+  return h('div', {},
+    h('header', {},
+      h('h1', {}, 'rust-captcha'),
+      h('span', { class: 'muted' }, 'validation dashboard'),
+      h('span', { class: 'grow' }),
+      statusEl,
+      h('button', { onclick: () => refresh() }, 'Refresh'),
+      h('button', { class: 'danger', onclick: () => clearAll() }, 'Clear all'),
+      h('button', { onclick: () => { sessionStorage.removeItem(TOKEN_KEY); location.reload(); } }, 'Sign out'),
+    ),
+    h('main', {},
+      h('div', { class: 'left' },
+        statsPanel,
+        h('div', { class: 'table-wrap' },
+          h('table', {},
+            h('thead', {},
+              h('tr', {},
+                h('th', {}, 'time'),
+                h('th', {}, 'ip'),
+                h('th', {}, 'bot %'),
+                h('th', {}, 'tier'),
+                h('th', {}, 'puzzle'),
+                h('th', {}, 'verify'),
+                h('th', {}, 'p score'),
+                h('th', {}, 'v score'),
+                h('th', {}, 'challenge'),
+              ),
+            ),
+            tbody,
+          ),
+        ),
+      ),
+      aside,
+    ),
+  );
+}
+
+function renderStats(s) {
+  const fmt = (n) => Number.isFinite(n) ? n.toFixed(1) : '—';
+  const probCls = probabilityClass(Math.round(s.avg_bot_probability));
+
+  // Aggregate signal totals — combine puzzle and verify under their own
+  // bars. Sums (not averages) reflect "where does the score come from"
+  // best because zero-firing rows shouldn't drag the average down.
+  const puzzleTotal = sumValues(s.puzzle_signals);
+  const verifyTotal = sumValues(s.verify_signals);
+
+  const stackBar = (sums, total, keys) =>
+    total > 0
+      ? h('div', { class: 'stacked-bar' },
+          ...keys.map(k => sums[k]).map((v, i) => v > 0 ? h('div', {
+            class: 'seg',
+            style: `flex: ${v} 0 0; background: ${SIGNAL_COLORS[keys[i]]}`,
+            title: `${SIGNAL_LABELS[keys[i]]}: ${v} (${Math.round(v / total * 100)}%)`,
+          }) : null).filter(Boolean),
+        )
+      : h('div', { class: 'sig-empty' }, 'no signal scored yet');
+
+  const legend = (keys, sums, total) =>
+    h('div', { class: 'dist-row', style: 'margin-top: 4px;' },
+      ...keys.filter(k => sums[k] > 0).map(k =>
+        h('span', { class: 'dist-chip' },
+          h('span', { class: 'dot', style: `background: ${SIGNAL_COLORS[k]}; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle;` }),
+          SIGNAL_LABELS[k],
+          h('span', { class: 'n' }, `${Math.round(sums[k] / total * 100)}%`),
+        ),
+      ),
+    );
+
+  const tierChips = [
+    ['invisible_pass', 'invisible'],
+    ['checkbox', 'checkbox'],
+    ['hard_pow', 'hard pow'],
+    ['visual_challenge', 'visual'],
+    ['block', 'block'],
+  ].filter(([k]) => s.tiers[k] > 0);
+
+  return [
+    h('div', { class: 'stats-grid' },
+      h('div', { class: 'stat' },
+        'sessions',
+        h('div', { class: 'v' }, String(s.total_sessions)),
+      ),
+      h('div', { class: 'stat' },
+        'verified',
+        h('div', { class: 'v' }, String(s.verified_sessions)),
+      ),
+      h('div', { class: 'stat' },
+        'avg puzzle / verify score',
+        h('div', { class: 'v' }, `${fmt(s.avg_puzzle_score)} / ${fmt(s.avg_verify_score)}`),
+      ),
+      h('div', { class: 'stat' },
+        'avg bot probability',
+        h('div', { class: 'v has-pill' },
+          h('span', { class: `pill ${probCls}` }, `${fmt(s.avg_bot_probability)}%`)),
+      ),
+    ),
+    h('div', { class: 'stats-row' },
+      h('span', { class: 'lbl' }, 'puzzle signals'),
+      h('div', {},
+        stackBar(s.puzzle_signals, puzzleTotal, PUZZLE_KEYS),
+        legend(PUZZLE_KEYS, s.puzzle_signals, puzzleTotal),
+      ),
+    ),
+    h('div', { class: 'stats-row' },
+      h('span', { class: 'lbl' }, 'verify signals'),
+      h('div', {},
+        stackBar(s.verify_signals, verifyTotal, VERIFY_KEYS),
+        legend(VERIFY_KEYS, s.verify_signals, verifyTotal),
+      ),
+    ),
+    tierChips.length > 0
+      ? h('div', { class: 'stats-row' },
+          h('span', { class: 'lbl' }, 'tier distribution'),
+          h('div', { class: 'dist-row' },
+            ...tierChips.map(([k, label]) =>
+              h('span', { class: 'dist-chip' }, label, h('span', { class: 'n' }, String(s.tiers[k])))),
+          ),
+        )
+      : null,
+  ].filter(Boolean);
+}
+
+function sumValues(obj) {
+  return Object.values(obj).reduce((a, b) => a + b, 0);
+}
+
+// Fixed palette per signal name. Stable colors across sessions help the eye
+// track which signal is which without re-reading the legend each time.
+const SIGNAL_COLORS = {
+  rate:            '#58a6ff',
+  header_anomaly:  '#d29922',
+  ip_reputation:   '#f85149',
+  cookie_age:      '#bc8cff',
+  tls_fingerprint: '#79c0ff',
+  honeypot:        '#ff7b72',
+  time_on_page:    '#ffa657',
+  behavior:        '#56d364',
+};
+
+const SIGNAL_LABELS = {
+  rate: 'rate',
+  header_anomaly: 'header anomaly',
+  ip_reputation: 'ip reputation',
+  cookie_age: 'cookie age',
+  tls_fingerprint: 'tls fingerprint',
+  honeypot: 'honeypot',
+  time_on_page: 'time on page',
+  behavior: 'behavior',
+};
+
+function renderContribution(breakdown, keys, total) {
+  const entries = keys.map(k => ({ key: k, value: breakdown[k] || 0, color: SIGNAL_COLORS[k], label: SIGNAL_LABELS[k] }));
+  const stacked = total > 0
+    ? h('div', { class: 'stacked-bar' },
+        ...entries.filter(e => e.value > 0).map(e =>
+          h('div', {
+            class: 'seg',
+            style: `flex: ${e.value} 0 0; background: ${e.color}`,
+            title: `${e.label}: ${e.value} (${Math.round(e.value / total * 100)}%)`,
+          }),
+        ),
+      )
+    : h('div', { class: 'sig-empty' }, 'No signals fired.');
+  const table = h('table', { class: 'sig-table' },
+    h('tbody', {},
+      ...entries.map(e => {
+        const pct = total > 0 ? Math.round(e.value / total * 100) : 0;
+        return h('tr', {},
+          h('td', { style: 'width: 16px;' },
+            h('span', { class: 'dot', style: `background: ${e.color}` })),
+          h('td', {}, e.label),
+          h('td', { style: 'width: 80px;' },
+            h('span', { class: 'mini-bar' },
+              h('div', { style: `width:${pct}%; background: ${e.color}` }))),
+          h('td', { class: e.value > 0 ? 'v has' : 'v' }, String(e.value)),
+          h('td', { class: 'pct' }, e.value > 0 ? `${pct}%` : '—'),
+        );
+      }),
+    ),
+  );
+  return h('div', {}, stacked, table);
+}
+
+const PUZZLE_KEYS = ['rate', 'header_anomaly', 'ip_reputation', 'cookie_age', 'tls_fingerprint'];
+const VERIFY_KEYS = ['honeypot', 'time_on_page', 'cookie_age', 'behavior'];
+
+function renderDetail(s) {
+  const p = s.bot_probability;
+  const verify = s.verify;
+  return h('div', {},
+    h('h2', {}, `Session #${s.id}`),
+    h('div', { class: 'breakdown', style: 'margin-top: 6px;' },
+      h('span', { class: 'lbl' }, 'bot probability'),
+      h('span', { class: 'val' }, h('span', { class: `pill ${probabilityClass(p)}` }, `${p}%`)),
+    ),
+
+    h('h3', {}, 'Request'),
+    h('dl', {},
+      h('dt', {}, 'time'), h('dd', {}, s.ts),
+      h('dt', {}, 'ip'), h('dd', {}, s.ip),
+      h('dt', {}, 'site key'), h('dd', {}, s.site_key),
+      h('dt', {}, 'challenge'), h('dd', {}, s.challenge_id || '—'),
+      h('dt', {}, 'user-agent'), h('dd', {}, s.user_agent || '(none)'),
+      h('dt', {}, 'cookie'), h('dd', {}, s.cookie_presence),
+      h('dt', {}, 'tls fp'), h('dd', {}, s.tls_fingerprint),
+      h('dt', {}, 'rate (ip/site)'), h('dd', {}, `${s.ip_count} / ${s.site_count}`),
+    ),
+
+    h('h3', {}, `Puzzle · ${s.puzzle_outcome} · ${s.tier} · score ${s.puzzle_score}`),
+    renderContribution(s.puzzle_breakdown, PUZZLE_KEYS, s.puzzle_score),
+    h('div', { class: 'breakdown', style: 'margin-top: 8px;' },
+      h('span', { class: 'lbl' }, 'difficulty'), h('span', { class: 'val' }, String(s.difficulty)),
+    ),
+
+    verify
+      ? h('div', {},
+          h('h3', {}, `Verify · ${verify.outcome} · score ${verify.score}`),
+          renderContribution(verify.breakdown, VERIFY_KEYS, verify.score),
+          h('div', { class: 'breakdown', style: 'margin-top: 8px;' },
+            h('span', { class: 'lbl' }, 'success'), h('span', { class: 'val' }, String(verify.success)),
+            h('span', { class: 'lbl' }, 'time on page'), h('span', { class: 'val' }, verify.time_on_page_ms != null ? `${verify.time_on_page_ms} ms` : '—'),
+            h('span', { class: 'lbl' }, 'cookie'), h('span', { class: 'val' }, verify.cookie_presence),
+            h('span', { class: 'lbl' }, 'webdriver'), h('span', { class: 'val' }, verify.webdriver),
+          ),
+        )
+      : h('div', { class: 'empty', style: 'margin-top: 14px;' }, 'No verify call yet for this challenge.'),
+  );
+}
+
+function init() {
+  const root = $('#root');
+  const token = sessionStorage.getItem(TOKEN_KEY);
+  if (!token) {
+    root.replaceChildren(renderLogin(async (tk, setError) => {
+      // Probe the API to validate the token before storing it.
+      const res = await fetch('/v1/admin/sessions?limit=1', {
+        headers: { Authorization: `Bearer ${tk}` },
+      });
+      if (res.status === 401) { setError('Invalid token.'); return; }
+      if (!res.ok) { setError(`HTTP ${res.status}`); return; }
+      sessionStorage.setItem(TOKEN_KEY, tk);
+      root.replaceChildren(renderApp(tk));
+    }));
+  } else {
+    root.replaceChildren(renderApp(token));
+  }
+}
+
+init();
+</script>
+</body>
+</html>
