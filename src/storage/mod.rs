@@ -27,6 +27,14 @@ pub trait Store: Send + Sync + 'static {
         challenge_id: &Uuid,
     ) -> impl Future<Output = Result<(), CaptchaError>> + Send;
 
+    /// Atomically consume a correctly-solved challenge. Exactly one caller
+    /// can consume a challenge; later callers receive `ChallengeNotFound`
+    /// because the challenge has been removed from the active set.
+    fn consume_challenge(
+        &self,
+        challenge_id: &Uuid,
+    ) -> impl Future<Output = Result<(), CaptchaError>> + Send;
+
     fn store_site(&self, site: &Site) -> impl Future<Output = Result<(), CaptchaError>> + Send;
 
     fn get_site_by_key(

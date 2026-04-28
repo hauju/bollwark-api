@@ -181,6 +181,15 @@ impl Store for InMemoryStore {
         }
     }
 
+    async fn consume_challenge(&self, challenge_id: &Uuid) -> Result<(), CaptchaError> {
+        let mut map = self.challenges.write().map_err(lock_err)?;
+        match map.remove(challenge_id) {
+            Some(challenge) if challenge.solved => Err(CaptchaError::ChallengeAlreadyUsed),
+            Some(_) => Ok(()),
+            None => Err(CaptchaError::ChallengeNotFound),
+        }
+    }
+
     async fn store_site(&self, site: &Site) -> Result<(), CaptchaError> {
         // Persist first so an in-memory insert isn't visible if the disk
         // write fails (e.g. UNIQUE collision on a regenerated secret).
@@ -410,6 +419,19 @@ mod tests {
         let store = InMemoryStore::new();
         let result = store.mark_solution_used(&Uuid::new_v4()).await;
         assert!(matches!(result, Err(CaptchaError::ChallengeNotFound)));
+    }
+
+    #[tokio::test]
+    async fn test_consume_challenge_removes_once() {
+        let store = InMemoryStore::new();
+        let challenge = make_challenge(Uuid::new_v4(), 300);
+
+        store.store_challenge(&challenge).await.unwrap();
+        store.consume_challenge(&challenge.id).await.unwrap();
+
+        assert!(store.get_challenge(&challenge.id).await.unwrap().is_none());
+        let second = store.consume_challenge(&challenge.id).await;
+        assert!(matches!(second, Err(CaptchaError::ChallengeNotFound)));
     }
 
     #[tokio::test]

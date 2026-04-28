@@ -207,7 +207,7 @@ pub async fn verify(
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or(CaptchaError::Unauthorized)?;
 
-    state
+    let site = state
         .store
         .get_site_by_secret(token)
         .await?
@@ -219,6 +219,10 @@ pub async fn verify(
         .get_challenge(&body.challenge_id)
         .await?
         .ok_or(CaptchaError::ChallengeNotFound)?;
+
+    if challenge.site_key != site.site_key {
+        return Err(CaptchaError::Unauthorized);
+    }
 
     // Check expiry
     if challenge.expires_at < chrono::Utc::now() {
@@ -257,9 +261,10 @@ pub async fn verify(
         return Ok(Json(VerifyResponse { success: false }));
     }
 
-    // Mark challenge as used (PoW solved correctly)
-    state.store.mark_solution_used(&challenge.id).await?;
-    state.store.delete_challenge(&challenge.id).await?;
+    // Consume the challenge atomically after a valid PoW. This preserves
+    // wrong-nonce retry behavior, while ensuring concurrent correct submits
+    // cannot both pass.
+    state.store.consume_challenge(&challenge.id).await?;
 
     // Verify-time risk scoring: time-on-page, cookie age at verify, honeypot.
     // The decision can promote a PoW-valid request to ShadowFail (success=true,

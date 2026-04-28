@@ -3,18 +3,40 @@
 (function () {
   "use strict";
 
+  const SCRIPT_SRC = document.currentScript && document.currentScript.src;
+  const DEFAULT_SERVER_URL = inferServerUrl(SCRIPT_SRC);
+
+  function inferServerUrl(scriptSrc) {
+    if (!scriptSrc) return "";
+    try {
+      const url = new URL(scriptSrc, window.location.href);
+      return url.origin === window.location.origin ? "" : url.origin;
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function isCrossOrigin(url) {
+    try {
+      return new URL(url, window.location.href).origin !== window.location.origin;
+    } catch (_) {
+      return false;
+    }
+  }
+
   // ── CaptchaWidget Class ──
 
   class CaptchaWidget {
     constructor(container, options) {
       this.container = container;
       this.siteKey = options.sitekey;
-      this.serverUrl = options.serverUrl || "";
+      this.serverUrl = options.serverUrl || DEFAULT_SERVER_URL;
       this.debug = options.debug === "true" || options.debug === true;
       this.onVerify = options.onVerify || null;
 
       this.state = "idle";
       this.worker = null;
+      this.workerBlobUrl = null;
       this.solveStartTime = null;
       this.puzzle = null;
       this.tier = null;
@@ -273,7 +295,7 @@
 
     async _fetchPuzzle() {
       const url = `${this.serverUrl}/v1/puzzle?site_key=${this.siteKey}`;
-      const resp = await fetch(url);
+      const resp = await fetch(url, { credentials: "include" });
       if (!resp.ok) {
         const body = await resp.text();
         throw new Error(`Puzzle fetch failed (${resp.status}): ${body}`);
@@ -286,38 +308,70 @@
         this.solveStartTime = performance.now();
         this._powProgress = 0;
 
-        const workerUrl = this.serverUrl + "/static/captcha-worker.js";
-        this.worker = new Worker(workerUrl);
+        this._createWorker()
+          .then((worker) => {
+            this.worker = worker;
 
-        this.worker.onmessage = (e) => {
-          if (e.data.type === "progress") {
-            this._powProgress = e.data.nonce;
-            this._updateUI();
-          } else if (e.data.type === "solved") {
-            this._solveTime = (performance.now() - this.solveStartTime) / 1000;
-            this._powProgress = e.data.nonce;
-            this.worker.terminate();
-            this.worker = null;
-            resolve({ nonce: e.data.nonce });
-          } else if (e.data.type === "error") {
-            this.worker.terminate();
-            this.worker = null;
-            reject(new Error(e.data.message));
-          }
-        };
+            this.worker.onmessage = (e) => {
+              if (e.data.type === "progress") {
+                this._powProgress = e.data.nonce;
+                this._updateUI();
+              } else if (e.data.type === "solved") {
+                this._solveTime = (performance.now() - this.solveStartTime) / 1000;
+                this._powProgress = e.data.nonce;
+                this._destroyWorker();
+                resolve({ nonce: e.data.nonce });
+              } else if (e.data.type === "error") {
+                this._destroyWorker();
+                reject(new Error(e.data.message));
+              }
+            };
 
-        this.worker.onerror = (err) => {
-          this.worker.terminate();
-          this.worker = null;
-          reject(new Error("Worker error: " + err.message));
-        };
+            this.worker.onerror = (err) => {
+              this._destroyWorker();
+              reject(new Error("Worker error: " + err.message));
+            };
 
-        this.worker.postMessage({
-          prefix: puzzle.prefix,
-          difficulty: puzzle.difficulty,
-          algorithm: puzzle.algorithm,
-        });
+            this.worker.postMessage({
+              prefix: puzzle.prefix,
+              difficulty: puzzle.difficulty,
+              algorithm: puzzle.algorithm,
+            });
+          })
+          .catch(reject);
       });
+    }
+
+    async _createWorker() {
+      const workerUrl = this.serverUrl + "/static/captcha-worker.js";
+      if (!isCrossOrigin(workerUrl)) {
+        return new Worker(workerUrl);
+      }
+
+      const resp = await fetch(workerUrl, { credentials: "omit" });
+      if (!resp.ok) {
+        throw new Error(`Worker fetch failed (${resp.status})`);
+      }
+      const vendorUrl = this.serverUrl + "/static/vendor/argon2.umd.min.js";
+      const source = (await resp.text()).replace(
+        /importScripts\(["']vendor\/argon2\.umd\.min\.js["']\)/g,
+        `importScripts(${JSON.stringify(vendorUrl)})`
+      );
+      this.workerBlobUrl = URL.createObjectURL(
+        new Blob([source], { type: "text/javascript" })
+      );
+      return new Worker(this.workerBlobUrl);
+    }
+
+    _destroyWorker() {
+      if (this.worker) {
+        this.worker.terminate();
+        this.worker = null;
+      }
+      if (this.workerBlobUrl) {
+        URL.revokeObjectURL(this.workerBlobUrl);
+        this.workerBlobUrl = null;
+      }
     }
 
     // ── Form Integration ──
@@ -367,10 +421,7 @@
     // ── Public Methods ──
 
     reset() {
-      if (this.worker) {
-        this.worker.terminate();
-        this.worker = null;
-      }
+      this._destroyWorker();
       this._teardownBehaviorListeners();
       this.state = "idle";
       this.puzzle = null;

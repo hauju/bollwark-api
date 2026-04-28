@@ -9,7 +9,8 @@ use axum::http::Method;
 use axum::http::StatusCode;
 use axum::http::header;
 use axum::routing::{get, post};
-use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower::ServiceBuilder;
+use tower_http::cors::{AllowCredentials, AllowOrigin, CorsLayer};
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
@@ -18,6 +19,7 @@ use state::SharedState;
 
 pub fn router(state: SharedState, admin: Option<AdminState>) -> Router {
     let cors = build_cors_layer(state.config.cors_allowed_origins.as_deref());
+    let asset_cors = build_asset_cors_layer(state.config.cors_allowed_origins.as_deref());
 
     // Public CORS-enabled surface: just the puzzle endpoint. Browser widgets
     // hosted on a different origin from the captcha service need to fetch it.
@@ -44,7 +46,12 @@ pub fn router(state: SharedState, admin: Option<AdminState>) -> Router {
         .route("/healthz", get(healthz))
         .merge(public)
         .merge(internal)
-        .nest_service("/static", ServeDir::new("static"));
+        .nest_service(
+            "/static",
+            ServiceBuilder::new()
+                .layer(asset_cors)
+                .service(ServeDir::new("static")),
+        );
 
     if let Some(admin) = admin {
         // Admin routes are bearer-protected and not CORS-enabled either.
@@ -65,22 +72,35 @@ async fn healthz() -> (StatusCode, &'static str) {
 ///   flow when the cookie's `SameSite=Lax` is in effect cross-origin),
 ///   so `*` is operationally equivalent to "any embed".
 /// - If `allowed` is `Some(spec)`: parse it as a comma- or
-///   whitespace-separated list. Malformed origins log a warning and are
-///   skipped. An empty list after parsing falls back to "any origin"
-///   to avoid silently breaking embedders.
+///   whitespace-separated list. In that mode credentials are allowed so
+///   cross-site embeds can opt into the trust cookie signal.
 fn build_cors_layer(allowed: Option<&str>) -> CorsLayer {
     let methods = [Method::GET, Method::OPTIONS];
-    let allow_headers = [header::CONTENT_TYPE];
+    let allow_headers = [header::CONTENT_TYPE, header::COOKIE];
 
     match allowed.map(parse_origins).unwrap_or_default() {
         list if !list.is_empty() => CorsLayer::new()
             .allow_origin(AllowOrigin::list(list))
             .allow_methods(methods)
-            .allow_headers(allow_headers),
+            .allow_headers(allow_headers)
+            .allow_credentials(AllowCredentials::yes()),
         _ => CorsLayer::new()
             .allow_origin(AllowOrigin::any())
             .allow_methods(methods)
             .allow_headers(allow_headers),
+    }
+}
+
+fn build_asset_cors_layer(allowed: Option<&str>) -> CorsLayer {
+    match allowed.map(parse_origins).unwrap_or_default() {
+        list if !list.is_empty() => CorsLayer::new()
+            .allow_origin(AllowOrigin::list(list))
+            .allow_methods([Method::GET, Method::OPTIONS])
+            .allow_headers([header::CONTENT_TYPE]),
+        _ => CorsLayer::new()
+            .allow_origin(AllowOrigin::any())
+            .allow_methods([Method::GET, Method::OPTIONS])
+            .allow_headers([header::CONTENT_TYPE]),
     }
 }
 

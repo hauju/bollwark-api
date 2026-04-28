@@ -368,17 +368,15 @@
       btn.textContent = "Creating...";
 
       try {
-        let token = getAdminToken();
-        if (!token) throw new Error("Admin token required");
+        let token = sessionStorage.getItem(ADMIN_TOKEN_KEY);
+        let headers = { "Content-Type": "application/json" };
+        if (token) headers.Authorization = "Bearer " + token;
         let resp = await fetch("/v1/sites", {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + token,
-          },
+          headers,
           body: JSON.stringify({ name: "test-site" }),
         });
-        if (resp.status === 401) {
+        if (resp.status === 401 || resp.status === 404) {
           // Stored token is wrong or rotated — drop it and re-prompt once.
           sessionStorage.removeItem(ADMIN_TOKEN_KEY);
           token = getAdminToken({ forcePrompt: true });

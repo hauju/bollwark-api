@@ -35,7 +35,7 @@ A `.env` file in the working directory is loaded automatically at startup (via `
 | `ADMIN_DB_PATH` | _unset_ | Path to the SQLite database for the validation dashboard. Enables decision logging + admin endpoints. |
 | `ADMIN_TOKEN` | _unset_ | Bearer token for `/v1/admin/*` and `POST /v1/sites`. Without it, `POST /v1/sites` returns 404 (no anonymous provisioning). Required when `ADMIN_DB_PATH` is set. |
 | `SITE_DB_PATH` | _unset_ | Path to a SQLite file for persistent site registrations. Without it, sites live only in memory and are lost on restart. |
-| `CORS_ALLOWED_ORIGINS` | _unset_ | Comma- or whitespace-separated allowlist of origins permitted to call `GET /v1/puzzle` from a browser. Empty/unset = any origin (no credentials). Other endpoints never have CORS enabled. |
+| `CORS_ALLOWED_ORIGINS` | _unset_ | Comma- or whitespace-separated allowlist of origins permitted to call `GET /v1/puzzle` and fetch static widget assets from a browser. Empty/unset = any origin, no credentials. Set this for cross-origin trust cookies. Other API endpoints never have CORS enabled. |
 | `DEV_DISABLE_ADMIN_AUTH` | `false` | **Dev/test only.** When truthy (`1`/`true`/`yes`/`on`), `POST /v1/sites` skips the `ADMIN_TOKEN` bearer check. Refused in release builds. Admin dashboard endpoints (`/v1/admin/*`) are NOT bypassed. |
 
 ---
@@ -266,12 +266,12 @@ Challenges and rate-window counters intentionally stay in-memory: they're cheap 
 ## CORS
 
 ### `CORS_ALLOWED_ORIGINS`
-The puzzle endpoint (`GET /v1/puzzle`) is the only surface a browser-embedded widget reaches cross-origin. It's the only route with a CORS layer. `/v1/verify`, `/v1/sites`, and `/v1/admin/*` have **no** CORS layer — same-origin policy in browsers blocks cross-origin reads of those endpoints.
+The browser-embedded widget reaches `GET /v1/puzzle` and static assets (`/static/captcha-worker.js`, vendor files) cross-origin. Those are the only surfaces with CORS. `/v1/verify`, `/v1/sites`, and `/v1/admin/*` have **no** CORS layer — same-origin policy in browsers blocks cross-origin reads of those endpoints.
 
-- Unset: any origin allowed, no credentials. Operationally equivalent to "any embed."
-- Set: comma- or whitespace-separated allowlist (`https://a.example,https://b.example`). Origins outside the list don't get CORS headers and the browser blocks the response.
+- Unset: any origin allowed, no credentials. The widget can fetch puzzles, but cross-origin trust cookies won't work.
+- Set: comma- or whitespace-separated allowlist (`https://a.example,https://b.example`). Origins outside the list don't get CORS headers and the browser blocks the response. Listed origins may send credentials to `GET /v1/puzzle`, which is required for cross-origin trust cookies.
 
-Cookies don't flow cross-origin in the default `SameSite=Lax` configuration regardless of CORS — the cookie signal degrades to "missing" for embedders on a different origin from the captcha service.
+Cookies don't flow cross-origin in the default `SameSite=Lax` configuration regardless of CORS — the cookie signal degrades to "missing" for embedders on a different origin from the captcha service. To enable the cookie signal cross-origin, set `CORS_ALLOWED_ORIGINS`, `COOKIE_SAMESITE=None`, and `COOKIE_SECURE=true`.
 
 ---
 

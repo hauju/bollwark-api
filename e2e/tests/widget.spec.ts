@@ -84,7 +84,7 @@ test("honeypot: filling the trap should fail verification", async ({ page }) => 
   // Force-fill the off-screen honeypot input (simulates a naive bot).
   await page.evaluate(() => {
     const hp = document.querySelector(
-      'input[name="rc_email_confirm"]',
+      '.rc-captcha input[aria-hidden="true"]',
     ) as HTMLInputElement | null;
     if (hp) hp.value = "bot@bot.example";
   });

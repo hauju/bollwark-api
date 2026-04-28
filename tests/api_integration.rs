@@ -294,6 +294,33 @@ async fn test_verify_wrong_secret() {
 }
 
 #[tokio::test]
+async fn test_verify_rejects_challenge_from_different_site() {
+    let app = test_app();
+    let site_a = create_test_site(&app).await;
+    let site_b = create_test_site(&app).await;
+    let (_, puzzle) = get_test_puzzle(&app, &site_a.site_key.to_string()).await;
+    let puzzle = puzzle.unwrap();
+
+    let nonce = solve_challenge(&puzzle.prefix, puzzle.difficulty);
+
+    let verify_body = serde_json::json!({
+        "challenge_id": puzzle.challenge_id,
+        "nonce": nonce,
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/verify")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", site_b.secret_key))
+        .body(Body::from(serde_json::to_vec(&verify_body).unwrap()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn test_replay_rejection() {
     let app = test_app();
     let site = create_test_site(&app).await;

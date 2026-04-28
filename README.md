@@ -53,6 +53,16 @@ Open `http://localhost:3000/static/testsite.html` for a working harness that exe
 <script src="https://your-host/static/captcha-widget.js"></script>
 ```
 
+When `captcha-widget.js` is served from a different origin than your app, the widget automatically uses the script origin as the CAPTCHA API origin and loads the PoW worker through a same-page Blob wrapper. If you self-host or bundle the script somewhere else, set `data-server-url="https://your-captcha-host"` on the widget element.
+
+For cross-origin embeds with trust cookies, configure:
+
+```bash
+CORS_ALLOWED_ORIGINS="https://your-app.example"
+COOKIE_SAMESITE=None
+COOKIE_SECURE=true
+```
+
 The widget evaluates its risk tier once on mount (matching Turnstile / hCaptcha behaviour), solves the PoW off-thread, and writes the resulting token into a hidden `<input name="captcha-token">` on submit. Your backend then calls `POST /v1/verify` with the site secret to confirm.
 
 > **Token contract:** Unlike Turnstile/hCaptcha which return an opaque string, this widget writes a **JSON blob** of the form `{"challenge_id": "...", "nonce": 12345, "time_on_page_ms": 4200, "behavior": {...}, "honeypot": ""}` into the hidden input. Your form handler must `JSON.parse` it server-side and forward the fields verbatim in the `/v1/verify` body. (The opaque-token wrapper is a planned change — see issues.)
