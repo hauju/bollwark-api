@@ -4,8 +4,11 @@ pub mod state;
 pub mod types;
 
 use axum::Router;
+use axum::http::HeaderValue;
+use axum::http::Method;
+use axum::http::header;
 use axum::routing::{get, post};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
@@ -13,20 +16,73 @@ use crate::dashboard::routes::AdminState;
 use state::SharedState;
 
 pub fn router(state: SharedState, admin: Option<AdminState>) -> Router {
-    let api = Router::new()
+    let cors = build_cors_layer(state.config.cors_allowed_origins.as_deref());
+
+    // Public CORS-enabled surface: just the puzzle endpoint. Browser widgets
+    // hosted on a different origin from the captcha service need to fetch it.
+    let public = Router::new()
         .route("/v1/puzzle", get(handlers::get_puzzle))
+        .with_state(state.clone())
+        .layer(cors);
+
+    // Server-to-server / provisioning surface: NO CORS. Browsers can't
+    // reach these from a different origin (same-origin policy blocks the
+    // response), which is what we want for `/v1/verify` (site secret) and
+    // `/v1/sites` (admin token).
+    let internal = Router::new()
         .route("/v1/verify", post(handlers::verify))
         .route("/v1/sites", post(handlers::create_site))
         .with_state(state);
 
     let mut app = Router::new()
-        .merge(api)
+        .merge(public)
+        .merge(internal)
         .nest_service("/static", ServeDir::new("static"));
 
     if let Some(admin) = admin {
+        // Admin routes are bearer-protected and not CORS-enabled either.
         app = app.merge(crate::dashboard::routes::router(admin));
     }
 
-    app.layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
+    app.layer(TraceLayer::new_for_http())
+}
+
+/// Build the CORS layer for the public puzzle endpoint.
+///
+/// - If `allowed` is `None` (env unset): allow any origin without
+///   credentials. The puzzle response is non-credentialed (no cookies
+///   flow when the cookie's `SameSite=Lax` is in effect cross-origin),
+///   so `*` is operationally equivalent to "any embed".
+/// - If `allowed` is `Some(spec)`: parse it as a comma- or
+///   whitespace-separated list. Malformed origins log a warning and are
+///   skipped. An empty list after parsing falls back to "any origin"
+///   to avoid silently breaking embedders.
+fn build_cors_layer(allowed: Option<&str>) -> CorsLayer {
+    let methods = [Method::GET, Method::OPTIONS];
+    let allow_headers = [header::CONTENT_TYPE];
+
+    match allowed.map(parse_origins).unwrap_or_default() {
+        list if !list.is_empty() => CorsLayer::new()
+            .allow_origin(AllowOrigin::list(list))
+            .allow_methods(methods)
+            .allow_headers(allow_headers),
+        _ => CorsLayer::new()
+            .allow_origin(AllowOrigin::any())
+            .allow_methods(methods)
+            .allow_headers(allow_headers),
+    }
+}
+
+fn parse_origins(spec: &str) -> Vec<HeaderValue> {
+    spec.split(|c: char| c == ',' || c.is_whitespace())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| match HeaderValue::from_str(s) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!(origin = s, error = %e, "CORS_ALLOWED_ORIGINS: skipping malformed origin");
+                None
+            }
+        })
+        .collect()
 }

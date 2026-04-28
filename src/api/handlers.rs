@@ -11,7 +11,7 @@ use crate::error::CaptchaError;
 use crate::risk::cookie::{extract_cookie, now_secs, set_cookie_header};
 use crate::risk::{
     BehaviorPresence, CookiePresence, SignalContext, TlsFingerprint, VerifyContext, VerifyDecision,
-    difficulty_for,
+    client_ip, difficulty_for,
 };
 use crate::site::types::Site;
 use crate::storage::Store;
@@ -32,8 +32,12 @@ pub async fn get_puzzle(
         .await?
         .ok_or(CaptchaError::InvalidSiteKey)?;
 
+    // Resolve the client IP. Behind a reverse proxy in TRUSTED_PROXIES we
+    // walk X-Forwarded-For; otherwise the TCP peer is authoritative.
+    let peer: IpAddr = addr.ip();
+    let ip = client_ip(peer, &headers, &state.trusted_proxies);
+
     // Get rate counters (feeds the rate signal)
-    let ip: IpAddr = addr.ip();
     let ip_count = state.store.increment_ip_count(&ip).await?;
     let site_count = state.store.increment_site_count(&params.site_key).await?;
 
@@ -63,7 +67,7 @@ pub async fn get_puzzle(
     // the trusted-proxies CIDR. Direct clients can otherwise spoof the value.
     let tls_fingerprint = match (
         &state.tls_fingerprint_header,
-        state.trusted_proxies.contains(ip),
+        state.trusted_proxies.contains(peer),
     ) {
         (Some(header_name), true) => match headers.get(header_name).and_then(|v| v.to_str().ok()) {
             Some(value) if !value.is_empty() => TlsFingerprint::Provided(value),
@@ -343,10 +347,19 @@ pub async fn verify(
 
 pub async fn create_site(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Json(body): Json<CreateSiteRequest>,
 ) -> Result<Json<CreateSiteResponse>, CaptchaError> {
-    if body.name.trim().is_empty() {
+    require_admin_token(&state, &headers)?;
+
+    let name = body.name.trim();
+    if name.is_empty() {
         return Err(CaptchaError::BadRequest("name is required".into()));
+    }
+    if name.len() > 200 {
+        return Err(CaptchaError::BadRequest(
+            "name must be 200 characters or fewer".into(),
+        ));
     }
 
     let site_key = uuid::Uuid::new_v4();
@@ -355,7 +368,7 @@ pub async fn create_site(
     let site = Site {
         site_key,
         secret_key: secret_key.clone(),
-        name: body.name,
+        name: name.to_string(),
         created_at: chrono::Utc::now(),
     };
 
@@ -365,4 +378,33 @@ pub async fn create_site(
         site_key,
         secret_key,
     }))
+}
+
+/// Validate the `Authorization: Bearer <token>` header against the configured
+/// admin token. Returns `NotFound` (not `Unauthorized`) when the admin token
+/// isn't set so the endpoint's existence isn't disclosed in unprotected
+/// deployments. Token comparison is length-then-constant-time.
+fn require_admin_token(state: &SharedState, headers: &HeaderMap) -> Result<(), CaptchaError> {
+    let Some(expected) = state.admin_token.as_ref() else {
+        return Err(CaptchaError::NotFound);
+    };
+    let token = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or(CaptchaError::Unauthorized)?;
+    let a = token.as_bytes();
+    let b = expected.as_bytes();
+    if a.len() != b.len() {
+        return Err(CaptchaError::Unauthorized);
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    if diff == 0 {
+        Ok(())
+    } else {
+        Err(CaptchaError::Unauthorized)
+    }
 }

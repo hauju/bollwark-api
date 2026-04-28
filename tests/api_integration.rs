@@ -41,7 +41,14 @@ struct TestAppBuilder {
     tls_header: Option<&'static str>,
     trusted_proxies: Option<&'static str>,
     algorithm: Option<Algorithm>,
+    /// Override the admin token. Default is the constant `TEST_ADMIN_TOKEN`,
+    /// which `create_test_site` sends as a bearer to satisfy the gate.
+    /// Set to `Some(None)` to disable the token entirely (so `/v1/sites`
+    /// returns 404).
+    admin_token: Option<Option<&'static str>>,
 }
+
+const TEST_ADMIN_TOKEN: &str = "test-admin-token-32bytes-of-entropy";
 
 impl TestAppBuilder {
     fn build(self) -> axum::Router {
@@ -91,6 +98,11 @@ impl TestAppBuilder {
             tls_blocklist,
         );
         let verify_scorer = VerifyScorer::new(verify_thresholds_from_config(&config));
+        let admin_token = match self.admin_token {
+            Some(None) => None,
+            Some(Some(t)) => Some(Arc::new(t.to_string())),
+            None => Some(Arc::new(TEST_ADMIN_TOKEN.to_string())),
+        };
         let state = Arc::new(AppState {
             store: Arc::new(InMemoryStore::new()),
             engine: PuzzleEngine::new(puzzle_config),
@@ -101,6 +113,7 @@ impl TestAppBuilder {
             tls_fingerprint_header: self.tls_header.map(String::from),
             trusted_proxies,
             decision_log: None,
+            admin_token,
             config,
         });
         api::router(state, None)
@@ -152,6 +165,7 @@ async fn create_test_site(app: &axum::Router) -> CreateSiteResponse {
         .method("POST")
         .uri("/v1/sites")
         .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
         .body(Body::from(r#"{"name":"test site"}"#))
         .unwrap();
 
@@ -364,11 +378,111 @@ async fn test_create_site_empty_name() {
         .method("POST")
         .uri("/v1/sites")
         .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
         .body(Body::from(r#"{"name":""}"#))
         .unwrap();
 
     let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_create_site_without_admin_token_returns_404() {
+    let app = test_app_with(|b| {
+        b.admin_token = Some(None);
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/sites")
+        .header("Content-Type", "application/json")
+        .body(Body::from(r#"{"name":"hello"}"#))
+        .unwrap();
+
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_create_site_wrong_admin_token_unauthorized() {
+    let app = test_app();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/sites")
+        .header("Content-Type", "application/json")
+        .header(
+            "Authorization",
+            "Bearer wrong-token-but-same-length-padding",
+        )
+        .body(Body::from(r#"{"name":"hello"}"#))
+        .unwrap();
+
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_create_site_missing_authorization_unauthorized() {
+    let app = test_app();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/sites")
+        .header("Content-Type", "application/json")
+        .body(Body::from(r#"{"name":"hello"}"#))
+        .unwrap();
+
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_xff_honored_only_from_trusted_peer() {
+    // Trusted-proxy peer (127.0.0.1 in 127/8) sends XFF claiming the
+    // original client is 8.8.8.8. The puzzle handler should use 8.8.8.8
+    // (not 127.0.0.1) for rate-counting and IP reputation.
+    let app = test_app_with(|b| {
+        // Mark 8.8.8.0/24 as Tor → score 40 → HardPow tier. If the
+        // handler ignored XFF and used the peer (127.0.0.1) instead,
+        // the request would hit InvisiblePass.
+        b.reputation_cidrs = Some("8.8.8.0/24 tor\n".into());
+        b.trusted_proxies = Some("127.0.0.0/8");
+    });
+    let site = create_test_site(&app).await;
+    let key = site.site_key.to_string();
+
+    let mut req = puzzle_request(&key, Some(CLEAN_UA), Some(CLEAN_LANG), Some(CLEAN_ENC));
+    req.headers_mut()
+        .insert("x-forwarded-for", "8.8.8.8".parse().unwrap());
+    let (status, puzzle) = send_puzzle(&app, with_connect_info(req)).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let p = puzzle.unwrap();
+    assert_eq!(p.tier, EscalationTier::HardPow);
+}
+
+#[tokio::test]
+async fn test_xff_ignored_from_untrusted_peer() {
+    // Same setup but the peer is NOT in trusted_proxies. Spoofed XFF
+    // must be ignored — we score the actual peer instead.
+    let app = test_app_with(|b| {
+        b.reputation_cidrs = Some("8.8.8.0/24 tor\n".into());
+        // 10/8, but peer below is 127.0.0.1.
+        b.trusted_proxies = Some("10.0.0.0/8");
+    });
+    let site = create_test_site(&app).await;
+    let key = site.site_key.to_string();
+
+    let mut req = puzzle_request(&key, Some(CLEAN_UA), Some(CLEAN_LANG), Some(CLEAN_ENC));
+    req.headers_mut()
+        .insert("x-forwarded-for", "8.8.8.8".parse().unwrap());
+    let (status, puzzle) = send_puzzle(&app, with_connect_info(req)).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let p = puzzle.unwrap();
+    // XFF ignored → 127.0.0.1 isn't in the reputation list → InvisiblePass.
+    assert_eq!(p.tier, EscalationTier::InvisiblePass);
 }
 
 // --- Risk scoring / escalation tier tests ---

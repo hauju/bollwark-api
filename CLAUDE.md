@@ -35,7 +35,9 @@ All runtime config is via environment variables; every setting has a default. **
 - `TIER_CHECKBOX_MIN` / `TIER_HARD_POW_MIN` / `TIER_VISUAL_MIN` / `TIER_BLOCK_MIN` — puzzle-time score → tier thresholds (defaults `20`/`40`/`65`/`85`)
 - `VERIFY_SHADOW_MIN` / `VERIFY_BLOCK_MIN` — verify-time score thresholds (defaults `30` / `60`)
 - Optional signal toggles, each disabled when its env var is unset: `IP_REPUTATION_FILE`, `COOKIE_SIGNING_SECRET` (+ `COOKIE_SECURE`), `TLS_FINGERPRINT_HEADER` (+ `TLS_FINGERPRINT_FILE`, `TRUSTED_PROXIES`).
-- Validation dashboard: `ADMIN_DB_PATH` enables SQLite-backed decision logging + the admin endpoints; `ADMIN_TOKEN` is the bearer token for `/v1/admin/*` and is required when the path is set. Browser UI is `static/admin.html`.
+- Provisioning + persistence: `ADMIN_TOKEN` gates `POST /v1/sites` (returns 404 when unset — no anonymous provisioning) and `/v1/admin/*`. `SITE_DB_PATH` enables SQLite-backed site persistence; without it sites are in-memory only. `CORS_ALLOWED_ORIGINS` is a comma/whitespace allowlist for `GET /v1/puzzle`; other routes never get CORS.
+- Reverse-proxy aware client IP: `TRUSTED_PROXIES` (the same CIDR list the TLS fingerprint signal uses) also gates `X-Forwarded-For` walking. The handler resolves the client IP via `risk::client_ip`; per-IP signals score the resolved IP, the TLS fingerprint signal still keys off the immediate peer.
+- Validation dashboard: `ADMIN_DB_PATH` enables SQLite-backed decision logging + the admin endpoints; `ADMIN_TOKEN` is the bearer token (shared with provisioning) and is required when `ADMIN_DB_PATH` is set. Browser UI is `static/admin.html`.
 
 ## Architecture
 
@@ -59,8 +61,8 @@ Two scoring passes bracket every successful solve:
   - `behavior.rs` — `BehaviorReport` (mouse moves, touches, interactions, first-interaction ms) collected by the widget and submitted in `/v1/verify`. Flatline (zero events) scores +30; click-without-pointer scores +15; sub-50ms first interaction adds +20. `BehaviorPresence::Absent` (legacy clients with no blob) scores 0.
   - `tier.rs` — `EscalationTier` (`InvisiblePass` / `Checkbox` / `HardPow` / `VisualChallenge` / `Block`) and `difficulty_for(tier, default, max)` which returns `None` for `VisualChallenge`/`Block` (caller short-circuits with 429).
 - **`dashboard/`** — Validation dashboard. `log.rs` (`DecisionLog`) owns a writer thread that drains an unbounded channel into SQLite. `query.rs` (`Sessions`) opens read-only connections in `spawn_blocking` for list/detail queries; database is in WAL mode so reads run concurrent with writes. `routes.rs` defines `GET /v1/admin/sessions` and `/sessions/:id` behind a bearer-token check. `types.rs` holds the per-decision records (`PuzzleRecord`, `VerifyRecord`) emitted from handlers and the JSON DTOs returned to the dashboard. The dashboard HTML is `static/admin.html` (vanilla JS, no build step).
-- **`storage/`** — `Store` trait defines the async storage interface. `memory.rs` is the in-memory implementation using `RwLock<HashMap>`. The trait is designed for future Redis/MongoDB backends.
-- **`api/`** — Axum router. `handlers.rs` contains the three handlers and is where the puzzle-time + verify-time scoring is orchestrated. `state.rs` defines `AppState` (shared via `Arc`), `tier_thresholds_from_config`, and `verify_thresholds_from_config`. `middleware.rs` has Bearer token extraction helpers.
+- **`storage/`** — `Store` trait defines the async storage interface. `memory.rs` is the implementation: challenges and rate-window counters live in `RwLock<HashMap>`; sites are also in-memory but **write-through to a SQLite file** when `SITE_DB_PATH` is set, with rows reloaded on construction via `InMemoryStore::with_site_persistence`. The trait is designed for future Redis/MongoDB backends.
+- **`api/`** — Axum router. `handlers.rs` contains the three handlers and is where the puzzle-time + verify-time scoring is orchestrated. The puzzle handler uses `risk::client_ip` to resolve the real client behind a trusted reverse proxy (XFF walked rightmost-untrusted) before scoring per-IP signals. `state.rs` defines `AppState` (shared via `Arc`), `tier_thresholds_from_config`, and `verify_thresholds_from_config`. `middleware.rs` has Bearer token extraction helpers. The CORS layer is scoped: only `GET /v1/puzzle` is CORS-enabled (configurable allowlist via `CORS_ALLOWED_ORIGINS`); `/v1/verify`, `/v1/sites`, and `/v1/admin/*` have no CORS layer (browsers can't reach them cross-origin).
 - **`site/`** — Site registration types (`site_key` + `secret_key`).
 - **`error.rs`** — `CaptchaError` enum implementing `IntoResponse` for Axum error mapping.
 - **`config.rs`** — `AppConfig` loaded from environment variables with defaults.
@@ -72,7 +74,7 @@ Two scoring passes bracket every successful solve:
 |---|---|---|
 | `GET /v1/puzzle?site_key=<uuid>` | None | Score request, issue a PoW challenge (or 429 if tier ≥ `VisualChallenge`). May set `__captcha_trust` cookie. |
 | `POST /v1/verify` | Bearer (site secret) | Verify a solution server-to-server. Body fields: `challenge_id`, `nonce`, optional `honeypot`, optional `time_on_page_ms`, optional `behavior`. |
-| `POST /v1/sites` | None | Register a site, returns site_key + secret. |
+| `POST /v1/sites` | Bearer (`ADMIN_TOKEN`) | Register a site, returns site_key + secret. Returns 404 when `ADMIN_TOKEN` is unset. |
 | `GET /v1/admin/sessions` | Bearer (`ADMIN_TOKEN`) | List recent puzzle/verify sessions for the dashboard. Only mounted when `ADMIN_DB_PATH` is set. |
 | `GET /v1/admin/sessions/:id` | Bearer (`ADMIN_TOKEN`) | Detail for a single session. |
 

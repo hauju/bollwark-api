@@ -1,4 +1,5 @@
 pub mod behavior;
+pub mod client_ip;
 pub mod cookie;
 pub mod reputation;
 pub mod score;
@@ -8,6 +9,7 @@ pub mod tls_fingerprint;
 pub mod verify;
 
 pub use behavior::{BehaviorPresence, BehaviorReport};
+pub use client_ip::client_ip;
 pub use cookie::CookieSigner;
 pub use reputation::{CidrListReputation, IpCategory};
 pub use score::{RiskScore, RiskScorer, SignalBreakdown, SignalContext};

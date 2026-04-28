@@ -32,7 +32,9 @@ A `.env` file in the working directory is loaded automatically at startup (via `
 | `TLS_FINGERPRINT_FILE` | _unset_ | Path to known-bad fingerprint blocklist |
 | `TRUSTED_PROXIES` | _unset_ | CIDR allowlist of peers whose `TLS_FINGERPRINT_HEADER` we honor |
 | `ADMIN_DB_PATH` | _unset_ | Path to the SQLite database for the validation dashboard. Enables decision logging + admin endpoints. |
-| `ADMIN_TOKEN` | _unset_ | Bearer token for `/v1/admin/*`. Required when `ADMIN_DB_PATH` is set. |
+| `ADMIN_TOKEN` | _unset_ | Bearer token for `/v1/admin/*` and `POST /v1/sites`. Without it, `POST /v1/sites` returns 404 (no anonymous provisioning). Required when `ADMIN_DB_PATH` is set. |
+| `SITE_DB_PATH` | _unset_ | Path to a SQLite file for persistent site registrations. Without it, sites live only in memory and are lost on restart. |
+| `CORS_ALLOWED_ORIGINS` | _unset_ | Comma- or whitespace-separated allowlist of origins permitted to call `GET /v1/puzzle` from a browser. Empty/unset = any origin (no credentials). Other endpoints never have CORS enabled. |
 
 ---
 
@@ -224,6 +226,49 @@ Empty/unset → no peer is trusted → signal never fires (boot log will WARN if
 
 ---
 
+## Site registration & provisioning
+
+Sites are registered with `POST /v1/sites`, which returns a `site_key` (public, embedded in the widget) and a `secret_key` (server-to-server, used as the bearer for `/v1/verify`). Two settings govern this surface:
+
+### `ADMIN_TOKEN`
+Bearer token required for `POST /v1/sites`. **When unset, `/v1/sites` returns 404** — no anonymous provisioning. Generate with `openssl rand -hex 32` and pass on the call:
+
+```bash
+curl -X POST http://localhost:3000/v1/sites \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "my-site"}'
+```
+
+The same token also gates `/v1/admin/*` (validation dashboard).
+
+### `SITE_DB_PATH`
+Path to a SQLite file that persists site rows. When unset, sites live only in `Arc<RwLock<HashMap>>` and are lost on restart — meaning every integrator's stored `secret_key` becomes invalid. **Set this for any deployment beyond local dev.** Created on first run, schema is `(site_key TEXT PRIMARY KEY, secret_key TEXT UNIQUE, name TEXT, created_at TEXT)`.
+
+Challenges and rate-window counters intentionally stay in-memory: they're cheap to lose and a fresh start is fine.
+
+---
+
+## CORS
+
+### `CORS_ALLOWED_ORIGINS`
+The puzzle endpoint (`GET /v1/puzzle`) is the only surface a browser-embedded widget reaches cross-origin. It's the only route with a CORS layer. `/v1/verify`, `/v1/sites`, and `/v1/admin/*` have **no** CORS layer — same-origin policy in browsers blocks cross-origin reads of those endpoints.
+
+- Unset: any origin allowed, no credentials. Operationally equivalent to "any embed."
+- Set: comma- or whitespace-separated allowlist (`https://a.example,https://b.example`). Origins outside the list don't get CORS headers and the browser blocks the response.
+
+Cookies don't flow cross-origin in the default `SameSite=Lax` configuration regardless of CORS — the cookie signal degrades to "missing" for embedders on a different origin from the captcha service.
+
+---
+
+## Reverse proxies & client IP
+
+Behind a reverse proxy (Cloudflare, nginx, AWS ALB) the TCP peer is the proxy itself. Per-IP signals (rate, IP reputation) need the original client. The service walks `X-Forwarded-For` right-to-left, skipping trusted-proxy hops, when **and only when** the immediate peer is in [`TRUSTED_PROXIES`](#trusted_proxies). Direct clients can't spoof the header — without a trusted peer, XFF is ignored entirely.
+
+Cloudflare's `CF-Connecting-IP` is **not** read; configure the upstream to put the client IP in `X-Forwarded-For` (Cloudflare does this automatically when the request reaches your origin) and add Cloudflare's IP ranges to `TRUSTED_PROXIES`.
+
+---
+
 ## Validation dashboard
 
 A self-hosted dashboard that lets you inspect every puzzle and verify decision in a browser. Persists to SQLite so history survives restarts.
@@ -231,13 +276,7 @@ A self-hosted dashboard that lets you inspect every puzzle and verify decision i
 ### `ADMIN_DB_PATH`
 Path to the SQLite database file. Created on first run; uses WAL mode so reads don't block writes. When unset, decision logging and admin endpoints are both disabled.
 
-### `ADMIN_TOKEN`
-Bearer token required by all `/v1/admin/*` routes. **Required** when `ADMIN_DB_PATH` is set — the service refuses to start without one to avoid exposing the dashboard anonymously.
-
-Generate a strong token, e.g.:
-```bash
-ADMIN_TOKEN=$(openssl rand -hex 32)
-```
+The bearer token for `/v1/admin/*` is the same `ADMIN_TOKEN` used for `/v1/sites`. The service refuses to start when `ADMIN_DB_PATH` is set without `ADMIN_TOKEN`.
 
 ### Endpoints (when enabled)
 
@@ -259,6 +298,13 @@ A production-leaning configuration:
 LISTEN_ADDR=0.0.0.0:3000
 DEFAULT_DIFFICULTY=20
 
+# Provisioning + persistence (do not deploy without these)
+ADMIN_TOKEN=$(openssl rand -hex 32)
+SITE_DB_PATH=/var/lib/rust-captcha/sites.db
+
+# Restrict the puzzle endpoint to your known embedders
+CORS_ALLOWED_ORIGINS="https://app.example,https://admin.example"
+
 # Adaptive escalation tuned a bit more aggressively
 TIER_CHECKBOX_MIN=15
 TIER_HARD_POW_MIN=35
@@ -273,10 +319,16 @@ VERIFY_BLOCK_MIN=55
 # IP reputation from a maintained list
 IP_REPUTATION_FILE=/etc/rust-captcha/ip_reputation.txt
 
-# TLS fingerprint via Cloudflare
+# Reverse-proxy aware client IP + TLS fingerprint via Cloudflare.
+# TRUSTED_PROXIES gates BOTH the X-Forwarded-For walk AND the TLS
+# fingerprint header — direct clients can't spoof either without
+# being in this CIDR list.
 TLS_FINGERPRINT_HEADER=cf-ja4
 TLS_FINGERPRINT_FILE=/etc/rust-captcha/ja4_blocklist.txt
 TRUSTED_PROXIES="173.245.48.0/20,103.21.244.0/22,..."  # CF ranges
+
+# Validation dashboard
+ADMIN_DB_PATH=/var/lib/rust-captcha/decisions.db
 
 RUST_LOG=rust_captcha=info
 ```

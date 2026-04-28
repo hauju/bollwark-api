@@ -60,7 +60,28 @@ async fn main() {
     };
     tracing::info!(algorithm = ?config.puzzle_algorithm, "Puzzle engine initialised");
 
-    let store = Arc::new(InMemoryStore::new());
+    // Site registrations: persist to SQLite when SITE_DB_PATH is set so
+    // restarts don't invalidate every integrator's stored secret_key.
+    let store = match &config.site_db_path {
+        Some(path) => match InMemoryStore::with_site_persistence(path) {
+            Ok(s) => {
+                tracing::info!(
+                    sites_loaded = s.site_count(),
+                    "Persistent site store enabled (path={path})"
+                );
+                Arc::new(s)
+            }
+            Err(e) => {
+                panic!("failed to open SITE_DB_PATH={path}: {e}");
+            }
+        },
+        None => {
+            tracing::warn!(
+                "SITE_DB_PATH is unset — sites are in-memory only and will be lost on restart"
+            );
+            Arc::new(InMemoryStore::new())
+        }
+    };
 
     // Spawn cleanup task
     let cleanup_store = Arc::clone(&store);
@@ -176,6 +197,21 @@ async fn main() {
         None => (None, None),
     };
 
+    // ADMIN_TOKEN gates `POST /v1/sites` whether or not the dashboard is
+    // enabled. Without it, `/v1/sites` returns 404 — no anonymous
+    // provisioning. Empty strings are rejected so a misconfigured
+    // `ADMIN_TOKEN=` doesn't accidentally accept anyone with `Bearer `.
+    let admin_token = config
+        .admin_token
+        .as_ref()
+        .filter(|t| !t.is_empty())
+        .map(|t| Arc::new(t.clone()));
+    if admin_token.is_none() {
+        tracing::warn!(
+            "ADMIN_TOKEN is unset — POST /v1/sites is disabled (returns 404). Set ADMIN_TOKEN to enable provisioning."
+        );
+    }
+
     let state = Arc::new(AppState {
         store,
         engine: PuzzleEngine::new(puzzle_config),
@@ -190,6 +226,7 @@ async fn main() {
         tls_fingerprint_header: config.tls_fingerprint_header.clone(),
         trusted_proxies,
         decision_log,
+        admin_token,
         config: config.clone(),
     });
 

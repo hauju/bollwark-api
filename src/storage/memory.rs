@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::RwLock;
+use std::path::Path;
+use std::sync::{Mutex, RwLock};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use rusqlite::{Connection, params};
 use uuid::Uuid;
 
 use crate::error::CaptchaError;
@@ -22,9 +24,23 @@ pub struct InMemoryStore {
     sites_by_secret: RwLock<HashMap<String, Uuid>>,
     ip_rates: RwLock<HashMap<IpAddr, RateWindow>>,
     site_rates: RwLock<HashMap<Uuid, RateWindow>>,
+    /// Optional write-through persistence for the sites table. Challenges
+    /// and rate windows stay in-memory — they're cheap to lose on restart.
+    /// Sites can't be: integrators store the secret_key client-side, so a
+    /// restart that wipes them means every embedded captcha breaks.
+    site_persistence: Option<Mutex<Connection>>,
 }
 
 const RATE_WINDOW_SECS: i64 = 60;
+
+const SITES_SCHEMA: &str = r"
+CREATE TABLE IF NOT EXISTS sites (
+    site_key   TEXT PRIMARY KEY,
+    secret_key TEXT NOT NULL UNIQUE,
+    name       TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+";
 
 impl InMemoryStore {
     pub fn new() -> Self {
@@ -34,8 +50,91 @@ impl InMemoryStore {
             sites_by_secret: RwLock::new(HashMap::new()),
             ip_rates: RwLock::new(HashMap::new()),
             site_rates: RwLock::new(HashMap::new()),
+            site_persistence: None,
         }
     }
+
+    /// Open or create a SQLite database at `path` for site persistence,
+    /// load any existing sites into the in-memory map, and keep the
+    /// connection for write-through inserts.
+    pub fn with_site_persistence(path: impl AsRef<Path>) -> Result<Self, CaptchaError> {
+        let conn = Connection::open(path.as_ref())
+            .map_err(|e| CaptchaError::Storage(format!("open site db: {e}")))?;
+        conn.execute_batch(SITES_SCHEMA)
+            .map_err(|e| CaptchaError::Storage(format!("init site schema: {e}")))?;
+
+        let sites = load_all_sites(&conn)?;
+
+        let store = Self::new();
+        {
+            let mut by_key = store.sites_by_key.write().map_err(lock_err)?;
+            let mut by_secret = store.sites_by_secret.write().map_err(lock_err)?;
+            for site in sites {
+                by_secret.insert(site.secret_key.clone(), site.site_key);
+                by_key.insert(site.site_key, site);
+            }
+        }
+        Ok(Self {
+            site_persistence: Some(Mutex::new(conn)),
+            ..store
+        })
+    }
+
+    /// Number of sites currently loaded. Useful at boot to log how many
+    /// were restored from disk.
+    pub fn site_count(&self) -> usize {
+        self.sites_by_key
+            .read()
+            .map(|m| m.len())
+            .unwrap_or_default()
+    }
+}
+
+fn load_all_sites(conn: &Connection) -> Result<Vec<Site>, CaptchaError> {
+    let mut stmt = conn
+        .prepare("SELECT site_key, secret_key, name, created_at FROM sites")
+        .map_err(|e| CaptchaError::Storage(format!("prepare load sites: {e}")))?;
+    let rows = stmt
+        .query_map([], |row| {
+            let key_str: String = row.get(0)?;
+            let secret: String = row.get(1)?;
+            let name: String = row.get(2)?;
+            let created_str: String = row.get(3)?;
+            Ok((key_str, secret, name, created_str))
+        })
+        .map_err(|e| CaptchaError::Storage(format!("query sites: {e}")))?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        let (key_str, secret_key, name, created_str) =
+            row.map_err(|e| CaptchaError::Storage(format!("read site row: {e}")))?;
+        let site_key = Uuid::parse_str(&key_str)
+            .map_err(|e| CaptchaError::Storage(format!("bad site_key in db: {e}")))?;
+        let created_at = DateTime::parse_from_rfc3339(&created_str)
+            .map_err(|e| CaptchaError::Storage(format!("bad created_at in db: {e}")))?
+            .with_timezone(&Utc);
+        out.push(Site {
+            site_key,
+            secret_key,
+            name,
+            created_at,
+        });
+    }
+    Ok(out)
+}
+
+fn persist_site(conn: &Connection, site: &Site) -> Result<(), CaptchaError> {
+    conn.execute(
+        "INSERT INTO sites (site_key, secret_key, name, created_at) VALUES (?1, ?2, ?3, ?4)",
+        params![
+            site.site_key.to_string(),
+            site.secret_key,
+            site.name,
+            site.created_at.to_rfc3339(),
+        ],
+    )
+    .map_err(|e| CaptchaError::Storage(format!("insert site: {e}")))?;
+    Ok(())
 }
 
 impl Default for InMemoryStore {
@@ -73,6 +172,12 @@ impl Store for InMemoryStore {
     }
 
     async fn store_site(&self, site: &Site) -> Result<(), CaptchaError> {
+        // Persist first so an in-memory insert isn't visible if the disk
+        // write fails (e.g. UNIQUE collision on a regenerated secret).
+        if let Some(persist) = &self.site_persistence {
+            let conn = persist.lock().map_err(lock_err)?;
+            persist_site(&conn, site)?;
+        }
         {
             let mut by_key = self.sites_by_key.write().map_err(lock_err)?;
             by_key.insert(site.site_key, site.clone());
@@ -282,6 +387,46 @@ mod tests {
 
         assert_eq!(store.increment_site_count(&site_key).await.unwrap(), 1);
         assert_eq!(store.increment_site_count(&site_key).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_site_persistence_round_trip() {
+        let dir = tempdir();
+        let path = dir.join("sites.db");
+
+        // First store: register a site, drop the store.
+        let site = make_site();
+        {
+            let store = InMemoryStore::with_site_persistence(&path).unwrap();
+            store.store_site(&site).await.unwrap();
+        }
+
+        // Second store: should reload the site from disk.
+        let store = InMemoryStore::with_site_persistence(&path).unwrap();
+        assert_eq!(store.site_count(), 1);
+        let by_key = store
+            .get_site_by_key(&site.site_key)
+            .await
+            .unwrap()
+            .expect("site reloaded by key");
+        assert_eq!(by_key.name, site.name);
+        let by_secret = store
+            .get_site_by_secret(&site.secret_key)
+            .await
+            .unwrap()
+            .expect("site reloaded by secret");
+        assert_eq!(by_secret.site_key, site.site_key);
+    }
+
+    fn tempdir() -> std::path::PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "rust-captcha-test-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[tokio::test]

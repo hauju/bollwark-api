@@ -13,11 +13,17 @@ Self-hostable proof-of-work CAPTCHA service in Rust. Clients solve a SHA-256 (or
 cargo run                                # listens on 0.0.0.0:3000
 ```
 
-Register a site, then issue and verify a puzzle:
+Set an admin token and register a site, then issue and verify a puzzle:
 
 ```bash
+export ADMIN_TOKEN=$(openssl rand -hex 32)
+SITE_DB_PATH=tmp/sites.db cargo run
+
 # 1. Register a site → returns { site_key, secret_key }
-curl -s -X POST http://localhost:3000/v1/sites | jq
+curl -s -X POST http://localhost:3000/v1/sites \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"my-site"}' | jq
 
 # 2. Fetch a puzzle (anonymous; widget does this for you)
 curl -s "http://localhost:3000/v1/puzzle?site_key=<SITE_KEY>" | jq
@@ -28,6 +34,8 @@ curl -s -X POST http://localhost:3000/v1/verify \
   -H "Content-Type: application/json" \
   -d '{"challenge_id":"…","nonce":"…"}'
 ```
+
+Without `ADMIN_TOKEN`, `POST /v1/sites` returns 404 — no anonymous provisioning. Without `SITE_DB_PATH`, sites live only in memory and are lost on restart.
 
 Open `http://localhost:3000/static/testsite.html` for a working harness that exercises the full flow against a freshly registered site.
 
@@ -51,7 +59,7 @@ The widget evaluates its risk tier once on mount (matching Turnstile / hCaptcha 
 
 | Endpoint | Auth | Purpose |
 |---|---|---|
-| `POST /v1/sites` | None | Register a site. Returns `{ site_key, secret_key }`. |
+| `POST /v1/sites` | Bearer (`ADMIN_TOKEN`) | Register a site. Returns `{ site_key, secret_key }`. Returns 404 when `ADMIN_TOKEN` is unset. |
 | `GET /v1/puzzle?site_key=<uuid>` | None | Score the request and either issue a puzzle or short-circuit with `429` when the tier is `visual_challenge` or `block`. May set the `__captcha_trust` cookie. |
 | `POST /v1/verify` | Bearer (site secret) | Verify a solution. Body: `challenge_id`, `nonce`, optional `honeypot`, `time_on_page_ms`, `behavior`. |
 | `GET /v1/admin/sessions[/:id]` | Bearer (`ADMIN_TOKEN`) | Decision log read API. Mounted only when `ADMIN_DB_PATH` is set. |

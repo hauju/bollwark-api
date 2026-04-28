@@ -21,12 +21,16 @@ pub struct AppState {
     /// Header name to read for TLS fingerprint (e.g. `x-ja4`). `None` disables
     /// the signal entirely.
     pub tls_fingerprint_header: Option<String>,
-    /// Trusted proxies whose TLS fingerprint header we honor. Empty if the
-    /// feature isn't enabled or no proxies are configured.
+    /// Trusted proxies whose TLS fingerprint header we honor (and whose
+    /// `X-Forwarded-For` we walk to resolve the client IP). Empty if no
+    /// proxies are configured — direct connections only.
     pub trusted_proxies: Arc<TrustedProxies>,
     /// Validation dashboard log. When `Some`, every puzzle/verify decision is
     /// also persisted to SQLite for the admin dashboard.
     pub decision_log: Option<DecisionLog>,
+    /// Bearer token required to call mutating admin endpoints, including
+    /// `POST /v1/sites`. When `None`, those endpoints are disabled (404).
+    pub admin_token: Option<Arc<String>>,
     pub config: AppConfig,
 }
 

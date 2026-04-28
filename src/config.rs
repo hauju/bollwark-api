@@ -45,9 +45,20 @@ pub struct AppConfig {
     /// the validation dashboard. When unset, dashboard logging and the admin
     /// endpoints are both disabled.
     pub admin_db_path: Option<String>,
-    /// Bearer token required by the `/v1/admin/*` endpoints. Required when
-    /// `admin_db_path` is set; the service refuses to start without it.
+    /// Bearer token required by `/v1/admin/*` and by `POST /v1/sites`.
+    /// When unset, the dashboard endpoints are simply not mounted and
+    /// `POST /v1/sites` returns 404 — no anonymous provisioning.
     pub admin_token: Option<String>,
+    /// Path to a SQLite database for persistent site registrations.
+    /// When unset, sites live only in memory (lost on restart). Strongly
+    /// recommended for any deployment beyond local dev.
+    pub site_db_path: Option<String>,
+    /// Comma- or whitespace-separated allowlist of origins permitted to
+    /// call `GET /v1/puzzle` from a browser. When unset, any origin is
+    /// allowed (no credentials). When set, only listed origins receive
+    /// CORS headers — others get a same-origin response that browsers
+    /// will block. Other endpoints never have CORS enabled.
+    pub cors_allowed_origins: Option<String>,
 }
 
 impl AppConfig {
@@ -113,6 +124,8 @@ impl AppConfig {
             trusted_proxies: env::var("TRUSTED_PROXIES").ok(),
             admin_db_path: env::var("ADMIN_DB_PATH").ok(),
             admin_token: env::var("ADMIN_TOKEN").ok(),
+            site_db_path: env::var("SITE_DB_PATH").ok(),
+            cors_allowed_origins: env::var("CORS_ALLOWED_ORIGINS").ok(),
         }
     }
 }
@@ -141,6 +154,8 @@ impl Default for AppConfig {
             trusted_proxies: None,
             admin_db_path: None,
             admin_token: None,
+            site_db_path: None,
+            cors_allowed_origins: None,
         }
     }
 }

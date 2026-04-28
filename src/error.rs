@@ -22,6 +22,9 @@ pub enum CaptchaError {
     #[error("Unauthorized")]
     Unauthorized,
 
+    #[error("Not found")]
+    NotFound,
+
     #[error("Rate limit exceeded")]
     RateLimited,
 
@@ -41,6 +44,7 @@ impl IntoResponse for CaptchaError {
             CaptchaError::InvalidSolution => (StatusCode::OK, self.to_string()),
             CaptchaError::InvalidSiteKey => (StatusCode::BAD_REQUEST, self.to_string()),
             CaptchaError::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
+            CaptchaError::NotFound => (StatusCode::NOT_FOUND, self.to_string()),
             CaptchaError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
             CaptchaError::Storage(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".into())
