@@ -126,6 +126,7 @@ impl TestAppBuilder {
             trusted_proxies,
             decision_log: None,
             admin_token,
+            info_urls: None,
             config,
         });
         api::router(state, None)

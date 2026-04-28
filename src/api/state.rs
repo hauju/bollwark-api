@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::api::types::InfoUrls;
 use crate::config::AppConfig;
 use crate::dashboard::DecisionLog;
 use crate::puzzle::challenge::PuzzleEngine;
@@ -31,7 +32,23 @@ pub struct AppState {
     /// Bearer token required to call mutating admin endpoints, including
     /// `POST /v1/sites`. When `None`, those endpoints are disabled (404).
     pub admin_token: Option<Arc<String>>,
+    /// Operator-overridden info URLs surfaced in the puzzle response and
+    /// the 429 block body. `None` when no `INFO_*_URL` env var is set; the
+    /// widget then uses bundled `/static/*.html` defaults for every field.
+    pub info_urls: Option<InfoUrls>,
     pub config: AppConfig,
+}
+
+/// Build the `info_urls` payload from config. Returns `None` when no
+/// override is set so we don't serialize an empty object on every puzzle
+/// response.
+pub fn info_urls_from_config(config: &AppConfig) -> Option<InfoUrls> {
+    let urls = InfoUrls {
+        about: config.info_about_url.clone(),
+        privacy: config.info_privacy_url.clone(),
+        terms: config.info_terms_url.clone(),
+    };
+    if urls.is_empty() { None } else { Some(urls) }
 }
 
 pub fn tier_thresholds_from_config(config: &AppConfig) -> TierThresholds {

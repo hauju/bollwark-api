@@ -77,8 +77,15 @@
   color: #333;
 }
 
+.rc-captcha-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid #ececec;
+}
+
 .rc-captcha-brand {
-  margin-left: auto;
   text-align: right;
   line-height: 1.25;
   white-space: nowrap;
@@ -121,6 +128,10 @@
   font-size: 11px;
   color: #888;
   line-height: 1.6;
+}
+
+.rc-captcha-details:empty {
+  display: none;
 }
 
 .rc-captcha-details .detail-row {

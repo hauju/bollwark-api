@@ -5,7 +5,7 @@ use tracing_subscriber::EnvFilter;
 
 use rust_captcha::api;
 use rust_captcha::api::state::{
-    AppState, tier_thresholds_from_config, verify_thresholds_from_config,
+    AppState, info_urls_from_config, tier_thresholds_from_config, verify_thresholds_from_config,
 };
 use rust_captcha::config::{AppConfig, CookieSameSiteCfg};
 use rust_captcha::dashboard::{DecisionLog, Sessions, routes::AdminState};
@@ -238,6 +238,33 @@ async fn main() {
         );
     }
 
+    // Info-page URLs: per-field fallback to bundled /static/*.html. Warn
+    // when the operator partially overrides — almost always a footgun
+    // (custom privacy notice, but bundled boilerplate terms shipped from
+    // the OSS still served). Doesn't block boot, since "I only want to
+    // override one" is a legitimate-if-rare choice.
+    let info_urls = info_urls_from_config(&config);
+    if let Some(urls) = &info_urls {
+        let set = [
+            ("INFO_ABOUT_URL", urls.about.is_some()),
+            ("INFO_PRIVACY_URL", urls.privacy.is_some()),
+            ("INFO_TERMS_URL", urls.terms.is_some()),
+        ];
+        let count = set.iter().filter(|(_, v)| *v).count();
+        if count > 0 && count < 3 {
+            let missing: Vec<&str> = set
+                .iter()
+                .filter(|(_, v)| !v)
+                .map(|(name, _)| *name)
+                .collect();
+            tracing::warn!(
+                "INFO_*_URL partially set — missing {missing:?}. Widget will fall back to the \
+                 bundled /static/ default for those, which may not reflect your operator's \
+                 legal text. Set the missing variables to suppress this warning."
+            );
+        }
+    }
+
     let state = Arc::new(AppState {
         store,
         engine: PuzzleEngine::new(puzzle_config),
@@ -253,6 +280,7 @@ async fn main() {
         trusted_proxies,
         decision_log,
         admin_token,
+        info_urls,
         config: config.clone(),
     });
 

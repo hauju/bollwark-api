@@ -317,6 +317,23 @@ Each session row includes the puzzle score, tier, signal breakdown, verify resul
 
 ---
 
+## Info-page links (`INFO_*_URL`)
+
+The bundled widget shows a footer with **RustCaptcha** (→ `/static/about.html`) plus tiny `Privacy` / `Terms` links (→ `/static/privacy.html`, `/static/terms.html`). The footer is rendered eagerly at mount with these bundled defaults and stays visible across every tier — including `invisible_pass`, `visual_challenge`, and the 429 block path — so a user who's confused by the verification UI always has a one-click route to "why am I seeing this?".
+
+Operators with their own About / Privacy / Terms pages can override per-field:
+
+### `INFO_ABOUT_URL` / `INFO_PRIVACY_URL` / `INFO_TERMS_URL`
+
+- Each is independent. Setting `INFO_PRIVACY_URL` only leaves the other two pointing at the bundled defaults.
+- Values **must be absolute** (`http://` or `https://`). Relative paths (`/legal/privacy`) and bare filenames (`privacy.html`) are rejected at boot — a typo'd path here would produce broken links in every visitor's browser, which is exactly what we want to fail loud.
+- Surfaced to the widget via the puzzle response (and the structured 429 body, so block-tier users still see the right links).
+- Setting some-but-not-all three logs a startup `WARN` — most operators who customise their privacy notice want to customise terms too, and shipping the bundled boilerplate next to a bespoke privacy page is usually unintended.
+
+The bundled `static/{about,privacy,terms}.html` are written to be safe defaults for self-hosted deployments — they describe what the bundled widget and server can collect when fully configured. They carry `<meta name="robots" content="noindex, follow">` to keep duplicate copies across operator deployments out of search indexes.
+
+---
+
 ## Putting it all together
 
 A production-leaning configuration:

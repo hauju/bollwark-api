@@ -42,6 +42,22 @@ pub struct CreateSiteRequest {
 
 // --- Responses ---
 
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct InfoUrls {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terms: Option<String>,
+}
+
+impl InfoUrls {
+    pub fn is_empty(&self) -> bool {
+        self.about.is_none() && self.privacy.is_none() && self.terms.is_none()
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PuzzleResponse {
     pub challenge_id: Uuid,
@@ -60,6 +76,21 @@ pub struct PuzzleResponse {
     pub image: Option<String>,
     pub expires_at: String,
     pub tier: EscalationTier,
+    /// Operator-overridden URLs for the about/privacy/terms pages, when
+    /// `INFO_*_URL` env vars are set. Per-field optional — widget falls
+    /// back to bundled `/static/*.html` for unset fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info_urls: Option<InfoUrls>,
+}
+
+/// Body returned alongside a 429 in the `Block` tier so the widget can
+/// still surface operator-overridden info URLs to a user it just blocked.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BlockedResponse {
+    pub error: String,
+    pub tier: EscalationTier,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info_urls: Option<InfoUrls>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

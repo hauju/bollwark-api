@@ -3,6 +3,7 @@ use std::net::IpAddr;
 use axum::Json;
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::HeaderMap;
+use axum::http::StatusCode;
 use axum::http::header::{AUTHORIZATION, COOKIE, HeaderValue, SET_COOKIE, USER_AGENT};
 use axum::response::IntoResponse;
 
@@ -12,8 +13,8 @@ use crate::error::CaptchaError;
 use crate::puzzle::types::ChallengeKind;
 use crate::risk::cookie::{CookieSameSite, extract_cookie, now_secs, set_cookie_header};
 use crate::risk::{
-    BehaviorPresence, CookiePresence, EscalationTier, SignalContext, TlsFingerprint,
-    VerifyContext, VerifyDecision, client_ip, difficulty_for,
+    BehaviorPresence, CookiePresence, EscalationTier, SignalContext, TlsFingerprint, VerifyContext,
+    VerifyDecision, client_ip, difficulty_for,
 };
 use crate::site::types::Site;
 use crate::storage::Store;
@@ -147,7 +148,15 @@ pub async fn get_puzzle(
                 user_agent: ua,
             });
         }
-        return Err(CaptchaError::RateLimited);
+        // Block-tier still returns a structured JSON body so the widget
+        // can surface operator-overridden info URLs even on rejection —
+        // this is exactly when the user is most likely to want them.
+        let body = BlockedResponse {
+            error: CaptchaError::RateLimited.to_string(),
+            tier: score.tier,
+            info_urls: state.info_urls.clone(),
+        };
+        return Ok((StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response());
     }
 
     // Build the challenge. VisualChallenge tier issues an image-text
@@ -187,6 +196,7 @@ pub async fn get_puzzle(
         image: challenge.visual_image.clone(),
         expires_at: challenge.expires_at.to_rfc3339(),
         tier: score.tier,
+        info_urls: state.info_urls.clone(),
     };
 
     state.store.store_challenge(&challenge).await?;

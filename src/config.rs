@@ -81,6 +81,14 @@ pub struct AppConfig {
     /// builds — release binaries log a warning and ignore the flag. The
     /// admin dashboard endpoints (`/v1/admin/*`) are NOT bypassed.
     pub dev_disable_admin_auth: bool,
+    /// Optional override URL for the bundled `/static/about.html` page.
+    /// Must be an absolute `http(s)://` URL when set; the bundled default
+    /// is used when unset. Surfaced to the widget via the puzzle response.
+    pub info_about_url: Option<String>,
+    /// Optional override URL for the bundled `/static/privacy.html` page.
+    pub info_privacy_url: Option<String>,
+    /// Optional override URL for the bundled `/static/terms.html` page.
+    pub info_terms_url: Option<String>,
 }
 
 impl AppConfig {
@@ -152,8 +160,32 @@ impl AppConfig {
             dev_disable_admin_auth: parse_truthy(
                 env::var("DEV_DISABLE_ADMIN_AUTH").ok().as_deref(),
             ),
+            info_about_url: parse_info_url("INFO_ABOUT_URL"),
+            info_privacy_url: parse_info_url("INFO_PRIVACY_URL"),
+            info_terms_url: parse_info_url("INFO_TERMS_URL"),
         }
     }
+}
+
+/// Read an `INFO_*_URL` env var. Empty/whitespace-only values are treated
+/// as unset. Non-empty values must be absolute (`http://` or `https://`),
+/// otherwise we panic — a typo'd path here would silently produce a broken
+/// widget link in every visitor's browser, which is exactly the kind of
+/// misconfiguration we want to fail loud.
+fn parse_info_url(name: &str) -> Option<String> {
+    let value = env::var(name).ok()?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
+        panic!(
+            "{name}={value:?} must be an absolute http(s):// URL — relative paths and bare \
+             filenames would produce broken links in the widget. Set the full URL or unset \
+             the variable to use the bundled /static/ default."
+        );
+    }
+    Some(trimmed.to_string())
 }
 
 fn parse_truthy(v: Option<&str>) -> bool {
@@ -202,6 +234,9 @@ impl Default for AppConfig {
             site_db_path: None,
             cors_allowed_origins: None,
             dev_disable_admin_auth: false,
+            info_about_url: None,
+            info_privacy_url: None,
+            info_terms_url: None,
         }
     }
 }

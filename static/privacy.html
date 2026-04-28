@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex, follow">
   <title>Privacy — RustCaptcha</title>
   <link rel="stylesheet" href="/static/info-pages.css">
 </head>
@@ -29,8 +30,10 @@
         server records — the following:
       </p>
       <ul>
-        <li><strong>IP address</strong> — used to rate-limit and to look up
-          known abusive networks.</li>
+        <li><strong>IP address</strong> — used to rate-limit your requests.
+          When the operator has loaded a reputation list, your IP may also
+          be checked against known abusive networks (datacenter, Tor, VPN
+          ranges).</li>
         <li><strong>Request headers</strong> — the <code>User-Agent</code>,
           <code>Accept-Language</code>, and <code>Accept-Encoding</code>
           your browser already sends with every request, used to detect
@@ -41,16 +44,44 @@
           visitors aren't re-challenged unnecessarily. It contains no
           personal data.</li>
         <li><strong>Behavioural counters</strong> — the number of times
-          your mouse moved, scrolled, or you pressed a key while the page
-          was open. These are <em>counts only</em> — no positions, no
-          paths, no keystrokes are recorded.</li>
+          your mouse moved, you tapped the screen, scrolled, or you pressed
+          a key while the page was open. These are <em>counts only</em> —
+          no positions, no paths, no keystrokes are recorded.</li>
+        <li><strong>Automation flag</strong> — a single boolean
+          (<code>navigator.webdriver</code>) your browser exposes when
+          it's being driven by a test framework. No values beyond
+          true/false/absent are stored.</li>
         <li><strong>Time on page</strong> — how many milliseconds elapsed
-          between the page loading and you submitting the form.</li>
+          between the page loading and you submitting the form, and the
+          time to your first interaction with it.</li>
+      </ul>
+
+      <h2>When enabled by the operator</h2>
+      <p>
+        These signals only run when the operator has explicitly turned them
+        on. They are off by default.
+      </p>
+      <ul>
+        <li><strong>TLS fingerprint</strong> — when the operator runs the
+          captcha behind a reverse proxy that emits a JA-style fingerprint
+          (e.g. Cloudflare's <code>cf-ja4</code>), that fingerprint is
+          read from the request and used to flag well-known automation
+          tools. The fingerprint summarises the cipher-suite handshake;
+          it does not identify you personally.</li>
+        <li><strong>IP reputation list</strong> — a CIDR list maintained
+          by the operator; your IP is compared against it, no remote
+          lookup is performed.</li>
+        <li><strong>Decision logs</strong> — when the operator enables
+          the validation dashboard, each verification decision is written
+          to a local SQLite file for abuse investigation. Log records
+          include the fields above. RustCaptcha imposes no remote
+          retention; the operator is responsible for pruning.</li>
       </ul>
 
       <h2>What RustCaptcha does not collect</h2>
       <ul>
-        <li>No browser fingerprinting beyond standard request headers.</li>
+        <li>No client-side fingerprinting libraries, canvas/WebGL probes,
+          font enumeration, or device-ID extraction.</li>
         <li>No cursor positions, click coordinates, or keystroke content.</li>
         <li>No third-party tracking or advertising identifiers.</li>
         <li>No cross-site profiles. The cookie is scoped to the captcha
@@ -60,10 +91,8 @@
       <h2>Retention</h2>
       <p>
         Individual challenges are short-lived and expire after a few
-        minutes. Decision logs, if the operator enables them, are intended
-        for abuse investigation and are kept according to that operator's
-        retention policy — RustCaptcha imposes no remote retention on its
-        own.
+        minutes. Anything written to a decision log (above) is kept
+        according to the operator's retention policy.
       </p>
 
       <h2>Cookies</h2>

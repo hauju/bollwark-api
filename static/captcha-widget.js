@@ -107,6 +107,7 @@
         const puzzle = await this._fetchPuzzle();
         this.puzzle = puzzle;
         this.tier = puzzle.tier;
+        this._applyInfoUrls(puzzle.info_urls);
         this._dispatchPuzzleEvent({
           ok: true,
           tier: puzzle.tier,
@@ -114,9 +115,13 @@
         });
         this._renderForTier();
       } catch (err) {
-        const blocked = /\b429\b/.test(err.message);
+        const blocked = err.status === 429;
         this.tier = blocked ? "block" : null;
         this.state = "failed";
+        // 429 (block) returns a JSON body with operator-overridden info
+        // URLs even when rejecting — surface them now so the brand corner
+        // points at the right Privacy/Terms even in block-tier.
+        if (err.infoUrls) this._applyInfoUrls(err.infoUrls);
         this._dispatchPuzzleEvent({
           ok: false,
           tier: this.tier,
@@ -149,39 +154,8 @@
       this.label.className = "rc-captcha-label";
       this.label.textContent = "I'm not a robot";
 
-      // Brand corner: clickable name → about page, tiny Privacy / Terms
-      // links beneath. Mirrors the reCAPTCHA / hCaptcha pattern so the
-      // privacy notice stays directly accessible from the widget (GDPR
-      // Art. 13 "easily accessible" expectation) without a bottom footer.
-      const brand = document.createElement("span");
-      brand.className = "rc-captcha-brand";
-      const linkBase = this.serverUrl || "";
-      const brandLink = document.createElement("a");
-      brandLink.className = "rc-captcha-brand-name";
-      brandLink.href = linkBase + "/static/about.html";
-      brandLink.target = "_blank";
-      brandLink.rel = "noopener noreferrer";
-      brandLink.textContent = "RustCaptcha";
-      const brandLinks = document.createElement("span");
-      brandLinks.className = "rc-captcha-brand-links";
-      [
-        ["Privacy", "/static/privacy.html"],
-        ["Terms", "/static/terms.html"],
-      ].forEach(([text, path], i) => {
-        if (i > 0) brandLinks.appendChild(document.createTextNode(" · "));
-        const a = document.createElement("a");
-        a.href = linkBase + path;
-        a.textContent = text;
-        a.target = "_blank";
-        a.rel = "noopener noreferrer";
-        brandLinks.appendChild(a);
-      });
-      brand.appendChild(brandLink);
-      brand.appendChild(brandLinks);
-
       this.row.appendChild(this.checkbox);
       this.row.appendChild(this.label);
-      this.row.appendChild(brand);
       this.container.appendChild(this.row);
 
       // Honeypot: invisible input a naive form-spamming bot fills.
@@ -210,7 +184,62 @@
         this.container.appendChild(this.detailsEl);
       }
 
+      // Brand footer: clickable name → about, tiny Privacy / Terms links
+      // beneath. Mirrors the reCAPTCHA / hCaptcha pattern. Lives in its
+      // own persistent footer (not inside `row`) so it stays visible
+      // across every tier state — invisible-pass, visual challenge, and
+      // block included — which is exactly when the user is most likely
+      // to want "why am I seeing this?". Hrefs default to the bundled
+      // /static/*.html and are patched by `_applyInfoUrls` once the
+      // puzzle response (or 429 body) arrives with operator overrides.
+      this.footer = document.createElement("div");
+      this.footer.className = "rc-captcha-footer";
+      const brand = document.createElement("span");
+      brand.className = "rc-captcha-brand";
+      const linkBase = this.serverUrl || "";
+      this._brandLinks = {};
+      const brandLink = document.createElement("a");
+      brandLink.className = "rc-captcha-brand-name";
+      brandLink.href = linkBase + "/static/about.html";
+      brandLink.target = "_blank";
+      brandLink.rel = "noopener noreferrer";
+      brandLink.textContent = "RustCaptcha";
+      this._brandLinks.about = brandLink;
+      const brandLinks = document.createElement("span");
+      brandLinks.className = "rc-captcha-brand-links";
+      [
+        ["Privacy", "/static/privacy.html", "privacy"],
+        ["Terms", "/static/terms.html", "terms"],
+      ].forEach(([text, path, key], i) => {
+        if (i > 0) brandLinks.appendChild(document.createTextNode(" · "));
+        const a = document.createElement("a");
+        a.href = linkBase + path;
+        a.textContent = text;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        brandLinks.appendChild(a);
+        this._brandLinks[key] = a;
+      });
+      brand.appendChild(brandLink);
+      brand.appendChild(brandLinks);
+      this.footer.appendChild(brand);
+      this.container.appendChild(this.footer);
+
       this._updateUI();
+    }
+
+    // Patch the brand-corner hrefs from operator-overridden URLs supplied
+    // by the server (puzzle response or 429 body). Per-field: an unset
+    // override leaves the bundled `/static/*.html` link untouched.
+    _applyInfoUrls(infoUrls) {
+      if (!infoUrls || !this._brandLinks) return;
+      if (infoUrls.about) this._brandLinks.about.href = infoUrls.about;
+      if (infoUrls.privacy && this._brandLinks.privacy) {
+        this._brandLinks.privacy.href = infoUrls.privacy;
+      }
+      if (infoUrls.terms && this._brandLinks.terms) {
+        this._brandLinks.terms.href = infoUrls.terms;
+      }
     }
 
     // Branch the visible UI based on the tier the server assigned.
@@ -415,7 +444,19 @@
       const resp = await fetch(url, { credentials: "include" });
       if (!resp.ok) {
         const body = await resp.text();
-        throw new Error(`Puzzle fetch failed (${resp.status}): ${body}`);
+        // 429 carries a structured BlockedResponse JSON with `info_urls`
+        // so the widget can patch the brand corner before rendering the
+        // blocked state. Fall back gracefully if the body isn't JSON.
+        let parsed = null;
+        try {
+          parsed = JSON.parse(body);
+        } catch (_) {
+          /* body wasn't JSON — non-block error from upstream proxy etc. */
+        }
+        const err = new Error(`Puzzle fetch failed (${resp.status}): ${body}`);
+        err.status = resp.status;
+        err.infoUrls = parsed && parsed.info_urls ? parsed.info_urls : null;
+        throw err;
       }
       return resp.json();
     }
