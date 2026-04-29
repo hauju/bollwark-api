@@ -125,7 +125,7 @@ After a PoW solution is verified, a second scoring pass runs against verify-time
 | Score range | Decision | Response | Side effect |
 |---|---|---|---|
 | `0` — `VERIFY_SHADOW_MIN-1` | `Pass` | `success: true` | DEBUG log |
-| `VERIFY_SHADOW_MIN` — `VERIFY_BLOCK_MIN-1` | `ShadowFail` | `success: true` | WARN log, `quarantined` field |
+| `VERIFY_SHADOW_MIN` — `VERIFY_BLOCK_MIN-1` | `ShadowFail` | `success: true` | WARN log (the response body is identical to `Pass`; the log is the only signal) |
 | `VERIFY_BLOCK_MIN` — | `Block` | `success: false` | INFO log |
 
 ### `VERIFY_SHADOW_MIN` (default `30`)
@@ -312,6 +312,10 @@ The bearer token for `/v1/admin/*` is the same `ADMIN_TOKEN` used for `/v1/sites
 |---|---|
 | `GET /v1/admin/sessions?limit=N` | List recent sessions (puzzle decision joined with matching verify, if any). `limit` capped at 1000, default 100. |
 | `GET /v1/admin/sessions/:id` | Detail for a single session id. |
+| `GET /v1/admin/stats` | Aggregate counts and tier/decision breakdowns over the decision log (powers the dashboard summary cards). |
+| `GET /v1/admin/sites` | List registered sites (no secrets) merged with per-site activity from the decision log. |
+| `POST /v1/admin/sites/:id/rotate` | Issue a new `secret_key` for a site; the old one is invalidated immediately. |
+| `DELETE /v1/admin/sites/:id` | Delete a site. Future `/v1/verify` calls with its old secret will fail. |
 | `GET /static/admin.html` | Browser dashboard (paste the token to sign in). |
 
 Each session row includes the puzzle score, tier, signal breakdown, verify result (when present), and a derived `bot_probability` (max of puzzle and verify scores, capped at 100). Decision writes go through an unbounded channel to a dedicated writer thread, so the hot path is never blocked on disk.

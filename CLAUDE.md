@@ -30,11 +30,12 @@ All runtime config is via environment variables; every setting has a default. **
 
 - `LISTEN_ADDR` (default `0.0.0.0:3000`), `RUST_LOG` (default `info`)
 - `PUZZLE_ALGORITHM` (default `sha256`; alternative `argon2id`). When `argon2id` is selected, `ARGON2_M_COST` / `ARGON2_T_COST` / `ARGON2_P_COST` (defaults `8192`/`2`/`1`) tune memory/iterations/lanes — and `DEFAULT_DIFFICULTY` should be dropped to ~4–6 since each hash is much more expensive than SHA-256.
-- `DEFAULT_DIFFICULTY` / `MIN_DIFFICULTY` / `MAX_DIFFICULTY` — PoW difficulty in leading zero bits (default `20` / `16` / `28`)
+- `DEFAULT_DIFFICULTY` / `MIN_DIFFICULTY` / `MAX_DIFFICULTY` — PoW difficulty in leading zero bits (default `18` / `16` / `28`)
 - `CHALLENGE_TTL_SECS` / `CLEANUP_INTERVAL_SECS` — challenge expiry + sweeper cadence
 - `TIER_CHECKBOX_MIN` / `TIER_HARD_POW_MIN` / `TIER_VISUAL_MIN` / `TIER_BLOCK_MIN` — puzzle-time score → tier thresholds (defaults `20`/`40`/`65`/`85`)
 - `VERIFY_SHADOW_MIN` / `VERIFY_BLOCK_MIN` — verify-time score thresholds (defaults `30` / `60`)
-- Optional signal toggles, each disabled when its env var is unset: `IP_REPUTATION_FILE`, `COOKIE_SIGNING_SECRET` (+ `COOKIE_SECURE`), `TLS_FINGERPRINT_HEADER` (+ `TLS_FINGERPRINT_FILE`, `TRUSTED_PROXIES`).
+- `FULL_FINGERPRINT_MODE` (default `false`) — opt-in for fingerprinting signals. When unset, the live decision uses rate + honeypot + time-on-page + PoW only; header anomaly, IP reputation, cookie age, TLS fingerprint, and behaviour are computed only as shadow scores (when the dashboard is on). Enabling this changes the GDPR / ePrivacy posture.
+- Optional signal inputs, each disabled when its env var is unset: `IP_REPUTATION_FILE`, `COOKIE_SIGNING_SECRET` (+ `COOKIE_SECURE`), `TLS_FINGERPRINT_HEADER` (+ `TLS_FINGERPRINT_FILE`, `TRUSTED_PROXIES`).
 - Provisioning + persistence: `ADMIN_TOKEN` gates `POST /v1/sites` (returns 404 when unset — no anonymous provisioning) and `/v1/admin/*`. `SITE_DB_PATH` enables SQLite-backed site persistence; without it sites are in-memory only. `CORS_ALLOWED_ORIGINS` is a comma/whitespace allowlist for `GET /v1/puzzle`; other routes never get CORS. `DEV_DISABLE_ADMIN_AUTH=1` (debug builds only) lets local dev/Playwright call `POST /v1/sites` without a bearer; never affects `/v1/admin/*`.
 - Reverse-proxy aware client IP: `TRUSTED_PROXIES` (the same CIDR list the TLS fingerprint signal uses) also gates `X-Forwarded-For` walking. The handler resolves the client IP via `risk::client_ip`; per-IP signals score the resolved IP, the TLS fingerprint signal still keys off the immediate peer.
 - Validation dashboard: `ADMIN_DB_PATH` enables SQLite-backed decision logging + the admin endpoints; `ADMIN_TOKEN` is the bearer token (shared with provisioning) and is required when `ADMIN_DB_PATH` is set. Browser UI is `static/admin.html`.
@@ -78,10 +79,10 @@ Two scoring passes bracket every successful solve:
 | `GET /healthz` | None | Liveness probe. Returns `200 ok`. |
 | `GET /v1/admin/sessions` | Bearer (`ADMIN_TOKEN`) | List recent puzzle/verify sessions for the dashboard. Only mounted when `ADMIN_DB_PATH` is set. |
 | `GET /v1/admin/sessions/:id` | Bearer (`ADMIN_TOKEN`) | Detail for a single session. |
-| `GET /v1/admin/sites` | Bearer (`ADMIN_TOKEN`) | List registered sites with decision-log activity aggregates. Only mounted when `ADMIN_DB_PATH` is set. |
+| `GET /v1/admin/stats` | Bearer (`ADMIN_TOKEN`) | Aggregate stats over the decision log (counts, tier/decision breakdowns) for the dashboard summary cards. |
+| `GET /v1/admin/sites` | Bearer (`ADMIN_TOKEN`) | List registered sites (no secrets) merged with per-site activity from the decision log. |
 | `POST /v1/admin/sites/:id/rotate` | Bearer (`ADMIN_TOKEN`) | Issue a new `secret_key` for a site; old one invalidated immediately. |
 | `DELETE /v1/admin/sites/:id` | Bearer (`ADMIN_TOKEN`) | Delete a site. |
-| `GET /v1/admin/sites` | Bearer (`ADMIN_TOKEN`) | List registered sites (no secrets) merged with per-site activity from the decision log. |
 
 ### Operational notes
 
@@ -97,6 +98,6 @@ Two scoring passes bracket every successful solve:
 - Challenges are deleted after successful PoW verification (single-use). Failed PoW leaves the challenge intact for retry. A verify-time `Block` decision still consumes the challenge — the PoW already succeeded.
 - `ShadowFail` has no persistent quarantine store; the structured WARN log is the audit trail.
 - The TLS fingerprint signal deliberately doesn't do native TLS inspection — it reads a header set by a trusted reverse proxy (e.g. Cloudflare's `cf-ja4`). The `TRUSTED_PROXIES` CIDR check is what prevents direct clients from spoofing the header.
-- Each optional signal is gated by its own env var being set; with no env vars the service runs with rate + header anomaly only.
+- Each optional signal input is gated by its own env var being set, **and** the live scoring set is gated by `FULL_FINGERPRINT_MODE`. Default posture (no env vars set) is rate + honeypot + time-on-page + PoW only — header anomaly is collected but not scored unless `FULL_FINGERPRINT_MODE=1`.
 - Integration tests use `tower::ServiceExt::oneshot` with a manually-injected `ConnectInfo` extension to simulate client connections without binding a real port.
-- Difficulty 8 is used in tests (instead of the production default 20) to keep solve times fast.
+- Difficulty 8 is used in tests (instead of the production default 18) to keep solve times fast.

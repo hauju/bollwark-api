@@ -117,7 +117,7 @@ The widget has two modes selected via `data-mode`:
 
 The `rustcaptcha:puzzle` event fires in default mode too if you want to drive your own UI alongside the widget — it bubbles, so a listener on a parent element works.
 
-The widget writes a hidden form field named `captcha-token`. Its value is a JSON string:
+The widget writes a hidden form field named `captcha-token`. Its value is a JSON string. For PoW-tier challenges (the common case):
 
 ```json
 {
@@ -134,7 +134,18 @@ The widget writes a hidden form field named `captcha-token`. Its value is a JSON
 }
 ```
 
-Your backend must parse this field and forward the values to `/v1/verify`.
+For visual-tier challenges (image-text), the widget submits `text_answer` instead of `nonce`:
+
+```json
+{
+  "challenge_id": "00000000-0000-0000-0000-000000000000",
+  "text_answer": "abcde",
+  "time_on_page_ms": 4200,
+  "behavior": { "...": "..." }
+}
+```
+
+Your backend must parse this field and forward the values verbatim to `/v1/verify` — including whichever of `nonce` / `text_answer` is present.
 
 ## 4. Verify on Your Backend
 
@@ -165,6 +176,19 @@ curl -s -X POST https://captcha.example.com/v1/verify \
   }'
 ```
 
+Send `text_answer` instead of `nonce` when the widget produced an image-text token:
+
+```bash
+curl -s -X POST https://captcha.example.com/v1/verify \
+  -H "Authorization: Bearer <SECRET_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "challenge_id": "00000000-0000-0000-0000-000000000000",
+    "text_answer": "abcde",
+    "time_on_page_ms": 4200
+  }'
+```
+
 Successful response:
 
 ```json
@@ -190,7 +214,9 @@ app.post("/signup", express.urlencoded({ extended: false }), async (req, res) =>
     return res.status(400).send("CAPTCHA failed");
   }
 
-  if (!token || !token.challenge_id || token.nonce === undefined) {
+  // Token carries either `nonce` (PoW tiers) or `text_answer` (visual tier).
+  const hasSolution = token.nonce !== undefined || typeof token.text_answer === "string";
+  if (!token || !token.challenge_id || !hasSolution) {
     return res.status(400).send("CAPTCHA failed");
   }
 
@@ -203,6 +229,7 @@ app.post("/signup", express.urlencoded({ extended: false }), async (req, res) =>
     body: JSON.stringify({
       challenge_id: token.challenge_id,
       nonce: token.nonce,
+      text_answer: token.text_answer,
       honeypot: token.honeypot,
       time_on_page_ms: token.time_on_page_ms,
       behavior: token.behavior,
@@ -231,7 +258,9 @@ use serde::Deserialize;
 #[derive(Deserialize)]
 struct CaptchaToken {
     challenge_id: uuid::Uuid,
-    nonce: u64,
+    // Exactly one of `nonce` (PoW tiers) or `text_answer` (visual tier) is present.
+    nonce: Option<u64>,
+    text_answer: Option<String>,
     honeypot: Option<String>,
     time_on_page_ms: Option<u64>,
     behavior: Option<serde_json::Value>,
@@ -245,6 +274,10 @@ struct VerifyResponse {
 async fn verify_captcha(token_json: &str) -> anyhow::Result<bool> {
     let token: CaptchaToken = serde_json::from_str(token_json)?;
 
+    if token.nonce.is_none() && token.text_answer.is_none() {
+        return Ok(false);
+    }
+
     let client = reqwest::Client::new();
     let resp = client
         .post("https://captcha.example.com/v1/verify")
@@ -252,6 +285,7 @@ async fn verify_captcha(token_json: &str) -> anyhow::Result<bool> {
         .json(&serde_json::json!({
             "challenge_id": token.challenge_id,
             "nonce": token.nonce,
+            "text_answer": token.text_answer,
             "honeypot": token.honeypot,
             "time_on_page_ms": token.time_on_page_ms,
             "behavior": token.behavior,
@@ -298,6 +332,7 @@ Before using this in a real application:
 - Put the service behind HTTPS.
 - Set `CORS_ALLOWED_ORIGINS` to your app origin.
 - Set `COOKIE_SIGNING_SECRET`, `COOKIE_SAMESITE=None`, and `COOKIE_SECURE=true` if you want cross-origin trust cookies.
+- Decide whether to opt in to `FULL_FINGERPRINT_MODE=1`. The default is a minimal-privacy baseline (rate + honeypot + time-on-page + PoW). Enabling fingerprinting (header anomaly, IP reputation, cookie age, TLS fingerprint, behaviour) gives stronger scoring but changes your GDPR / ePrivacy posture — update your cookie consent, fingerprinting disclosure, and DPIA accordingly.
 - Configure `TRUSTED_PROXIES` if you rely on `X-Forwarded-For` or TLS fingerprint headers.
 - Keep `/v1/verify`, `/v1/sites`, and `/v1/admin/*` server-to-server only.
 - Monitor `puzzle_decision` and `verify_decision` logs before tightening thresholds.
@@ -322,7 +357,7 @@ Common responses:
 | Case | Response | What to do |
 |---|---|---|
 | Missing or bad `site_key` | `400` from `/v1/puzzle` | Check frontend config |
-| High-risk puzzle request | `429` from `/v1/puzzle` | Show a retry/error state or fall back to your own moderation path |
+| High-risk puzzle request (`block` tier) | `429` from `/v1/puzzle` | Show a retry/error state or fall back to your own moderation path. (The `visual_challenge` tier returns `200` with `kind=image`, not `429`.) |
 | Missing verify auth | `401` from `/v1/verify` | Check backend `secret_key` |
 | Challenge expired | `410` from `/v1/verify` | Ask user to retry the form |
 | Replayed challenge | `404` or `409` from `/v1/verify` | Ask user to retry; do not accept the form |
