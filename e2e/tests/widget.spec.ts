@@ -53,6 +53,56 @@ test("happy path: widget solves PoW and verify returns success=true", async ({
   await expect(result).toContainText('"success": true', { timeout: 15_000 });
 });
 
+test("invisible mode: invisible_pass tier renders no visible UI but verifies", async ({
+  page,
+}) => {
+  await page.goto("/static/testsite.html?invisible=1");
+  await page.click("#setup-btn");
+  await expect(page.locator("#setup-btn")).toHaveText("Site Created", {
+    timeout: 30_000,
+  });
+
+  // The puzzle event fires once the widget receives its tier. Use the
+  // testsite's mirrored readout to wait for it without racing.
+  await expect(page.locator("#rc-widget-tier")).not.toHaveText("—", {
+    timeout: 30_000,
+  });
+
+  // For the invisible_pass tier the widget must render zero chrome —
+  // no rc-captcha class, no checkbox, no label, no footer. The honeypot
+  // input is the one element that stays present so naive bots still trip.
+  await expect(page.locator("#captcha-widget.rc-captcha")).toHaveCount(0);
+  await expect(page.locator(".rc-captcha-checkbox")).toHaveCount(0);
+  await expect(page.locator(".rc-captcha-label")).toHaveCount(0);
+  await expect(page.locator(".rc-captcha-footer")).toHaveCount(0);
+  await expect(
+    page.locator('#captcha-widget input[aria-hidden="true"]'),
+  ).toHaveCount(1);
+
+  // Silent PoW finishes in the background; widget reports `verified` via
+  // its public getResult().
+  await page.waitForFunction(
+    () => {
+      const inst = (window as any).RustCaptcha?._instances?.[0];
+      return inst && inst.getResult().state === "verified";
+    },
+    undefined,
+    { timeout: 60_000 },
+  );
+
+  // Sit on the page long enough that the verify-time time-on-page band
+  // drops to 0 (matches the happy-path test).
+  await page.waitForTimeout(2_500);
+
+  await page.fill("#name", "Jane Doe");
+  await page.fill("#email", "jane@example.com");
+  await page.click("#submit-btn");
+
+  const result = page.locator("#result-data");
+  await expect(result).toBeVisible();
+  await expect(result).toContainText('"success": true', { timeout: 15_000 });
+});
+
 test("rate spam pushes tier toward HardPow / 429", async ({ page }) => {
   await setupSite(page);
 

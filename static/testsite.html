@@ -225,6 +225,15 @@
 
         <div class="captcha-container">
           <div id="captcha-widget" data-sitekey="" data-debug="true"></div>
+          <script>
+            // ?invisible=1 → exercise the widget's invisible mode (no UI
+            // rendered for the invisible_pass tier; only escalation tiers
+            // promote to a visible challenge). Set before DOMContentLoaded
+            // so the auto-init picks it up.
+            if (new URLSearchParams(location.search).get("invisible") === "1") {
+              document.getElementById("captcha-widget").dataset.mode = "invisible";
+            }
+          </script>
         </div>
 
         <button type="submit" id="submit-btn" disabled>Register</button>

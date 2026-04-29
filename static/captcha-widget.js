@@ -26,12 +26,40 @@
 
   // ── CaptchaWidget Class ──
 
+  /**
+   * RustCaptcha widget.
+   *
+   * Modes (`data-mode` attribute / `mode` option):
+   *
+   *   "default" — always renders the checkbox + brand footer chrome.
+   *     `invisible_pass` shows a "Verified silently" pill; higher tiers
+   *     require the visitor to click the checkbox or solve a visual.
+   *
+   *   "invisible" — renders no chrome until/unless the tier requires
+   *     user interaction:
+   *       invisible_pass → silent PoW + onVerify; no UI ever rendered.
+   *       checkbox / hard_pow → checkbox UI appears; user clicks.
+   *       visual → image-text UI appears; user types the answer.
+   *       block → widget renders nothing. The embedder MUST listen for
+   *         the `rustcaptcha:puzzle` event (detail.ok=false) to surface
+   *         a failure UX — otherwise the block is silent and the user
+   *         sees nothing happen. A console.warn fires once on block to
+   *         flag missed wiring during development.
+   *
+   * Event: `rustcaptcha:puzzle` (CustomEvent on the container, bubbles)
+   *   detail = { ok, tier, difficulty?, error? }
+   *     ok=true  → puzzle issued (or invisible-pass solving in the bg).
+   *     ok=false → 429 (block) or fetch error; `tier="block"` for 429.
+   */
   class CaptchaWidget {
     constructor(container, options) {
       this.container = container;
       this.siteKey = options.sitekey;
       this.serverUrl = options.serverUrl || DEFAULT_SERVER_URL;
       this.debug = options.debug === "true" || options.debug === true;
+      // "invisible" defers all visible UI until the tier requires it.
+      // Mirrors hCaptcha size=invisible / reCAPTCHA v3 → v2 fallback.
+      this.mode = options.mode === "invisible" ? "invisible" : "default";
       this.onVerify = options.onVerify || null;
 
       this.state = "idle";
@@ -40,6 +68,7 @@
       this.solveStartTime = null;
       this.puzzle = null;
       this.tier = null;
+      this._uiRendered = false;
       this.pageLoadAt = Date.now(); // ms since epoch; feeds the time-on-page signal at verify time
 
       // Behavioural telemetry: counters for the verify-time `behavior` blob.
@@ -107,26 +136,52 @@
         const puzzle = await this._fetchPuzzle();
         this.puzzle = puzzle;
         this.tier = puzzle.tier;
-        this._applyInfoUrls(puzzle.info_urls);
         this._dispatchPuzzleEvent({
           ok: true,
           tier: puzzle.tier,
           difficulty: puzzle.difficulty,
         });
-        this._renderForTier();
+
+        // Invisible mode renders nothing for `invisible_pass` — just runs
+        // PoW silently and fires onVerify. Any other tier needs user
+        // interaction (a click, an image-text answer), so promote to the
+        // full visible UI.
+        if (this.mode === "invisible" && this.tier === "invisible_pass") {
+          this._runVerify();
+        } else {
+          this._promoteToInteractiveUI();
+          this._applyInfoUrls(puzzle.info_urls);
+          this._renderForTier();
+        }
       } catch (err) {
         const blocked = err.status === 429;
         this.tier = blocked ? "block" : null;
         this.state = "failed";
-        // 429 (block) returns a JSON body with operator-overridden info
-        // URLs even when rejecting — surface them now so the brand corner
-        // points at the right Privacy/Terms even in block-tier.
-        if (err.infoUrls) this._applyInfoUrls(err.infoUrls);
         this._dispatchPuzzleEvent({
           ok: false,
           tier: this.tier,
           error: err.message,
         });
+
+        // Invisible mode hands block-tier UX to the embedder via the
+        // `rustcaptcha:puzzle` event — they decide whether to show an
+        // inline message, redirect, or do nothing. The console.warn is a
+        // one-shot dev-time hint: if the embedder forgot to wire the
+        // listener, the page would otherwise look like nothing happened.
+        if (this.mode === "invisible") {
+          console.warn(
+            "[RustCaptcha] invisible-mode " +
+              (blocked ? "block (HTTP 429)" : "fetch error") +
+              " — widget rendered no UI. Listen for the `rustcaptcha:puzzle` " +
+              "event (detail.ok=false) on the container to surface a failure UX."
+          );
+          return;
+        }
+
+        // 429 (block) returns a JSON body with operator-overridden info
+        // URLs even when rejecting — surface them now so the brand corner
+        // points at the right Privacy/Terms even in block-tier.
+        if (err.infoUrls) this._applyInfoUrls(err.infoUrls);
         this._renderBlocked(blocked ? "Verification unavailable" : err.message);
       }
     }
@@ -139,24 +194,15 @@
 
     // ── UI Rendering ──
 
+    // Honeypot + (optionally) the visible UI. In invisible mode the visible
+    // UI is deferred until `_promoteToInteractiveUI()` — the widget runs
+    // silently for the `invisible_pass` tier and only materialises a
+    // checkbox / visual challenge if the server escalates.
     _render() {
       this.container.innerHTML = "";
-      this.container.classList.add("rc-captcha");
-
-      this.row = document.createElement("div");
-      this.row.className = "rc-captcha-row";
-
-      this.checkbox = document.createElement("div");
-      this.checkbox.className = "rc-captcha-checkbox";
-      this.checkbox.addEventListener("click", () => this._onCheckboxClick());
-
-      this.label = document.createElement("span");
-      this.label.className = "rc-captcha-label";
-      this.label.textContent = "I'm not a robot";
-
-      this.row.appendChild(this.checkbox);
-      this.row.appendChild(this.label);
-      this.container.appendChild(this.row);
+      this.container.classList.remove("rc-captcha");
+      this._uiRendered = false;
+      this._brandLinks = null;
 
       // Honeypot: invisible input a naive form-spamming bot fills.
       // The name MUST NOT contain semantic tokens like email/name/phone/
@@ -173,6 +219,37 @@
       this.honeypot.style.cssText =
         "position:absolute;left:-9999px;top:-9999px;width:1px;height:1px;opacity:0;";
       this.container.appendChild(this.honeypot);
+
+      if (this.mode !== "invisible") {
+        this._promoteToInteractiveUI();
+      }
+    }
+
+    // Build the visible widget chrome: checkbox row, status line, debug
+    // panel, brand footer. Idempotent — safe to call after `_render()`
+    // promotes invisibly.
+    _promoteToInteractiveUI() {
+      if (this._uiRendered) return;
+      this._uiRendered = true;
+
+      this.container.classList.add("rc-captcha");
+
+      this.row = document.createElement("div");
+      this.row.className = "rc-captcha-row";
+
+      this.checkbox = document.createElement("div");
+      this.checkbox.className = "rc-captcha-checkbox";
+      this.checkbox.addEventListener("click", () => this._onCheckboxClick());
+
+      this.label = document.createElement("span");
+      this.label.className = "rc-captcha-label";
+      this.label.textContent = "I'm not a robot";
+
+      this.row.appendChild(this.checkbox);
+      this.row.appendChild(this.label);
+      // Insert before the honeypot so visible flow goes row → status →
+      // debug → footer, with the honeypot tucked anywhere off-screen.
+      this.container.insertBefore(this.row, this.honeypot);
 
       this.statusEl = document.createElement("div");
       this.statusEl.className = "rc-captcha-status";
@@ -354,6 +431,8 @@
     }
 
     _updateUI() {
+      // Invisible mode pre-promotion: no visible UI exists yet. Skip.
+      if (!this._uiRendered) return;
       this.checkbox.className = "rc-captcha-checkbox";
       if (this.state === "verified") this.checkbox.classList.add("verified");
       else if (this.state === "failed") this.checkbox.classList.add("failed");
@@ -379,6 +458,7 @@
     }
 
     _renderDetails() {
+      if (!this.detailsEl) return;
       const rows = [];
       if (this.tier) rows.push(this._detailRow("Tier", this.tier));
       if (this.puzzle) rows.push(this._detailRow("Difficulty", this.puzzle.difficulty));
@@ -404,7 +484,7 @@
 
     async _runVerify() {
       if (!this.puzzle) {
-        this.statusEl.textContent = "Error: no puzzle available";
+        if (this.statusEl) this.statusEl.textContent = "Error: no puzzle available";
         return;
       }
       try {
@@ -416,8 +496,11 @@
 
         this.state = "verified";
         if (this.tier === "invisible_pass") {
-          this.label.textContent = "Verified";
-          this.statusEl.textContent = "Verified silently";
+          // Default mode renders the "Verified silently" pill. Invisible
+          // mode has no UI to update — the onVerify callback / submit-time
+          // token injection is the only signal the embedder sees.
+          if (this.label) this.label.textContent = "Verified";
+          if (this.statusEl) this.statusEl.textContent = "Verified silently";
         } else {
           this._updateUI();
         }
@@ -432,7 +515,7 @@
       } catch (err) {
         console.error("RustCaptcha error:", err);
         this.state = "failed";
-        this.statusEl.textContent = "Error: " + err.message;
+        if (this.statusEl) this.statusEl.textContent = "Error: " + err.message;
         this._updateUI();
       }
     }
@@ -592,6 +675,8 @@
       this.state = "idle";
       this.puzzle = null;
       this.tier = null;
+      this._uiRendered = false;
+      this._brandLinks = null;
       this.pageLoadAt = Date.now();
       this._powProgress = undefined;
       this._solveTime = undefined;
@@ -629,6 +714,7 @@
         sitekey: el.dataset.sitekey,
         serverUrl: el.dataset.serverUrl || "",
         debug: el.dataset.debug,
+        mode: el.dataset.mode,
       });
       window.RustCaptcha._instances.push(widget);
     });

@@ -91,6 +91,32 @@ If you bundle or proxy the script from your own app origin, set `data-server-url
 ></div>
 ```
 
+### Widget Modes
+
+The widget has two modes selected via `data-mode`:
+
+- **`data-mode="default"`** (used when the attribute is omitted): the checkbox row and brand footer always render. Low-risk visitors see a quick "Verified silently" pill; higher tiers prompt the visitor to click the checkbox or solve an image challenge. This is the simplest integration — no other wiring required.
+- **`data-mode="invisible"`**: the widget renders no chrome at all for the `invisible_pass` tier — PoW runs in the background and the `captcha-token` field is injected silently when the visitor submits. If the server escalates the tier, the widget falls back to its visible UI on demand:
+  - `invisible_pass` → no UI, silent PoW.
+  - `checkbox` / `hard_pow` → checkbox appears, visitor clicks.
+  - `visual` → image-text challenge appears, visitor types the answer.
+  - `block` → **the widget renders nothing**. Your page must listen for the `rustcaptcha:puzzle` event to surface a failure UX (an inline message, a redirect, or anything else). Without a listener the block is silent and the visitor sees nothing happen. The widget logs a one-shot `console.warn` in this case to flag missed wiring during development.
+
+```html
+<div id="captcha" data-sitekey="<SITE_KEY>" data-mode="invisible"></div>
+<script>
+  document.getElementById("captcha").addEventListener("rustcaptcha:puzzle", (e) => {
+    // e.detail = { ok, tier, difficulty?, error? }
+    if (!e.detail.ok) {
+      // tier === "block" for HTTP 429; null on network/fetch errors.
+      showSignupBlockedMessage(e.detail.tier);
+    }
+  });
+</script>
+```
+
+The `rustcaptcha:puzzle` event fires in default mode too if you want to drive your own UI alongside the widget — it bubbles, so a listener on a parent element works.
+
 The widget writes a hidden form field named `captcha-token`. Its value is a JSON string:
 
 ```json

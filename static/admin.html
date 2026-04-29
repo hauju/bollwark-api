@@ -189,6 +189,74 @@
   .login label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
   .login input { width: 100%; margin-bottom: 14px; }
   .login button { width: 100%; }
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+  }
+  .modal {
+    width: 460px;
+    max-width: calc(100vw - 32px);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 22px 24px;
+  }
+  .modal h2 { margin: 0 0 14px; font-size: 15px; font-weight: 600; }
+  .modal label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 6px; }
+  .modal input {
+    width: 100%;
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font: inherit;
+  }
+  .modal .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+  .modal button {
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 14px;
+    font: inherit;
+    cursor: pointer;
+  }
+  .modal button:hover { border-color: var(--accent); }
+  .modal button.primary { background: var(--accent); color: #0e1116; border-color: var(--accent); }
+  .modal button.primary:hover { filter: brightness(1.1); }
+  .modal .err { color: var(--bad); font-size: 12.5px; margin-top: 8px; min-height: 1em; }
+  .modal .warn-box {
+    background: rgba(210, 153, 34, 0.08);
+    border: 1px solid rgba(210, 153, 34, 0.4);
+    color: var(--warn);
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-size: 12.5px;
+    margin: 4px 0 14px;
+  }
+  .copy-row {
+    display: flex;
+    gap: 6px;
+    align-items: stretch;
+  }
+  .copy-row code {
+    flex: 1;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    word-break: break-all;
+    user-select: all;
+  }
+  .copy-row button { padding: 6px 12px; }
 </style>
 </head>
 <body>
@@ -295,6 +363,7 @@ function renderApp(token) {
 
   const mainEl = h('main', {}, sessionsView, aside);
   const clearBtn = h('button', { class: 'danger', onclick: () => clearAll() }, 'Clear all');
+  const addSiteBtn = h('button', { style: 'display: none;', onclick: () => openAddSite() }, 'Add site');
   const sessionsTabBtn = h('button', { class: 'active', onclick: () => switchTab('sessions') }, 'Sessions');
   const sitesTabBtn = h('button', { onclick: () => switchTab('sites') }, 'Sites');
 
@@ -345,6 +414,7 @@ function renderApp(token) {
     sessionsTabBtn.classList.toggle('active', tab === 'sessions');
     sitesTabBtn.classList.toggle('active', tab === 'sites');
     clearBtn.style.display = tab === 'sessions' ? '' : 'none';
+    addSiteBtn.style.display = tab === 'sites' ? '' : 'none';
     if (tab === 'sessions') {
       mainEl.replaceChildren(sessionsView, aside);
     } else {
@@ -382,7 +452,7 @@ function renderApp(token) {
     if (sites.length === 0) {
       sitesTbody.replaceChildren(h('tr', {},
         h('td', { colspan: '7', class: 'empty', style: 'text-align: center; padding: 24px;' },
-          'No sites registered. Use POST /v1/sites to register one.'),
+          'No sites registered. Click “Add site” to register one.'),
       ));
       return;
     }
@@ -409,6 +479,104 @@ function renderApp(token) {
       tr.classList.toggle('selected', Number(tr.dataset.id) === s.id);
     }
     aside.replaceChildren(renderDetail(s));
+  };
+
+  const openAddSite = () => {
+    const nameInput = h('input', { type: 'text', placeholder: 'e.g. example.com', maxlength: '200', autocomplete: 'off' });
+    const errEl = h('div', { class: 'err' });
+    const submitBtn = h('button', { class: 'primary', type: 'submit' }, 'Create');
+    const cancelBtn = h('button', { type: 'button', onclick: () => closeModal() }, 'Cancel');
+    const form = h('form', { onsubmit: async e => {
+      e.preventDefault();
+      const name = nameInput.value.trim();
+      if (!name) { errEl.textContent = 'Name is required.'; return; }
+      submitBtn.disabled = true;
+      errEl.textContent = '';
+      try {
+        const res = await fetch('/v1/sites', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ name }),
+        });
+        if (res.status === 401) {
+          sessionStorage.removeItem(TOKEN_KEY);
+          location.reload();
+          return;
+        }
+        if (res.status === 404) {
+          errEl.textContent = 'Site provisioning is disabled (ADMIN_TOKEN unset).';
+          submitBtn.disabled = false;
+          return;
+        }
+        if (!res.ok) {
+          const text = await res.text().catch(() => '');
+          errEl.textContent = text || `HTTP ${res.status}`;
+          submitBtn.disabled = false;
+          return;
+        }
+        const data = await res.json();
+        showSiteCreated(data);
+        await refresh();
+      } catch (err) {
+        errEl.textContent = err.message;
+        submitBtn.disabled = false;
+      }
+    } },
+      h('h2', {}, 'Add site'),
+      h('label', {}, 'Name'),
+      nameInput,
+      errEl,
+      h('div', { class: 'actions' }, cancelBtn, submitBtn),
+    );
+    showModal(form);
+    nameInput.focus();
+  };
+
+  const showSiteCreated = ({ site_key, secret_key }) => {
+    const copyBtn = (text) => h('button', {
+      type: 'button',
+      onclick: async (e) => {
+        try {
+          await navigator.clipboard.writeText(text);
+          const orig = e.target.textContent;
+          e.target.textContent = 'Copied';
+          setTimeout(() => { e.target.textContent = orig; }, 1200);
+        } catch {
+          // Clipboard may be denied — selection fallback (text is user-select: all).
+        }
+      },
+    }, 'Copy');
+    const panel = h('div', {},
+      h('h2', {}, 'Site created'),
+      h('div', { class: 'warn-box' },
+        'Save the secret key now — it will not be shown again. ',
+        'Use it as the bearer token when calling POST /v1/verify.'),
+      h('label', {}, 'Site key'),
+      h('div', { class: 'copy-row' }, h('code', {}, site_key), copyBtn(site_key)),
+      h('label', {}, 'Secret key'),
+      h('div', { class: 'copy-row' }, h('code', {}, secret_key), copyBtn(secret_key)),
+      h('div', { class: 'actions' },
+        h('button', { class: 'primary', type: 'button', onclick: () => closeModal() }, 'Done')),
+    );
+    showModal(panel);
+  };
+
+  let modalEl = null;
+  const showModal = (content) => {
+    closeModal();
+    modalEl = h('div', { class: 'modal-backdrop', onclick: e => {
+      if (e.target === modalEl) closeModal();
+    } }, h('div', { class: 'modal' }, content));
+    document.body.appendChild(modalEl);
+  };
+  const closeModal = () => {
+    if (modalEl) {
+      modalEl.remove();
+      modalEl = null;
+    }
   };
 
   const clearAll = async () => {
@@ -444,6 +612,7 @@ function renderApp(token) {
       h('span', { class: 'grow' }),
       statusEl,
       h('button', { onclick: () => refresh() }, 'Refresh'),
+      addSiteBtn,
       clearBtn,
       h('button', { onclick: () => { sessionStorage.removeItem(TOKEN_KEY); location.reload(); } }, 'Sign out'),
     ),
