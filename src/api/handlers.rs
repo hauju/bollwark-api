@@ -79,11 +79,11 @@ pub async fn get_puzzle(
         _ => TlsFingerprint::Skipped,
     };
 
-    // Score the request twice: once with every signal (full) and once with
-    // only the privacy-friendly subset (minimal). The live decision is
-    // driven by whichever the operator selected; the other score is logged
-    // alongside so the dashboard can show what the decision *would* have
-    // been under the opposite mode.
+    // Score the request. The live mode is driven by `full_fingerprint_mode`;
+    // the *other* mode is computed only when the dashboard is consuming it,
+    // so a baseline production deployment (FULL_FINGERPRINT_MODE unset,
+    // ADMIN_DB_PATH unset) never invokes the fingerprint scorers at all
+    // (header anomaly, IP reputation, cookie age, TLS fingerprint).
     let ctx = SignalContext {
         ip,
         headers: &headers,
@@ -92,12 +92,28 @@ pub async fn get_puzzle(
         cookie,
         tls_fingerprint,
     };
-    let score_full = state.risk.score(&ctx);
-    let score_minimal = state.risk.score_minimal(&ctx);
-    let score = if state.minimal_privacy_mode {
-        score_minimal
+    let log_enabled = state.decision_log.is_some();
+    let score = if state.full_fingerprint_mode {
+        state.risk.score(&ctx)
     } else {
-        score_full
+        state.risk.score_minimal(&ctx)
+    };
+    let shadow = if log_enabled {
+        Some(if state.full_fingerprint_mode {
+            state.risk.score_minimal(&ctx)
+        } else {
+            state.risk.score(&ctx)
+        })
+    } else {
+        None
+    };
+    // Decompose the live + shadow pair into the (full, minimal) the log
+    // record expects. When the dashboard is off, both halves carry the live
+    // score — the row is never read anyway.
+    let (score_full, score_minimal) = if state.full_fingerprint_mode {
+        (score, shadow.unwrap_or(score))
+    } else {
+        (shadow.unwrap_or(score), score)
     };
 
     // Tiers that don't issue a PoW puzzle (Block always rejects with 429;
@@ -350,12 +366,25 @@ pub async fn verify(
         cookie,
         behavior,
     };
-    let vscore_full = state.verify_scorer.score(&vctx);
-    let vscore_minimal = state.verify_scorer.score_minimal(&vctx);
-    let vscore = if state.minimal_privacy_mode {
-        vscore_minimal
+    let v_log_enabled = state.decision_log.is_some();
+    let vscore = if state.full_fingerprint_mode {
+        state.verify_scorer.score(&vctx)
     } else {
-        vscore_full
+        state.verify_scorer.score_minimal(&vctx)
+    };
+    let v_shadow = if v_log_enabled {
+        Some(if state.full_fingerprint_mode {
+            state.verify_scorer.score_minimal(&vctx)
+        } else {
+            state.verify_scorer.score(&vctx)
+        })
+    } else {
+        None
+    };
+    let (vscore_full, vscore_minimal) = if state.full_fingerprint_mode {
+        (vscore, v_shadow.unwrap_or(vscore))
+    } else {
+        (v_shadow.unwrap_or(vscore), vscore)
     };
 
     let (success, outcome) = match vscore.decision {

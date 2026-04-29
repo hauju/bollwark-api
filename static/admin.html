@@ -855,7 +855,7 @@ function renderPrivacyComparison(s) {
     return h('div', { style: 'margin-top: 18px;' },
       h('h3', {}, 'Privacy mode comparison'),
       h('div', { class: 'empty', style: 'margin-top: 6px;' },
-        'No comparison data — this session was recorded before MINIMAL_PRIVACY_MODE existed. Trigger a fresh request to see the diff.'),
+        'No comparison data — this session was recorded before the privacy-mode comparison existed. Trigger a fresh request to see the diff.'),
     );
   }
   const puzzleDiverged = puzzleHasData && s.puzzle_tier_full !== s.puzzle_tier_minimal;

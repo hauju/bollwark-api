@@ -37,7 +37,7 @@ A `.env` file in the working directory is loaded automatically at startup (via `
 | `SITE_DB_PATH` | _unset_ | Path to a SQLite file for persistent site registrations. Without it, sites live only in memory and are lost on restart. |
 | `CORS_ALLOWED_ORIGINS` | _unset_ | Comma- or whitespace-separated allowlist of origins permitted to call `GET /v1/puzzle` and fetch static widget assets from a browser. Empty/unset = any origin, no credentials. Set this for cross-origin trust cookies. Other API endpoints never have CORS enabled. |
 | `DEV_DISABLE_ADMIN_AUTH` | `false` | **Dev/test only.** When truthy (`1`/`true`/`yes`/`on`), `POST /v1/sites` skips the `ADMIN_TOKEN` bearer check. Refused in release builds. Admin dashboard endpoints (`/v1/admin/*`) are NOT bypassed. |
-| `MINIMAL_PRIVACY_MODE` | `false` | When truthy, the live decision is taken from the privacy-friendly signal subset (rate + honeypot + time-on-page + PoW). Fingerprinting / persistent-identifier signals are zeroed for the live decision but the full-mode score is still recorded to the dashboard for side-by-side comparison. |
+| `FULL_FINGERPRINT_MODE` | `false` | **Opt-in for fingerprinting signals.** Default off — the baseline live decision uses rate + honeypot + time-on-page + PoW only. Set to `1` to also score header anomaly, IP reputation, cookie age, TLS fingerprint, and behavior. Enabling this changes your GDPR / ePrivacy posture (cookie consent, fingerprinting disclosure, DPIA). |
 
 ---
 
@@ -335,35 +335,43 @@ The bundled `static/{about,privacy,terms}.html` are written to be safe defaults 
 
 ---
 
-## Minimal privacy mode (`MINIMAL_PRIVACY_MODE`)
+## Scoring mode (`FULL_FINGERPRINT_MODE`)
 
-A FriendlyCaptcha-style "no fingerprint, no cookie" posture. When `MINIMAL_PRIVACY_MODE=1` the **live decision** is taken from the privacy-friendly signal subset only — fingerprinting and persistent-identifier signals are zeroed regardless of whether they're configured.
+The default posture is a FriendlyCaptcha-style "no fingerprint, no cookie" baseline. Operators must **opt in** to the fingerprinting signal set with `FULL_FINGERPRINT_MODE=1` — and that opt-in is what changes their GDPR / ePrivacy posture (cookie consent, fingerprinting disclosure, DPIA).
 
-| Signal | Full mode (default) | Minimal mode |
+| Signal | Default (privacy baseline) | `FULL_FINGERPRINT_MODE=1` |
 |---|---|---|
-| Rate (per-IP, 60 s window) | scored | scored — transient, no profile retained |
-| Header anomaly (UA / Accept-Language / Accept-Encoding) | scored | **0** — browser fingerprinting |
-| IP reputation (`IP_REPUTATION_FILE`) | scored | **0** — IP-based profiling |
-| Cookie age (`__captcha_trust`) | scored | **0** — persistent identifier |
-| TLS fingerprint (`TLS_FINGERPRINT_HEADER`) | scored | **0** — device fingerprint |
-| Honeypot | scored | scored — no PII |
-| Time-on-page | scored | scored — transient |
-| Behavior (mouse / touch / `webdriver`) | scored | **0** — behavioral fingerprint |
+| Rate (per-IP, 60 s window) | scored — transient, no profile retained | scored |
+| Honeypot | scored — no PII | scored |
+| Time-on-page | scored — transient | scored |
+| Header anomaly (UA / Accept-Language / Accept-Encoding) | **0** — not scored | scored — browser fingerprinting |
+| IP reputation (`IP_REPUTATION_FILE`) | **0** — not scored | scored — IP-based profiling |
+| Cookie age (`__captcha_trust`) | **0** — not scored | scored — persistent identifier |
+| TLS fingerprint (`TLS_FINGERPRINT_HEADER`) | **0** — not scored | scored — device fingerprint |
+| Behavior (mouse / touch / `webdriver`) | **0** — not scored | scored — behavioral fingerprint |
 
-The cookie itself is still issued when `COOKIE_SIGNING_SECRET` is set (handlers don't gate cookie I/O on the mode), but it doesn't influence the live decision. Set `COOKIE_SIGNING_SECRET=` to also stop issuing it.
+The cookie itself is still issued when `COOKIE_SIGNING_SECRET` is set (handlers don't gate cookie I/O on the mode), but it doesn't influence the live decision in baseline mode. Set `COOKIE_SIGNING_SECRET=` to also stop issuing it.
 
-### What gets recorded for comparison
+### Production posture (real-product testing under existing legal text)
 
-Regardless of the mode, the dashboard always logs **both** scores per request: `score_full` / `tier_full` plus `score_minimal` / `tier_minimal` (and the verify-time equivalents). The admin UI surfaces:
+The opposite-mode (shadow) score is **only computed when the dashboard is enabled**. Concretely, in the default baseline with `ADMIN_DB_PATH` unset, the handler never invokes `score_header_anomaly` / `score_ip_reputation` / `score_cookie_age` / `score_tls_fingerprint` / `score_behavior` for any request. Only the baseline signals are processed.
+
+This is the clean compliance story for testing on a real product without rewriting your privacy notice:
+
+- Leave `FULL_FINGERPRINT_MODE` unset (baseline).
+- Leave `ADMIN_DB_PATH`, `COOKIE_SIGNING_SECRET`, `TLS_FINGERPRINT_HEADER`, and `IP_REPUTATION_FILE` unset.
+- The widget never receives a `Set-Cookie`, the server doesn't read fingerprint headers, and no full-mode score is ever computed in memory.
+
+### Comparison harness (dev/staging)
+
+Set `ADMIN_DB_PATH` in dev/staging to enable the dashboard. Both scores are then computed per request: the live one (driven by `FULL_FINGERPRINT_MODE`) and the opposite mode as a shadow score for comparison. The admin UI surfaces:
 
 - A **per-session** "Privacy mode comparison" panel showing each mode's tier and score, with a `diff` pill when the decision diverges.
-- An aggregate **minimal vs. full** rollup on the Stats tab counting puzzle/verify decisions where the live mode and the shadow mode would have ruled differently.
+- An aggregate **minimal vs. full** rollup on the Stats tab counting puzzle/verify decisions where the modes would have ruled differently.
 
-This is the answer to "what would I lose if I switched to minimal mode?" — high divergence (≳5–10 % of sessions) means the dropped signals were doing real work, and bots that would have been pushed to `hard_pow` or `block` will now coast through on `invisible_pass`. Low divergence means PoW + honeypot + rate + time-on-page already covers your traffic profile and you can switch without losing detection.
+This answers "what do I lose if I run in baseline mode in production?" — high divergence (≳5–10 % of sessions) means the fingerprinting signals were doing real detection work; low divergence means PoW + honeypot + rate + time-on-page already covers your traffic and you can stay on the privacy baseline without losing detection.
 
-`MINIMAL_PRIVACY_MODE` is a **decision-mode toggle**, not a data-collection toggle: behavioral telemetry, the cookie, and the TLS-fingerprint header are still received from clients/proxies (otherwise the comparison wouldn't work). When you're satisfied with the comparison and want to actually stop processing personal data, also unset `COOKIE_SIGNING_SECRET`, `TLS_FINGERPRINT_HEADER`, and `IP_REPUTATION_FILE` — the widget will then stop being told to send a cookie back, and the puzzle handler won't read those signals at all.
-
-The dashboard itself is a development/staging tool; it is expected to be turned off in production by leaving `ADMIN_DB_PATH` unset.
+`FULL_FINGERPRINT_MODE` is otherwise a **decision-mode toggle**, not a data-collection toggle: when the dashboard *is* on, the widget keeps sending behavioral telemetry and the handler keeps reading the cookie / TLS-fingerprint header so the comparison data remains real.
 
 ---
 

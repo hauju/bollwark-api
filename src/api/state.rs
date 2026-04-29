@@ -36,10 +36,11 @@ pub struct AppState {
     /// the 429 block body. `None` when no `INFO_*_URL` env var is set; the
     /// widget then uses bundled `/static/*.html` defaults for every field.
     pub info_urls: Option<InfoUrls>,
-    /// When true, the live decision is taken from the minimal score and
-    /// the full score is recorded for comparison only. Pulled from
-    /// `AppConfig::minimal_privacy_mode` at boot.
-    pub minimal_privacy_mode: bool,
+    /// When true, the live decision is driven by the full fingerprinting
+    /// signal set; otherwise the baseline minimal-privacy signals only.
+    /// Default false — operators opt in. Pulled from
+    /// `AppConfig::full_fingerprint_mode` at boot.
+    pub full_fingerprint_mode: bool,
     pub config: AppConfig,
 }
 

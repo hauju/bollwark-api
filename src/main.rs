@@ -265,10 +265,16 @@ async fn main() {
         }
     }
 
-    if config.minimal_privacy_mode {
+    if config.full_fingerprint_mode {
+        tracing::warn!(
+            "FULL_FINGERPRINT_MODE enabled — live decisions use header / IP-reputation / \
+             cookie / TLS / behavior signals. Make sure your privacy notice and ePrivacy \
+             posture (cookie consent, fingerprinting disclosure, DPIA) reflect this."
+        );
+    } else {
         tracing::info!(
-            "MINIMAL_PRIVACY_MODE enabled — live decisions ignore fingerprint/cookie signals; \
-             full-mode score is still recorded to the dashboard for comparison."
+            "Running in minimal-privacy default — live decisions use rate + honeypot + \
+             time-on-page + PoW only. Set FULL_FINGERPRINT_MODE=1 to opt into fingerprinting."
         );
     }
 
@@ -288,7 +294,7 @@ async fn main() {
         decision_log,
         admin_token,
         info_urls,
-        minimal_privacy_mode: config.minimal_privacy_mode,
+        full_fingerprint_mode: config.full_fingerprint_mode,
         config: config.clone(),
     });
 

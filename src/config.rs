@@ -89,11 +89,13 @@ pub struct AppConfig {
     pub info_privacy_url: Option<String>,
     /// Optional override URL for the bundled `/static/terms.html` page.
     pub info_terms_url: Option<String>,
-    /// When true, the live decision is driven by the privacy-friendly signal
-    /// set (rate, honeypot, time-on-page, PoW only) — fingerprinting and
-    /// persistent-identifier signals are zeroed. The full-mode score is still
-    /// computed and persisted to the dashboard for side-by-side comparison.
-    pub minimal_privacy_mode: bool,
+    /// When true, the live decision uses the full fingerprinting signal set
+    /// (header anomaly, IP reputation, cookie age, TLS fingerprint, behavior).
+    /// **Default false** — the baseline posture is privacy-friendly: rate +
+    /// honeypot + time-on-page + PoW only. Operators must opt into the
+    /// fingerprinting signals because doing so changes their GDPR /
+    /// ePrivacy posture (cookies, fingerprinting disclosures, DPIA).
+    pub full_fingerprint_mode: bool,
 }
 
 impl AppConfig {
@@ -168,7 +170,7 @@ impl AppConfig {
             info_about_url: parse_info_url("INFO_ABOUT_URL"),
             info_privacy_url: parse_info_url("INFO_PRIVACY_URL"),
             info_terms_url: parse_info_url("INFO_TERMS_URL"),
-            minimal_privacy_mode: parse_truthy(env::var("MINIMAL_PRIVACY_MODE").ok().as_deref()),
+            full_fingerprint_mode: parse_truthy(env::var("FULL_FINGERPRINT_MODE").ok().as_deref()),
         }
     }
 }
@@ -243,7 +245,7 @@ impl Default for AppConfig {
             info_about_url: None,
             info_privacy_url: None,
             info_terms_url: None,
-            minimal_privacy_mode: false,
+            full_fingerprint_mode: false,
         }
     }
 }
