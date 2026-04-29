@@ -47,6 +47,10 @@ export default defineConfig({
           // no_pointer=15 + time<500=50 = 95) blocks. Legit tests insert a
           // waitForTimeout(>2s) before submit so time-on-page lands in the
           // "0 score" band and they stay below block_min.
+          // Opt into full scoring: minimal mode (the default) zeroes the
+          // behavior signal, so webdriver/no_pointer wouldn't contribute and
+          // the browser-harness-simulator block test couldn't fire.
+          FULL_FINGERPRINT_MODE: "1",
           // Let the testsite's autoSetup() call POST /v1/sites without an
           // ADMIN_TOKEN. Debug-build only — the server refuses to honour
           // this in a release binary.
