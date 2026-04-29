@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RustCaptcha Widget — State Gallery</title>
+  <link rel="stylesheet" href="/static/captcha-widget.css">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f0f2f5;
+      color: #333;
+      min-height: 100vh;
+      padding: 40px 24px;
+    }
+    .page {
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+    h1 {
+      font-size: 26px;
+      margin-bottom: 6px;
+    }
+    .lead {
+      color: #666;
+      font-size: 14px;
+      margin-bottom: 32px;
+      max-width: 720px;
+      line-height: 1.5;
+    }
+    h2 {
+      font-size: 18px;
+      margin: 28px 0 12px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid #d3d3d3;
+    }
+    h2 .mode-tag {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 3px 8px;
+      border-radius: 10px;
+      background: #333;
+      color: #fff;
+      vertical-align: middle;
+      margin-left: 8px;
+      letter-spacing: 0.04em;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      gap: 18px;
+    }
+    .card {
+      background: #fff;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .card-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .card-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: #222;
+    }
+    .card-desc {
+      font-size: 12px;
+      color: #666;
+      line-height: 1.5;
+    }
+    .tier-pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-weight: 600;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .tier-invisible_pass   { background: #d4edda; color: #155724; }
+    .tier-checkbox         { background: #fff3cd; color: #856404; }
+    .tier-hard_pow         { background: #ffe5cc; color: #cc5500; }
+    .tier-visual_challenge { background: #f8d7da; color: #721c24; }
+    .tier-block            { background: #721c24; color: #fff; }
+    .stage {
+      background: #fafafa;
+      border: 1px dashed #d3d3d3;
+      border-radius: 6px;
+      padding: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 110px;
+    }
+    .stage.empty {
+      color: #999;
+      font-style: italic;
+      font-size: 12px;
+      min-height: 60px;
+    }
+    /* Force the inline-block widget to fill the stage so visual challenge
+       images don't blow out narrower cards. */
+    .stage .rc-captcha {
+      width: 100%;
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <h1>RustCaptcha Widget — State Gallery</h1>
+    <p class="lead">
+      Visual reference for every tier / state combination the embeddable widget renders.
+      The puzzle-time risk score determines the tier; the widget then either runs
+      proof-of-work invisibly, prompts the visitor to click a checkbox, presents an
+      image-text challenge, or surfaces a blocked message.
+    </p>
+
+    <h2>Default mode <span class="mode-tag">data-mode unset</span></h2>
+    <p class="card-desc" style="margin-bottom:14px;">
+      The widget always renders chrome (checkbox row + brand footer). The visible UX is
+      uniform across pass tiers — visitors see the same "I'm not a robot" → spinner →
+      "Verified" sequence regardless of score. The only behavioural difference: on
+      <code>invisible_pass</code> the widget auto-runs the spinner without a click; on
+      <code>checkbox</code> / <code>hard_pow</code> it waits for a click. Visitors can't
+      tell which tier the server picked.
+    </p>
+
+    <div class="grid">
+
+      <!-- ── checkbox ── -->
+      <div class="card">
+        <div class="card-head">
+          <span class="card-title">Idle — awaiting click</span>
+          <span class="tier-pill tier-checkbox">checkbox</span>
+          <span class="tier-pill tier-hard_pow">hard_pow</span>
+        </div>
+        <p class="card-desc">
+          Score crossed <code>TIER_CHECKBOX_MIN</code>. The visitor must click before PoW
+          runs. <code>hard_pow</code> looks identical but the server bumps difficulty.
+        </p>
+        <div class="stage">
+          <div class="rc-captcha">
+            <div class="rc-captcha-row">
+              <div class="rc-captcha-checkbox"></div>
+              <span class="rc-captcha-label">I'm not a robot</span>
+            </div>
+            <div class="rc-captcha-status">Click to verify</div>
+            <div class="rc-captcha-footer">
+              <span class="rc-captcha-brand">
+                <a class="rc-captcha-brand-name" href="#">RustCaptcha</a>
+                <span class="rc-captcha-brand-links">
+                  <a href="#">Privacy</a> · <a href="#">Terms</a>
+                </span>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <span class="card-title">Solving</span>
+          <span class="tier-pill tier-invisible_pass">invisible_pass</span>
+          <span class="tier-pill tier-checkbox">checkbox</span>
+          <span class="tier-pill tier-hard_pow">hard_pow</span>
+        </div>
+        <p class="card-desc">
+          Worker is hashing; a blue spinner replaces the box. On <code>invisible_pass</code>
+          this triggers automatically; on <code>checkbox</code> / <code>hard_pow</code> it
+          starts after the visitor clicks.
+        </p>
+        <div class="stage">
+          <div class="rc-captcha">
+            <div class="rc-captcha-row">
+              <div class="rc-captcha-checkbox solving"></div>
+              <span class="rc-captcha-label">Solving challenge...</span>
+            </div>
+            <div class="rc-captcha-status"></div>
+            <div class="rc-captcha-footer">
+              <span class="rc-captcha-brand">
+                <a class="rc-captcha-brand-name" href="#">RustCaptcha</a>
+                <span class="rc-captcha-brand-links">
+                  <a href="#">Privacy</a> · <a href="#">Terms</a>
+                </span>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <span class="card-title">Verified</span>
+          <span class="tier-pill tier-invisible_pass">invisible_pass</span>
+          <span class="tier-pill tier-checkbox">checkbox</span>
+          <span class="tier-pill tier-hard_pow">hard_pow</span>
+        </div>
+        <p class="card-desc">
+          PoW solved. Green checkmark, "Verified" label. Token is injected into the form.
+          Visitors see this regardless of which pass tier the server picked.
+        </p>
+        <div class="stage">
+          <div class="rc-captcha">
+            <div class="rc-captcha-row">
+              <div class="rc-captcha-checkbox verified"></div>
+              <span class="rc-captcha-label">Verified</span>
+            </div>
+            <div class="rc-captcha-status"></div>
+            <div class="rc-captcha-footer">
+              <span class="rc-captcha-brand">
+                <a class="rc-captcha-brand-name" href="#">RustCaptcha</a>
+                <span class="rc-captcha-brand-links">
+                  <a href="#">Privacy</a> · <a href="#">Terms</a>
+                </span>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <span class="card-title">Failed — awaiting retry</span>
+          <span class="tier-pill tier-checkbox">checkbox</span>
+        </div>
+        <p class="card-desc">
+          Worker error or transient fetch failure. The visitor can click again to retry.
+        </p>
+        <div class="stage">
+          <div class="rc-captcha">
+            <div class="rc-captcha-row">
+              <div class="rc-captcha-checkbox failed"></div>
+              <span class="rc-captcha-label">Verification failed</span>
+            </div>
+            <div class="rc-captcha-status">Error: worker failed to start</div>
+            <div class="rc-captcha-footer">
+              <span class="rc-captcha-brand">
+                <a class="rc-captcha-brand-name" href="#">RustCaptcha</a>
+                <span class="rc-captcha-brand-links">
+                  <a href="#">Privacy</a> · <a href="#">Terms</a>
+                </span>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── visual_challenge ── -->
+      <div class="card">
+        <div class="card-head">
+          <span class="card-title">Visual challenge — idle</span>
+          <span class="tier-pill tier-visual_challenge">visual_challenge</span>
+        </div>
+        <p class="card-desc">
+          Score crossed <code>TIER_VISUAL_MIN</code>. Server returns a 5-character image-text
+          captcha (220×60 PNG); checkbox row is hidden.
+        </p>
+        <div class="stage">
+          <div class="rc-captcha">
+            <div class="rc-captcha-row" style="display:none;">
+              <div class="rc-captcha-checkbox"></div>
+              <span class="rc-captcha-label">I'm not a robot</span>
+            </div>
+            <div class="rc-captcha-visual">
+              <div class="rc-captcha-visual-prompt">Type the characters you see:</div>
+              <img class="rc-captcha-visual-image" alt="captcha" src="data:image/svg+xml;utf8,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 220 60'&gt;&lt;rect width='220' height='60' fill='%23f3f3f3'/&gt;&lt;g font-family='Georgia,serif' font-size='30' font-weight='700' fill='%23222'&gt;&lt;text x='18' y='42' transform='rotate(-12 33 42)'&gt;A&lt;/text&gt;&lt;text x='58' y='44' transform='rotate(8 73 44)'&gt;b&lt;/text&gt;&lt;text x='95' y='40' transform='rotate(-5 110 40)'&gt;7&lt;/text&gt;&lt;text x='135' y='44' transform='rotate(14 150 44)'&gt;K&lt;/text&gt;&lt;text x='178' y='41' transform='rotate(-9 193 41)'&gt;9&lt;/text&gt;&lt;/g&gt;&lt;path d='M5 30 Q60 8 110 32 T215 28' stroke='%23999' stroke-width='1.4' fill='none'/&gt;&lt;path d='M0 50 Q70 60 140 44 T220 50' stroke='%23bbb' stroke-width='1.2' fill='none'/&gt;&lt;/svg&gt;">
+              <form class="rc-captcha-visual-form" onsubmit="event.preventDefault();">
+                <input type="text" class="rc-captcha-visual-input" placeholder="ABCDE" autocomplete="off" spellcheck="false">
+                <button type="submit" class="rc-captcha-visual-button">Verify</button>
+              </form>
+            </div>
+            <div class="rc-captcha-status"></div>
+            <div class="rc-captcha-footer">
+              <span class="rc-captcha-brand">
+                <a class="rc-captcha-brand-name" href="#">RustCaptcha</a>
+                <span class="rc-captcha-brand-links">
+                  <a href="#">Privacy</a> · <a href="#">Terms</a>
+                </span>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <span class="card-title">Visual challenge — submitting</span>
+          <span class="tier-pill tier-visual_challenge">visual_challenge</span>
+        </div>
+        <p class="card-desc">
+          Visitor typed an answer and clicked <em>Verify</em>. Form locks while the host page
+          posts to <code>/v1/verify</code>.
+        </p>
+        <div class="stage">
+          <div class="rc-captcha">
+            <div class="rc-captcha-row" style="display:none;">
+              <div class="rc-captcha-checkbox"></div>
+              <span class="rc-captcha-label">I'm not a robot</span>
+            </div>
+            <div class="rc-captcha-visual">
+              <div class="rc-captcha-visual-prompt">Type the characters you see:</div>
+              <img class="rc-captcha-visual-image" alt="captcha" src="data:image/svg+xml;utf8,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 220 60'&gt;&lt;rect width='220' height='60' fill='%23f3f3f3'/&gt;&lt;g font-family='Georgia,serif' font-size='30' font-weight='700' fill='%23222'&gt;&lt;text x='18' y='42' transform='rotate(-12 33 42)'&gt;A&lt;/text&gt;&lt;text x='58' y='44' transform='rotate(8 73 44)'&gt;b&lt;/text&gt;&lt;text x='95' y='40' transform='rotate(-5 110 40)'&gt;7&lt;/text&gt;&lt;text x='135' y='44' transform='rotate(14 150 44)'&gt;K&lt;/text&gt;&lt;text x='178' y='41' transform='rotate(-9 193 41)'&gt;9&lt;/text&gt;&lt;/g&gt;&lt;path d='M5 30 Q60 8 110 32 T215 28' stroke='%23999' stroke-width='1.4' fill='none'/&gt;&lt;path d='M0 50 Q70 60 140 44 T220 50' stroke='%23bbb' stroke-width='1.2' fill='none'/&gt;&lt;/svg&gt;">
+              <form class="rc-captcha-visual-form" onsubmit="event.preventDefault();">
+                <input type="text" class="rc-captcha-visual-input" value="ab7k9" disabled>
+                <button type="submit" class="rc-captcha-visual-button" disabled>Verify</button>
+              </form>
+            </div>
+            <div class="rc-captcha-status">Submitting answer…</div>
+            <div class="rc-captcha-footer">
+              <span class="rc-captcha-brand">
+                <a class="rc-captcha-brand-name" href="#">RustCaptcha</a>
+                <span class="rc-captcha-brand-links">
+                  <a href="#">Privacy</a> · <a href="#">Terms</a>
+                </span>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── block ── -->
+      <div class="card">
+        <div class="card-head">
+          <span class="card-title">Block (HTTP 429)</span>
+          <span class="tier-pill tier-block">block</span>
+        </div>
+        <p class="card-desc">
+          Score crossed <code>TIER_BLOCK_MIN</code> at puzzle-time. Server returns 429; widget
+          shows a rejection message. Brand corner still points at operator-overridden URLs.
+        </p>
+        <div class="stage">
+          <div class="rc-captcha">
+            <div class="rc-captcha-row" style="display:none;">
+              <div class="rc-captcha-checkbox"></div>
+              <span class="rc-captcha-label">Blocked</span>
+            </div>
+            <div class="rc-captcha-status">Verification unavailable</div>
+            <div class="rc-captcha-footer">
+              <span class="rc-captcha-brand">
+                <a class="rc-captcha-brand-name" href="#">RustCaptcha</a>
+                <span class="rc-captcha-brand-links">
+                  <a href="#">Privacy</a> · <a href="#">Terms</a>
+                </span>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── debug ── -->
+      <div class="card">
+        <div class="card-head">
+          <span class="card-title">Debug panel — verified</span>
+          <span class="tier-pill tier-checkbox">checkbox</span>
+        </div>
+        <p class="card-desc">
+          With <code>data-debug="true"</code>, an extra panel shows the negotiated tier,
+          difficulty, hash count, and PoW solve time.
+        </p>
+        <div class="stage">
+          <div class="rc-captcha">
+            <div class="rc-captcha-row">
+              <div class="rc-captcha-checkbox verified"></div>
+              <span class="rc-captcha-label">Verified</span>
+            </div>
+            <div class="rc-captcha-status"></div>
+            <div class="rc-captcha-details">
+              <div class="detail-row"><span class="detail-label">Tier</span><span class="detail-value">checkbox</span></div>
+              <div class="detail-row"><span class="detail-label">Difficulty</span><span class="detail-value">18</span></div>
+              <div class="detail-row"><span class="detail-label">PoW hashes</span><span class="detail-value">214,331</span></div>
+              <div class="detail-row"><span class="detail-label">PoW time</span><span class="detail-value">1.3s</span></div>
+            </div>
+            <div class="rc-captcha-footer">
+              <span class="rc-captcha-brand">
+                <a class="rc-captcha-brand-name" href="#">RustCaptcha</a>
+                <span class="rc-captcha-brand-links">
+                  <a href="#">Privacy</a> · <a href="#">Terms</a>
+                </span>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <h2>Invisible mode <span class="mode-tag">data-mode="invisible"</span></h2>
+    <p class="card-desc" style="margin-bottom:14px;">
+      No chrome renders for low-risk visitors. The widget only materialises a UI when the
+      tier requires user interaction. On block-tier the widget renders nothing — embedders
+      must listen for <code>rustcaptcha:puzzle</code> (<code>detail.ok=false</code>) to
+      surface a failure message.
+    </p>
+
+    <div class="grid">
+
+      <div class="card">
+        <div class="card-head">
+          <span class="card-title">Invisible pass — silent</span>
+          <span class="tier-pill tier-invisible_pass">invisible_pass</span>
+        </div>
+        <p class="card-desc">
+          PoW runs in the background; the visitor sees nothing. <code>onVerify</code>
+          fires when the worker completes.
+        </p>
+        <div class="stage empty">(no UI rendered — placeholder &lt;div&gt; only)</div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <span class="card-title">Promoted to checkbox</span>
+          <span class="tier-pill tier-checkbox">checkbox</span>
+        </div>
+        <p class="card-desc">
+          Server escalated past <code>TIER_CHECKBOX_MIN</code>; the widget materialises the
+          standard checkbox UI in place.
+        </p>
+        <div class="stage">
+          <div class="rc-captcha">
+            <div class="rc-captcha-row">
+              <div class="rc-captcha-checkbox"></div>
+              <span class="rc-captcha-label">I'm not a robot</span>
+            </div>
+            <div class="rc-captcha-status">Click to verify</div>
+            <div class="rc-captcha-footer">
+              <span class="rc-captcha-brand">
+                <a class="rc-captcha-brand-name" href="#">RustCaptcha</a>
+                <span class="rc-captcha-brand-links">
+                  <a href="#">Privacy</a> · <a href="#">Terms</a>
+                </span>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <span class="card-title">Promoted to visual</span>
+          <span class="tier-pill tier-visual_challenge">visual_challenge</span>
+        </div>
+        <p class="card-desc">
+          Server returned an image-text challenge; the widget materialises the image + input UI.
+        </p>
+        <div class="stage">
+          <div class="rc-captcha">
+            <div class="rc-captcha-row" style="display:none;">
+              <div class="rc-captcha-checkbox"></div>
+              <span class="rc-captcha-label">I'm not a robot</span>
+            </div>
+            <div class="rc-captcha-visual">
+              <div class="rc-captcha-visual-prompt">Type the characters you see:</div>
+              <img class="rc-captcha-visual-image" alt="captcha" src="data:image/svg+xml;utf8,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 220 60'&gt;&lt;rect width='220' height='60' fill='%23f3f3f3'/&gt;&lt;g font-family='Georgia,serif' font-size='30' font-weight='700' fill='%23222'&gt;&lt;text x='18' y='42' transform='rotate(-12 33 42)'&gt;A&lt;/text&gt;&lt;text x='58' y='44' transform='rotate(8 73 44)'&gt;b&lt;/text&gt;&lt;text x='95' y='40' transform='rotate(-5 110 40)'&gt;7&lt;/text&gt;&lt;text x='135' y='44' transform='rotate(14 150 44)'&gt;K&lt;/text&gt;&lt;text x='178' y='41' transform='rotate(-9 193 41)'&gt;9&lt;/text&gt;&lt;/g&gt;&lt;path d='M5 30 Q60 8 110 32 T215 28' stroke='%23999' stroke-width='1.4' fill='none'/&gt;&lt;path d='M0 50 Q70 60 140 44 T220 50' stroke='%23bbb' stroke-width='1.2' fill='none'/&gt;&lt;/svg&gt;">
+              <form class="rc-captcha-visual-form" onsubmit="event.preventDefault();">
+                <input type="text" class="rc-captcha-visual-input" placeholder="ABCDE" autocomplete="off" spellcheck="false">
+                <button type="submit" class="rc-captcha-visual-button">Verify</button>
+              </form>
+            </div>
+            <div class="rc-captcha-status"></div>
+            <div class="rc-captcha-footer">
+              <span class="rc-captcha-brand">
+                <a class="rc-captcha-brand-name" href="#">RustCaptcha</a>
+                <span class="rc-captcha-brand-links">
+                  <a href="#">Privacy</a> · <a href="#">Terms</a>
+                </span>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <span class="card-title">Block — silent</span>
+          <span class="tier-pill tier-block">block</span>
+        </div>
+        <p class="card-desc">
+          The widget renders nothing on 429. A one-shot <code>console.warn</code> fires to
+          flag the missed wiring during development; embedders are expected to handle the
+          <code>rustcaptcha:puzzle</code> event.
+        </p>
+        <div class="stage empty">(no UI rendered — embedder handles via event)</div>
+      </div>
+
+    </div>
+
+  </div>
+</body>
+</html>

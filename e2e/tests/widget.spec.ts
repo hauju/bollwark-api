@@ -33,8 +33,10 @@ test("happy path: widget solves PoW and verify returns success=true", async ({
   await page.fill("#name", "Jane Doe");
   await page.fill("#email", "jane@example.com");
 
-  // Click checkbox (will silently solve for invisible_pass tier; for higher
-  // tiers a click is required).
+  // Default mode always shows the checkbox row. On invisible_pass it's
+  // already auto-solving (or solved) by the time we click, and the click
+  // is a no-op for verified/solving states. On checkbox/hard_pow the
+  // click is what kicks off the worker.
   const checkbox = page.locator(".rc-captcha-checkbox");
   if (await checkbox.isVisible()) {
     await checkbox.click();

@@ -95,7 +95,7 @@ If you bundle or proxy the script from your own app origin, set `data-server-url
 
 The widget has two modes selected via `data-mode`:
 
-- **`data-mode="default"`** (used when the attribute is omitted): the checkbox row and brand footer always render. Low-risk visitors see a quick "Verified silently" pill; higher tiers prompt the visitor to click the checkbox or solve an image challenge. This is the simplest integration — no other wiring required.
+- **`data-mode="default"`** (used when the attribute is omitted): the checkbox row and brand footer always render. The visible UX is uniform across pass tiers — visitors always see the same "I'm not a robot" → spinner → "Verified" sequence. On low-risk visitors (`invisible_pass`) the widget auto-runs the spinner without a click; on higher tiers it waits for a click. The visual challenge UI replaces the checkbox when the server returns an image-text challenge. This is the simplest integration — no other wiring required.
 - **`data-mode="invisible"`**: the widget renders no chrome at all for the `invisible_pass` tier — PoW runs in the background and the `captcha-token` field is injected silently when the visitor submits. If the server escalates the tier, the widget falls back to its visible UI on demand:
   - `invisible_pass` → no UI, silent PoW.
   - `checkbox` / `hard_pow` → checkbox appears, visitor clicks.

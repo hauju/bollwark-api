@@ -32,8 +32,11 @@
    * Modes (`data-mode` attribute / `mode` option):
    *
    *   "default" — always renders the checkbox + brand footer chrome.
-   *     `invisible_pass` shows a "Verified silently" pill; higher tiers
-   *     require the visitor to click the checkbox or solve a visual.
+   *     The visible UX is uniform across pass tiers: visitors always see
+   *     the same "I'm not a robot" → spinner → "Verified" sequence. On
+   *     `invisible_pass` the widget auto-runs the spinner; on `checkbox`
+   *     / `hard_pow` it waits for a click. The visitor can't tell which
+   *     tier the server picked, which is intentional.
    *
    *   "invisible" — renders no chrome until/unless the tier requires
    *     user interaction:
@@ -129,7 +132,7 @@
     }
 
     // Fetch the puzzle eagerly so we know the tier before any user interaction.
-    // For `invisible_pass`, this also kicks off the silent solve.
+    // For `invisible_pass`, this also kicks off the auto-solve.
     async _initFlow() {
       if (!this.siteKey) return; // testsite delays setting siteKey; reset() will retry
       try {
@@ -328,16 +331,13 @@
         this._renderVisualChallenge();
         return;
       }
-      if (this.tier === "invisible_pass") {
-        this.row.style.display = "none";
-        this.label.textContent = "Verifying…";
-        this.statusEl.textContent = "Running silent verification";
-        this._runVerify();
-      } else {
-        // checkbox / hard_pow / unknown future tier → user clicks to solve
-        this.row.style.display = "";
-        this._updateUI();
-      }
+      // Default mode shows the same checkbox UI for every pass tier so
+      // the visitor can't tell whether the server escalated. The only
+      // behavioural difference: invisible_pass auto-runs the worker;
+      // checkbox / hard_pow wait for a click.
+      this.row.style.display = "";
+      this._updateUI();
+      if (this.tier === "invisible_pass") this._runVerify();
     }
 
     // Render the image-text challenge UI: a captcha PNG, a text input,
@@ -495,15 +495,9 @@
         this._injectToken(this.puzzle.challenge_id, solution.nonce);
 
         this.state = "verified";
-        if (this.tier === "invisible_pass") {
-          // Default mode renders the "Verified silently" pill. Invisible
-          // mode has no UI to update — the onVerify callback / submit-time
-          // token injection is the only signal the embedder sees.
-          if (this.label) this.label.textContent = "Verified";
-          if (this.statusEl) this.statusEl.textContent = "Verified silently";
-        } else {
-          this._updateUI();
-        }
+        // _updateUI() is a no-op when no chrome is mounted (invisible-mode
+        // invisible_pass), so this safely covers every tier × mode combo.
+        this._updateUI();
 
         if (this.onVerify) {
           this.onVerify({
