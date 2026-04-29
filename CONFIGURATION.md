@@ -37,6 +37,7 @@ A `.env` file in the working directory is loaded automatically at startup (via `
 | `SITE_DB_PATH` | _unset_ | Path to a SQLite file for persistent site registrations. Without it, sites live only in memory and are lost on restart. |
 | `CORS_ALLOWED_ORIGINS` | _unset_ | Comma- or whitespace-separated allowlist of origins permitted to call `GET /v1/puzzle` and fetch static widget assets from a browser. Empty/unset = any origin, no credentials. Set this for cross-origin trust cookies. Other API endpoints never have CORS enabled. |
 | `DEV_DISABLE_ADMIN_AUTH` | `false` | **Dev/test only.** When truthy (`1`/`true`/`yes`/`on`), `POST /v1/sites` skips the `ADMIN_TOKEN` bearer check. Refused in release builds. Admin dashboard endpoints (`/v1/admin/*`) are NOT bypassed. |
+| `MINIMAL_PRIVACY_MODE` | `false` | When truthy, the live decision is taken from the privacy-friendly signal subset (rate + honeypot + time-on-page + PoW). Fingerprinting / persistent-identifier signals are zeroed for the live decision but the full-mode score is still recorded to the dashboard for side-by-side comparison. |
 
 ---
 
@@ -331,6 +332,38 @@ Operators with their own About / Privacy / Terms pages can override per-field:
 - Setting some-but-not-all three logs a startup `WARN` — most operators who customise their privacy notice want to customise terms too, and shipping the bundled boilerplate next to a bespoke privacy page is usually unintended.
 
 The bundled `static/{about,privacy,terms}.html` are written to be safe defaults for self-hosted deployments — they describe what the bundled widget and server can collect when fully configured. They carry `<meta name="robots" content="noindex, follow">` to keep duplicate copies across operator deployments out of search indexes.
+
+---
+
+## Minimal privacy mode (`MINIMAL_PRIVACY_MODE`)
+
+A FriendlyCaptcha-style "no fingerprint, no cookie" posture. When `MINIMAL_PRIVACY_MODE=1` the **live decision** is taken from the privacy-friendly signal subset only — fingerprinting and persistent-identifier signals are zeroed regardless of whether they're configured.
+
+| Signal | Full mode (default) | Minimal mode |
+|---|---|---|
+| Rate (per-IP, 60 s window) | scored | scored — transient, no profile retained |
+| Header anomaly (UA / Accept-Language / Accept-Encoding) | scored | **0** — browser fingerprinting |
+| IP reputation (`IP_REPUTATION_FILE`) | scored | **0** — IP-based profiling |
+| Cookie age (`__captcha_trust`) | scored | **0** — persistent identifier |
+| TLS fingerprint (`TLS_FINGERPRINT_HEADER`) | scored | **0** — device fingerprint |
+| Honeypot | scored | scored — no PII |
+| Time-on-page | scored | scored — transient |
+| Behavior (mouse / touch / `webdriver`) | scored | **0** — behavioral fingerprint |
+
+The cookie itself is still issued when `COOKIE_SIGNING_SECRET` is set (handlers don't gate cookie I/O on the mode), but it doesn't influence the live decision. Set `COOKIE_SIGNING_SECRET=` to also stop issuing it.
+
+### What gets recorded for comparison
+
+Regardless of the mode, the dashboard always logs **both** scores per request: `score_full` / `tier_full` plus `score_minimal` / `tier_minimal` (and the verify-time equivalents). The admin UI surfaces:
+
+- A **per-session** "Privacy mode comparison" panel showing each mode's tier and score, with a `diff` pill when the decision diverges.
+- An aggregate **minimal vs. full** rollup on the Stats tab counting puzzle/verify decisions where the live mode and the shadow mode would have ruled differently.
+
+This is the answer to "what would I lose if I switched to minimal mode?" — high divergence (≳5–10 % of sessions) means the dropped signals were doing real work, and bots that would have been pushed to `hard_pow` or `block` will now coast through on `invisible_pass`. Low divergence means PoW + honeypot + rate + time-on-page already covers your traffic profile and you can switch without losing detection.
+
+`MINIMAL_PRIVACY_MODE` is a **decision-mode toggle**, not a data-collection toggle: behavioral telemetry, the cookie, and the TLS-fingerprint header are still received from clients/proxies (otherwise the comparison wouldn't work). When you're satisfied with the comparison and want to actually stop processing personal data, also unset `COOKIE_SIGNING_SECRET`, `TLS_FINGERPRINT_HEADER`, and `IP_REPUTATION_FILE` — the widget will then stop being told to send a cookie back, and the puzzle handler won't read those signals at all.
+
+The dashboard itself is a development/staging tool; it is expected to be turned off in production by leaving `ADMIN_DB_PATH` unset.
 
 ---
 

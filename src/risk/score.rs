@@ -33,6 +33,18 @@ pub struct RiskScore {
     pub tier: EscalationTier,
 }
 
+/// Which signal mode to score in. `Full` uses every available signal;
+/// `Minimal` zeros out the privacy-invasive ones (browser fingerprinting,
+/// IP reputation lookup, persistent cookies, TLS fingerprint) so only
+/// transient anti-abuse signals contribute. `Minimal` mirrors the
+/// FriendlyCaptcha "no fingerprint, no cookie" posture and lets operators
+/// quantify the cost in detection power before adopting it in production.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoreMode {
+    Full,
+    Minimal,
+}
+
 pub struct RiskScorer {
     thresholds: TierThresholds,
     reputation: Arc<CidrListReputation>,
@@ -53,12 +65,33 @@ impl RiskScorer {
     }
 
     pub fn score(&self, ctx: &SignalContext<'_>) -> RiskScore {
-        let breakdown = SignalBreakdown {
-            rate: score_rate(ctx.ip_count, ctx.site_count),
-            header_anomaly: score_header_anomaly(ctx.headers),
-            ip_reputation: score_ip_reputation(self.reputation.lookup(ctx.ip)),
-            cookie_age: score_cookie_age(ctx.cookie),
-            tls_fingerprint: score_tls_fingerprint(ctx.tls_fingerprint, &self.tls_blocklist),
+        self.score_with(ctx, ScoreMode::Full)
+    }
+
+    pub fn score_minimal(&self, ctx: &SignalContext<'_>) -> RiskScore {
+        self.score_with(ctx, ScoreMode::Minimal)
+    }
+
+    fn score_with(&self, ctx: &SignalContext<'_>, mode: ScoreMode) -> RiskScore {
+        let breakdown = match mode {
+            ScoreMode::Full => SignalBreakdown {
+                rate: score_rate(ctx.ip_count, ctx.site_count),
+                header_anomaly: score_header_anomaly(ctx.headers),
+                ip_reputation: score_ip_reputation(self.reputation.lookup(ctx.ip)),
+                cookie_age: score_cookie_age(ctx.cookie),
+                tls_fingerprint: score_tls_fingerprint(ctx.tls_fingerprint, &self.tls_blocklist),
+            },
+            // Rate is the only signal that survives: it uses the IP only
+            // transiently for a 60-second window and stores no per-IP profile.
+            // Every other signal either fingerprints the browser/device or
+            // leans on a persistent identifier (cookie, IP reputation list).
+            ScoreMode::Minimal => SignalBreakdown {
+                rate: score_rate(ctx.ip_count, ctx.site_count),
+                header_anomaly: 0,
+                ip_reputation: 0,
+                cookie_age: 0,
+                tls_fingerprint: 0,
+            },
         };
         let total = breakdown.rate
             + breakdown.header_anomaly
@@ -226,6 +259,36 @@ mod tests {
         c.cookie = CookiePresence::Present(7200);
         let result = scorer().score(&c);
         assert_eq!(result.breakdown.cookie_age, 0);
+    }
+
+    #[test]
+    fn minimal_mode_zeros_fingerprint_signals() {
+        // A request that would *fully* score 30 (datacenter) + 30 (header) = 60
+        // collapses to just the rate signal in minimal mode. Fingerprinting,
+        // IP reputation, cookie, and TLS contributions are all zeroed.
+        let mut headers = HeaderMap::new();
+        headers.insert(USER_AGENT, HeaderValue::from_static("curl/8.0"));
+        let s = scorer_with_reputation("10.0.0.0/8 datacenter\n");
+        let mut c = ctx(&headers, "10.5.6.7", 1, 1);
+        c.cookie = CookiePresence::Missing; // would add 5 in full mode
+        let full = s.score(&c);
+        let minimal = s.score_minimal(&c);
+        assert!(full.total > minimal.total);
+        assert_eq!(minimal.breakdown.header_anomaly, 0);
+        assert_eq!(minimal.breakdown.ip_reputation, 0);
+        assert_eq!(minimal.breakdown.cookie_age, 0);
+        assert_eq!(minimal.breakdown.tls_fingerprint, 0);
+        // Rate is the one signal that survives — still a transient counter.
+        assert_eq!(minimal.breakdown.rate, full.breakdown.rate);
+    }
+
+    #[test]
+    fn minimal_mode_keeps_rate_signal() {
+        // High rate in a 60s window is still a legitimate anti-abuse signal
+        // even in minimal mode — it's transient and not stored as a profile.
+        let headers = clean_headers();
+        let result = scorer().score_minimal(&ctx(&headers, "127.0.0.1", 55, 600));
+        assert_eq!(result.breakdown.rate, 45);
     }
 
     #[test]

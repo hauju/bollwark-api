@@ -79,7 +79,11 @@ pub async fn get_puzzle(
         _ => TlsFingerprint::Skipped,
     };
 
-    // Score the request and pick an escalation tier
+    // Score the request twice: once with every signal (full) and once with
+    // only the privacy-friendly subset (minimal). The live decision is
+    // driven by whichever the operator selected; the other score is logged
+    // alongside so the dashboard can show what the decision *would* have
+    // been under the opposite mode.
     let ctx = SignalContext {
         ip,
         headers: &headers,
@@ -88,7 +92,13 @@ pub async fn get_puzzle(
         cookie,
         tls_fingerprint,
     };
-    let score = state.risk.score(&ctx);
+    let score_full = state.risk.score(&ctx);
+    let score_minimal = state.risk.score_minimal(&ctx);
+    let score = if state.minimal_privacy_mode {
+        score_minimal
+    } else {
+        score_full
+    };
 
     // Tiers that don't issue a PoW puzzle (Block always rejects with 429;
     // VisualChallenge issues an image instead — see below). PoW tiers map
@@ -146,6 +156,10 @@ pub async fn get_puzzle(
                 cookie_presence: format!("{cookie:?}"),
                 tls_fingerprint: format!("{tls_fingerprint:?}"),
                 user_agent: ua,
+                score_full: score_full.total,
+                tier_full: score_full.tier,
+                score_minimal: score_minimal.total,
+                tier_minimal: score_minimal.tier,
             });
         }
         // Block-tier still returns a structured JSON body so the widget
@@ -184,6 +198,10 @@ pub async fn get_puzzle(
             cookie_presence: format!("{cookie:?}"),
             tls_fingerprint: format!("{tls_fingerprint:?}"),
             user_agent: ua,
+            score_full: score_full.total,
+            tier_full: score_full.tier,
+            score_minimal: score_minimal.total,
+            tier_minimal: score_minimal.tier,
         });
     }
 
@@ -290,6 +308,10 @@ pub async fn verify(
                 time_on_page_ms: body.time_on_page_ms,
                 cookie_presence: "Unknown".into(),
                 webdriver: "n/a",
+                score_full: 0,
+                outcome_full: invalid_outcome,
+                score_minimal: 0,
+                outcome_minimal: invalid_outcome,
             });
         }
         return Ok(Json(VerifyResponse { success: false }));
@@ -328,7 +350,13 @@ pub async fn verify(
         cookie,
         behavior,
     };
-    let vscore = state.verify_scorer.score(&vctx);
+    let vscore_full = state.verify_scorer.score(&vctx);
+    let vscore_minimal = state.verify_scorer.score_minimal(&vctx);
+    let vscore = if state.minimal_privacy_mode {
+        vscore_minimal
+    } else {
+        vscore_full
+    };
 
     let (success, outcome) = match vscore.decision {
         VerifyDecision::Pass => (true, "pass"),
@@ -374,6 +402,8 @@ pub async fn verify(
     }
 
     if let Some(log) = &state.decision_log {
+        let outcome_full = decision_outcome(vscore_full.decision);
+        let outcome_minimal = decision_outcome(vscore_minimal.decision);
         log.record_verify(VerifyRecord {
             challenge_id: challenge.id,
             success,
@@ -383,6 +413,10 @@ pub async fn verify(
             time_on_page_ms: body.time_on_page_ms,
             cookie_presence: format!("{cookie:?}"),
             webdriver: webdriver_flag,
+            score_full: vscore_full.total,
+            outcome_full,
+            score_minimal: vscore_minimal.total,
+            outcome_minimal,
         });
     }
 
@@ -422,6 +456,14 @@ pub async fn create_site(
         site_key,
         secret_key,
     }))
+}
+
+fn decision_outcome(decision: VerifyDecision) -> &'static str {
+    match decision {
+        VerifyDecision::Pass => "pass",
+        VerifyDecision::ShadowFail => "shadow_fail",
+        VerifyDecision::Block => "block",
+    }
 }
 
 /// Validate the `Authorization: Bearer <token>` header against the configured

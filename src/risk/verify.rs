@@ -94,15 +94,38 @@ impl VerifyScorer {
     }
 
     pub fn score(&self, ctx: &VerifyContext) -> VerifyScore {
-        let breakdown = VerifyBreakdown {
-            honeypot: if ctx.honeypot_tripped {
-                HONEYPOT_TRIPPED_SCORE
-            } else {
-                0
+        self.score_with(ctx, super::score::ScoreMode::Full)
+    }
+
+    pub fn score_minimal(&self, ctx: &VerifyContext) -> VerifyScore {
+        self.score_with(ctx, super::score::ScoreMode::Minimal)
+    }
+
+    fn score_with(&self, ctx: &VerifyContext, mode: super::score::ScoreMode) -> VerifyScore {
+        // Honeypot and time-on-page survive in minimal mode: neither
+        // identifies the user. Cookie age leans on a persistent identifier
+        // and behavior is a fingerprint, so both are dropped.
+        let breakdown = match mode {
+            super::score::ScoreMode::Full => VerifyBreakdown {
+                honeypot: if ctx.honeypot_tripped {
+                    HONEYPOT_TRIPPED_SCORE
+                } else {
+                    0
+                },
+                time_on_page: score_time_on_page(ctx.time_on_page_ms),
+                cookie_age: score_cookie_age(ctx.cookie),
+                behavior: score_behavior(ctx.behavior),
             },
-            time_on_page: score_time_on_page(ctx.time_on_page_ms),
-            cookie_age: score_cookie_age(ctx.cookie),
-            behavior: score_behavior(ctx.behavior),
+            super::score::ScoreMode::Minimal => VerifyBreakdown {
+                honeypot: if ctx.honeypot_tripped {
+                    HONEYPOT_TRIPPED_SCORE
+                } else {
+                    0
+                },
+                time_on_page: score_time_on_page(ctx.time_on_page_ms),
+                cookie_age: 0,
+                behavior: 0,
+            },
         };
         let total =
             breakdown.honeypot + breakdown.time_on_page + breakdown.cookie_age + breakdown.behavior;
@@ -228,6 +251,29 @@ mod tests {
         let s = scorer().score(&c);
         assert_eq!(s.breakdown.time_on_page, 0);
         assert_eq!(s.decision, VerifyDecision::Pass);
+    }
+
+    #[test]
+    fn minimal_mode_keeps_honeypot_and_time() {
+        // Honeypot still kicks the score above the block threshold even when
+        // cookie/behavior are zeroed.
+        let mut c = ctx();
+        c.honeypot_tripped = true;
+        let s = scorer().score_minimal(&c);
+        assert_eq!(s.breakdown.honeypot, HONEYPOT_TRIPPED_SCORE);
+        assert_eq!(s.decision, VerifyDecision::Block);
+    }
+
+    #[test]
+    fn minimal_mode_zeros_cookie_and_behavior() {
+        let mut c = ctx();
+        c.cookie = CookiePresence::Missing;
+        c.behavior = BehaviorPresence::Present(super::super::behavior::BehaviorReport::default());
+        let full = scorer().score(&c);
+        let minimal = scorer().score_minimal(&c);
+        assert_eq!(minimal.breakdown.cookie_age, 0);
+        assert_eq!(minimal.breakdown.behavior, 0);
+        assert!(full.total > minimal.total);
     }
 
     #[test]

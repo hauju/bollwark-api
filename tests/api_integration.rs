@@ -127,6 +127,7 @@ impl TestAppBuilder {
             decision_log: None,
             admin_token,
             info_urls: None,
+            minimal_privacy_mode: false,
             config,
         });
         api::router(state, None)

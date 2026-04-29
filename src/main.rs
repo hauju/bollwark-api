@@ -265,6 +265,13 @@ async fn main() {
         }
     }
 
+    if config.minimal_privacy_mode {
+        tracing::info!(
+            "MINIMAL_PRIVACY_MODE enabled — live decisions ignore fingerprint/cookie signals; \
+             full-mode score is still recorded to the dashboard for comparison."
+        );
+    }
+
     let state = Arc::new(AppState {
         store,
         engine: PuzzleEngine::new(puzzle_config),
@@ -281,6 +288,7 @@ async fn main() {
         decision_log,
         admin_token,
         info_urls,
+        minimal_privacy_mode: config.minimal_privacy_mode,
         config: config.clone(),
     });
 

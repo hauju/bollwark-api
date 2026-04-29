@@ -12,8 +12,10 @@ pub use behavior::{BehaviorPresence, BehaviorReport};
 pub use client_ip::client_ip;
 pub use cookie::{CookieSameSite, CookieSigner};
 pub use reputation::{CidrListReputation, IpCategory};
-pub use score::{RiskScore, RiskScorer, SignalBreakdown, SignalContext};
+pub use score::{RiskScore, RiskScorer, ScoreMode, SignalBreakdown, SignalContext};
 pub use signals::CookiePresence;
 pub use tier::{EscalationTier, TierThresholds, difficulty_for};
 pub use tls_fingerprint::{FingerprintBlocklist, TlsFingerprint, TrustedProxies};
-pub use verify::{VerifyContext, VerifyDecision, VerifyScorer, VerifyThresholds};
+pub use verify::{
+    VerifyBreakdown, VerifyContext, VerifyDecision, VerifyScore, VerifyScorer, VerifyThresholds,
+};

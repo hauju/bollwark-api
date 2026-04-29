@@ -42,7 +42,11 @@ CREATE TABLE IF NOT EXISTS puzzle_decisions (
     sig_tls_fingerprint   INTEGER NOT NULL,
     cookie_presence TEXT    NOT NULL,
     tls_fingerprint TEXT    NOT NULL,
-    user_agent      TEXT
+    user_agent      TEXT,
+    score_full      INTEGER NOT NULL DEFAULT 0,
+    tier_full       TEXT    NOT NULL DEFAULT '',
+    score_minimal   INTEGER NOT NULL DEFAULT 0,
+    tier_minimal    TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_puzzle_ts ON puzzle_decisions(ts DESC);
 CREATE INDEX IF NOT EXISTS idx_puzzle_challenge ON puzzle_decisions(challenge_id);
@@ -60,11 +64,29 @@ CREATE TABLE IF NOT EXISTS verify_decisions (
     sig_behavior       INTEGER NOT NULL,
     time_on_page_ms INTEGER,
     cookie_presence TEXT    NOT NULL,
-    webdriver       TEXT    NOT NULL
+    webdriver       TEXT    NOT NULL,
+    score_full      INTEGER NOT NULL DEFAULT 0,
+    outcome_full    TEXT    NOT NULL DEFAULT '',
+    score_minimal   INTEGER NOT NULL DEFAULT 0,
+    outcome_minimal TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_verify_challenge ON verify_decisions(challenge_id);
 CREATE INDEX IF NOT EXISTS idx_verify_ts ON verify_decisions(ts DESC);
 ";
+
+// Idempotent additions for databases created before the comparison columns
+// existed. SQLite has no `ADD COLUMN IF NOT EXISTS`, so we run each ALTER
+// once and treat the "duplicate column name" error as a no-op.
+const MIGRATIONS: &[&str] = &[
+    "ALTER TABLE puzzle_decisions ADD COLUMN score_full INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE puzzle_decisions ADD COLUMN tier_full TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE puzzle_decisions ADD COLUMN score_minimal INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE puzzle_decisions ADD COLUMN tier_minimal TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE verify_decisions ADD COLUMN score_full INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE verify_decisions ADD COLUMN outcome_full TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE verify_decisions ADD COLUMN score_minimal INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE verify_decisions ADD COLUMN outcome_minimal TEXT NOT NULL DEFAULT ''",
+];
 
 enum Msg {
     Puzzle(PuzzleRecord),
@@ -91,6 +113,18 @@ impl DecisionLog {
         // Writer connection. Run schema, enable WAL so readers don't block.
         let writer = Connection::open(&path_str)?;
         writer.execute_batch(SCHEMA)?;
+        for stmt in MIGRATIONS {
+            // SQLite returns SQLITE_ERROR with message "duplicate column name"
+            // when the column already exists. Treat that as a no-op so reruns
+            // and fresh databases (which already have the column from SCHEMA)
+            // both work.
+            if let Err(e) = writer.execute(stmt, []) {
+                let msg = e.to_string();
+                if !msg.contains("duplicate column") {
+                    return Err(e);
+                }
+            }
+        }
         writer.pragma_update(None, "journal_mode", "WAL")?;
         writer.pragma_update(None, "synchronous", "NORMAL")?;
 
@@ -209,17 +243,21 @@ fn clear_all(conn: &Connection) -> rusqlite::Result<()> {
 fn insert_puzzle(conn: &Connection, r: &PuzzleRecord) -> rusqlite::Result<()> {
     let ts = chrono::Utc::now().to_rfc3339();
     let tier = format!("{:?}", r.tier);
+    let tier_full = format!("{:?}", r.tier_full);
+    let tier_minimal = format!("{:?}", r.tier_minimal);
     conn.execute(
         "INSERT INTO puzzle_decisions (
             ts, challenge_id, site_key, ip, ip_count, site_count,
             score, tier, difficulty, outcome,
             sig_rate, sig_header_anomaly, sig_ip_reputation, sig_cookie_age, sig_tls_fingerprint,
-            cookie_presence, tls_fingerprint, user_agent
+            cookie_presence, tls_fingerprint, user_agent,
+            score_full, tier_full, score_minimal, tier_minimal
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6,
             ?7, ?8, ?9, ?10,
             ?11, ?12, ?13, ?14, ?15,
-            ?16, ?17, ?18
+            ?16, ?17, ?18,
+            ?19, ?20, ?21, ?22
          )",
         params![
             ts,
@@ -240,6 +278,10 @@ fn insert_puzzle(conn: &Connection, r: &PuzzleRecord) -> rusqlite::Result<()> {
             r.cookie_presence,
             r.tls_fingerprint,
             r.user_agent,
+            r.score_full,
+            tier_full,
+            r.score_minimal,
+            tier_minimal,
         ],
     )?;
     Ok(())
@@ -251,11 +293,13 @@ fn insert_verify(conn: &Connection, r: &VerifyRecord) -> rusqlite::Result<()> {
         "INSERT INTO verify_decisions (
             ts, challenge_id, success, outcome, score,
             sig_honeypot, sig_time_on_page, sig_cookie_age, sig_behavior,
-            time_on_page_ms, cookie_presence, webdriver
+            time_on_page_ms, cookie_presence, webdriver,
+            score_full, outcome_full, score_minimal, outcome_minimal
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5,
             ?6, ?7, ?8, ?9,
-            ?10, ?11, ?12
+            ?10, ?11, ?12,
+            ?13, ?14, ?15, ?16
          )",
         params![
             ts,
@@ -270,6 +314,10 @@ fn insert_verify(conn: &Connection, r: &VerifyRecord) -> rusqlite::Result<()> {
             r.time_on_page_ms.map(|v| v as i64),
             r.cookie_presence,
             r.webdriver,
+            r.score_full,
+            r.outcome_full,
+            r.score_minimal,
+            r.outcome_minimal,
         ],
     )?;
     Ok(())

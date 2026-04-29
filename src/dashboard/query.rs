@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row};
 
 use super::types::{
-    OutcomeCounts, PuzzleBreakdownDto, PuzzleSignalSums, Session, SiteActivity, Stats, TierCounts,
-    VerifyBreakdownDto, VerifySection, VerifySignalSums,
+    OutcomeCounts, PrivacyCompare, PuzzleBreakdownDto, PuzzleSignalSums, Session, SiteActivity,
+    Stats, TierCounts, VerifyBreakdownDto, VerifySection, VerifySignalSums,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -111,7 +111,9 @@ const LIST_SQL: &str = "SELECT
     p.sig_rate, p.sig_header_anomaly, p.sig_ip_reputation, p.sig_cookie_age, p.sig_tls_fingerprint,
     v.ts, v.outcome, v.success, v.score,
     v.sig_honeypot, v.sig_time_on_page, v.sig_cookie_age, v.sig_behavior,
-    v.time_on_page_ms, v.cookie_presence, v.webdriver
+    v.time_on_page_ms, v.cookie_presence, v.webdriver,
+    p.score_full, p.tier_full, p.score_minimal, p.tier_minimal,
+    v.score_full, v.outcome_full, v.score_minimal, v.outcome_minimal
 FROM puzzle_decisions p
 LEFT JOIN verify_decisions v ON v.challenge_id = p.challenge_id
 ORDER BY p.id DESC
@@ -124,7 +126,9 @@ const GET_SQL: &str = "SELECT
     p.sig_rate, p.sig_header_anomaly, p.sig_ip_reputation, p.sig_cookie_age, p.sig_tls_fingerprint,
     v.ts, v.outcome, v.success, v.score,
     v.sig_honeypot, v.sig_time_on_page, v.sig_cookie_age, v.sig_behavior,
-    v.time_on_page_ms, v.cookie_presence, v.webdriver
+    v.time_on_page_ms, v.cookie_presence, v.webdriver,
+    p.score_full, p.tier_full, p.score_minimal, p.tier_minimal,
+    v.score_full, v.outcome_full, v.score_minimal, v.outcome_minimal
 FROM puzzle_decisions p
 LEFT JOIN verify_decisions v ON v.challenge_id = p.challenge_id
 WHERE p.id = ?1";
@@ -167,6 +171,10 @@ fn row_to_session(row: &Row<'_>) -> rusqlite::Result<Session> {
         let time_on_page_ms: Option<i64> = row.get(27)?;
         let v_cookie_presence: String = row.get(28)?;
         let webdriver: String = row.get(29)?;
+        let v_score_full: u32 = row.get::<_, i64>(34)? as u32;
+        let v_outcome_full: String = row.get(35)?;
+        let v_score_minimal: u32 = row.get::<_, i64>(36)? as u32;
+        let v_outcome_minimal: String = row.get(37)?;
         Some(VerifySection {
             ts,
             outcome,
@@ -176,10 +184,19 @@ fn row_to_session(row: &Row<'_>) -> rusqlite::Result<Session> {
             cookie_presence: v_cookie_presence,
             webdriver,
             breakdown: v_breakdown,
+            score_full: v_score_full,
+            outcome_full: v_outcome_full,
+            score_minimal: v_score_minimal,
+            outcome_minimal: v_outcome_minimal,
         })
     } else {
         None
     };
+
+    let puzzle_score_full: u32 = row.get::<_, i64>(30)? as u32;
+    let puzzle_tier_full: String = row.get(31)?;
+    let puzzle_score_minimal: u32 = row.get::<_, i64>(32)? as u32;
+    let puzzle_tier_minimal: String = row.get(33)?;
 
     let bot_probability = bot_probability(puzzle_score, verify.as_ref().map(|v| v.score));
 
@@ -201,6 +218,10 @@ fn row_to_session(row: &Row<'_>) -> rusqlite::Result<Session> {
         puzzle_breakdown: breakdown,
         verify,
         bot_probability,
+        puzzle_score_full,
+        puzzle_tier_full,
+        puzzle_score_minimal,
+        puzzle_tier_minimal,
     })
 }
 
@@ -248,7 +269,11 @@ fn stats_blocking(conn: &Connection) -> rusqlite::Result<Stats> {
             SUM(CASE WHEN p.tier = 'Checkbox'         THEN 1 ELSE 0 END),
             SUM(CASE WHEN p.tier = 'HardPow'          THEN 1 ELSE 0 END),
             SUM(CASE WHEN p.tier = 'VisualChallenge'  THEN 1 ELSE 0 END),
-            SUM(CASE WHEN p.tier = 'Block'            THEN 1 ELSE 0 END)
+            SUM(CASE WHEN p.tier = 'Block'            THEN 1 ELSE 0 END),
+            SUM(CASE WHEN p.tier_full <> '' AND p.tier_minimal <> '' AND p.tier_full <> p.tier_minimal THEN 1 ELSE 0 END),
+            SUM(CASE WHEN p.tier_full <> '' AND p.tier_minimal <> '' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN v.outcome_full <> '' AND v.outcome_minimal <> '' AND v.outcome_full <> v.outcome_minimal THEN 1 ELSE 0 END),
+            SUM(CASE WHEN v.outcome_full <> '' AND v.outcome_minimal <> '' THEN 1 ELSE 0 END)
          FROM puzzle_decisions p
          LEFT JOIN verify_decisions v ON v.challenge_id = p.challenge_id",
         [],
@@ -286,6 +311,12 @@ fn stats_blocking(conn: &Connection) -> rusqlite::Result<Stats> {
                     hard_pow: opt_i64(r, 22)? as u64,
                     visual_challenge: opt_i64(r, 23)? as u64,
                     block: opt_i64(r, 24)? as u64,
+                },
+                privacy_compare: PrivacyCompare {
+                    puzzle_diverged: opt_i64(r, 25)? as u64,
+                    puzzle_total: opt_i64(r, 26)? as u64,
+                    verify_diverged: opt_i64(r, 27)? as u64,
+                    verify_total: opt_i64(r, 28)? as u64,
                 },
             })
         },
