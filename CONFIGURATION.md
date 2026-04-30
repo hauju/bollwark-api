@@ -185,6 +185,8 @@ Path to a CIDR reputation file. Unset → signal contributes 0 for all IPs.
 
 Lookup is first-match-wins on the order in the file. Unknown categories on otherwise well-formed lines are skipped with a WARN log at boot.
 
+**Hot reload.** The file is watched for changes — rewriting it (e.g. via a cron pulling Tor exits or AWS ranges) hot-swaps the in-memory list with no restart. Saves are debounced ~500ms to coalesce editor-rewrite bursts (atomic-rename via tmp file). A failed reparse is logged at WARN and the previous list is kept; the request path can never observe an empty/partial list.
+
 ---
 
 ## Cookie age signal

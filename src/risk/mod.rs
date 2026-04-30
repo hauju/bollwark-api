@@ -11,7 +11,7 @@ pub mod verify;
 pub use behavior::{BehaviorPresence, BehaviorReport};
 pub use client_ip::client_ip;
 pub use cookie::{CookieSameSite, CookieSigner};
-pub use reputation::{CidrListReputation, IpCategory};
+pub use reputation::{CidrListReputation, IpCategory, ReputationStore};
 pub use score::{RiskScore, RiskScorer, ScoreMode, SignalBreakdown, SignalContext};
 pub use signals::CookiePresence;
 pub use tier::{EscalationTier, TierThresholds, difficulty_for};

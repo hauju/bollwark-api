@@ -24,6 +24,8 @@ hmac = "0.12"
 rusqlite = { version = "0.32", features = ["bundled"] }
 dotenvy = "0.15"
 captcha-rs = "0.5"
+arc-swap = "1"
+notify-debouncer-full = "0.7"
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::http::HeaderMap;
 
-use super::reputation::{CidrListReputation, score_ip_reputation};
+use super::reputation::{ReputationStore, score_ip_reputation};
 use super::signals::{CookiePresence, score_cookie_age, score_header_anomaly, score_rate};
 use super::tier::{EscalationTier, TierThresholds};
 use super::tls_fingerprint::{FingerprintBlocklist, TlsFingerprint, score_tls_fingerprint};
@@ -47,14 +47,14 @@ pub enum ScoreMode {
 
 pub struct RiskScorer {
     thresholds: TierThresholds,
-    reputation: Arc<CidrListReputation>,
+    reputation: Arc<ReputationStore>,
     tls_blocklist: Arc<FingerprintBlocklist>,
 }
 
 impl RiskScorer {
     pub fn new(
         thresholds: TierThresholds,
-        reputation: Arc<CidrListReputation>,
+        reputation: Arc<ReputationStore>,
         tls_blocklist: Arc<FingerprintBlocklist>,
     ) -> Self {
         Self {
@@ -109,6 +109,7 @@ impl RiskScorer {
 
 #[cfg(test)]
 mod tests {
+    use super::super::reputation::CidrListReputation;
     use super::*;
     use axum::http::HeaderValue;
     use axum::http::header::{ACCEPT_ENCODING, ACCEPT_LANGUAGE, USER_AGENT};
@@ -116,7 +117,7 @@ mod tests {
     fn scorer() -> RiskScorer {
         RiskScorer::new(
             TierThresholds::default(),
-            Arc::new(CidrListReputation::empty()),
+            Arc::new(ReputationStore::empty()),
             Arc::new(FingerprintBlocklist::empty()),
         )
     }
@@ -124,7 +125,9 @@ mod tests {
     fn scorer_with_reputation(content: &str) -> RiskScorer {
         RiskScorer::new(
             TierThresholds::default(),
-            Arc::new(CidrListReputation::parse(content).unwrap()),
+            Arc::new(ReputationStore::new(
+                CidrListReputation::parse(content).unwrap(),
+            )),
             Arc::new(FingerprintBlocklist::empty()),
         )
     }
@@ -132,7 +135,7 @@ mod tests {
     fn scorer_with_tls_blocklist(content: &str) -> RiskScorer {
         RiskScorer::new(
             TierThresholds::default(),
-            Arc::new(CidrListReputation::empty()),
+            Arc::new(ReputationStore::empty()),
             Arc::new(FingerprintBlocklist::parse(content).unwrap()),
         )
     }

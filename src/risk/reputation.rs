@@ -1,7 +1,9 @@
 use std::fs;
 use std::net::IpAddr;
 use std::path::Path;
+use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use ipnet::IpNet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +90,34 @@ impl CidrListReputation {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+}
+
+/// Hot-swappable reputation list. Reads use `ArcSwap::load` (a single
+/// atomic load — no locking on the request path) and reloads atomically
+/// publish a freshly-parsed list. Held by `RiskScorer` and by the
+/// fs-watcher in `main.rs`.
+pub struct ReputationStore {
+    inner: ArcSwap<CidrListReputation>,
+}
+
+impl ReputationStore {
+    pub fn new(initial: CidrListReputation) -> Self {
+        Self {
+            inner: ArcSwap::from_pointee(initial),
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self::new(CidrListReputation::empty())
+    }
+
+    pub fn lookup(&self, ip: IpAddr) -> Option<IpCategory> {
+        self.inner.load().lookup(ip)
+    }
+
+    pub fn replace(&self, next: CidrListReputation) {
+        self.inner.store(Arc::new(next));
     }
 }
 
@@ -183,5 +213,17 @@ mod tests {
             SCORE_RESIDENTIAL
         );
         assert_eq!(score_ip_reputation(None), 0);
+    }
+
+    #[test]
+    fn store_swap_publishes_new_list() {
+        let store = ReputationStore::empty();
+        assert_eq!(store.lookup(ip("10.0.0.1")), None);
+        store.replace(CidrListReputation::parse("10.0.0.0/8 datacenter\n").unwrap());
+        assert_eq!(store.lookup(ip("10.0.0.1")), Some(IpCategory::Datacenter));
+        // Swap to a different list — old entry is gone, new one is live.
+        store.replace(CidrListReputation::parse("203.0.113.0/24 tor\n").unwrap());
+        assert_eq!(store.lookup(ip("10.0.0.1")), None);
+        assert_eq!(store.lookup(ip("203.0.113.7")), Some(IpCategory::Tor));
     }
 }

@@ -18,8 +18,8 @@ use rust_captcha::puzzle::challenge::{
 use rust_captcha::puzzle::difficulty::DifficultyCalculator;
 use rust_captcha::puzzle::types::{Algorithm, Argon2idParams, PuzzleConfig};
 use rust_captcha::risk::{
-    CidrListReputation, CookieSigner, EscalationTier, FingerprintBlocklist, RiskScorer,
-    TrustedProxies, VerifyScorer,
+    CidrListReputation, CookieSigner, EscalationTier, FingerprintBlocklist, ReputationStore,
+    RiskScorer, TrustedProxies, VerifyScorer,
 };
 use rust_captcha::storage::memory::InMemoryStore;
 
@@ -90,8 +90,8 @@ impl TestAppBuilder {
             ttl_secs: 300,
         };
         let reputation = std::sync::Arc::new(match self.reputation_cidrs {
-            Some(content) => CidrListReputation::parse(&content).unwrap(),
-            None => CidrListReputation::empty(),
+            Some(content) => ReputationStore::new(CidrListReputation::parse(&content).unwrap()),
+            None => ReputationStore::empty(),
         });
         let cookie_signer = self
             .cookie_secret

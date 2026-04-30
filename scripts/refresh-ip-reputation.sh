@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+#
+# Refresh the IP reputation file from public feeds. Writes atomically so the
+# server's fs-watcher sees a single change event and hot-swaps the in-memory
+# list without a restart.
+#
+# Usage:
+#   scripts/refresh-ip-reputation.sh [OUTPUT_PATH]
+#
+#   OUTPUT_PATH defaults to /etc/rust-captcha/ip_reputation.txt
+#
+# Bootstrap (first run also creates the file):
+#   sudo mkdir -p /etc/rust-captcha
+#   sudo scripts/refresh-ip-reputation.sh
+#   IP_REPUTATION_FILE=/etc/rust-captcha/ip_reputation.txt FULL_FINGERPRINT_MODE=1 cargo run
+#
+# Cron (hourly is fine — Tor exits churn slowly, cloud ranges shift weekly):
+#   0 * * * * /opt/rust-captcha/scripts/refresh-ip-reputation.sh \
+#               /etc/rust-captcha/ip_reputation.txt >> /var/log/rust-captcha/refresh.log 2>&1
+#
+# Sources:
+#   - Tor exits:    https://check.torproject.org/torbulkexitlist
+#   - AWS:          https://ip-ranges.amazonaws.com/ip-ranges.json
+#   - Google Cloud: https://www.gstatic.com/ipranges/cloud.json
+#   - Cloudflare:   https://www.cloudflare.com/ips-v4 and ips-v6
+#   - DigitalOcean: https://digitalocean.com/geo/google.csv
+#
+# Order in the output file matters: lookup is first-match-wins. Tor is listed
+# first because it's the highest-signal category — a Tor exit running on AWS
+# should score as `tor` (40), not `datacenter` (30).
+#
+# Note: the combined list is ~10k entries. Lookup is O(N), which is fine for
+# request volumes up to mid-thousands rps. If that becomes a hot-path
+# bottleneck, replace `CidrListReputation::lookup` with a trie.
+#
+# Required tools: bash, curl, jq, awk, grep, sort.
+#
+set -euo pipefail
+
+OUT="${1:-/etc/rust-captcha/ip_reputation.txt}"
+
+# Per-feed minimum entry counts. Below these we abort the publish — guards
+# against upstream returning an empty body or an error page.
+MIN_TOR_NODES="${MIN_TOR_NODES:-100}"
+MIN_AWS_PREFIXES="${MIN_AWS_PREFIXES:-1000}"
+MIN_GCP_PREFIXES="${MIN_GCP_PREFIXES:-100}"
+MIN_CF_PREFIXES="${MIN_CF_PREFIXES:-5}"
+MIN_DO_PREFIXES="${MIN_DO_PREFIXES:-30}"
+
+if ! command -v jq >/dev/null 2>&1; then
+    echo "jq not found — install it (apt-get install jq / brew install jq)" >&2
+    exit 1
+fi
+
+OUT_DIR="$(dirname "$OUT")"
+mkdir -p "$OUT_DIR"
+
+TMP="$(mktemp "${OUT}.XXXXXX")"
+trap 'rm -f "$TMP"' EXIT
+
+CURL=(curl --fail --silent --show-error --location --max-time 30)
+
+# Helpers -------------------------------------------------------------------
+count_lines() { printf '%s' "$1" | grep -c . || true; }
+
+abort_low() {
+    local feed="$1" got="$2" min="$3"
+    echo "$feed: only $got entries (min=$min) — aborting publish" >&2
+    exit 1
+}
+
+# Tor exits -----------------------------------------------------------------
+TOR_URL="https://check.torproject.org/torbulkexitlist"
+TOR_LINES="$("${CURL[@]}" "$TOR_URL" \
+    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
+    | awk '{ print $1 "/32 tor" }' || true)"
+TOR_COUNT="$(count_lines "$TOR_LINES")"
+[ "$TOR_COUNT" -ge "$MIN_TOR_NODES" ] || abort_low tor "$TOR_COUNT" "$MIN_TOR_NODES"
+
+# AWS -----------------------------------------------------------------------
+# All AWS prefixes (any service). dedup'd because the same prefix appears
+# under multiple service tags (AMAZON, EC2, S3, etc.).
+AWS_URL="https://ip-ranges.amazonaws.com/ip-ranges.json"
+AWS_LINES="$("${CURL[@]}" "$AWS_URL" \
+    | jq -r '(.prefixes[]?.ip_prefix), (.ipv6_prefixes[]?.ipv6_prefix)' \
+    | sort -u \
+    | awk 'NF { print $1 " datacenter" }')"
+AWS_COUNT="$(count_lines "$AWS_LINES")"
+[ "$AWS_COUNT" -ge "$MIN_AWS_PREFIXES" ] || abort_low aws "$AWS_COUNT" "$MIN_AWS_PREFIXES"
+
+# Google Cloud --------------------------------------------------------------
+GCP_URL="https://www.gstatic.com/ipranges/cloud.json"
+GCP_LINES="$("${CURL[@]}" "$GCP_URL" \
+    | jq -r '.prefixes[]? | (.ipv4Prefix // .ipv6Prefix // empty)' \
+    | sort -u \
+    | awk 'NF { print $1 " datacenter" }')"
+GCP_COUNT="$(count_lines "$GCP_LINES")"
+[ "$GCP_COUNT" -ge "$MIN_GCP_PREFIXES" ] || abort_low gcp "$GCP_COUNT" "$MIN_GCP_PREFIXES"
+
+# Cloudflare ----------------------------------------------------------------
+CF_V4_URL="https://www.cloudflare.com/ips-v4"
+CF_V6_URL="https://www.cloudflare.com/ips-v6"
+CF_LINES="$( { "${CURL[@]}" "$CF_V4_URL"; echo; "${CURL[@]}" "$CF_V6_URL"; } \
+    | grep -E '^[0-9a-fA-F:./]+$' \
+    | awk '{ print $1 " datacenter" }' || true)"
+CF_COUNT="$(count_lines "$CF_LINES")"
+[ "$CF_COUNT" -ge "$MIN_CF_PREFIXES" ] || abort_low cloudflare "$CF_COUNT" "$MIN_CF_PREFIXES"
+
+# DigitalOcean --------------------------------------------------------------
+# CSV: <cidr>,<country>,<region>,<city>,<postal>
+DO_URL="https://www.digitalocean.com/geo/google.csv"
+DO_LINES="$("${CURL[@]}" "$DO_URL" \
+    | awk -F',' '$1 ~ /\// { print $1 " datacenter" }' || true)"
+DO_COUNT="$(count_lines "$DO_LINES")"
+[ "$DO_COUNT" -ge "$MIN_DO_PREFIXES" ] || abort_low digitalocean "$DO_COUNT" "$MIN_DO_PREFIXES"
+
+# Compose final file --------------------------------------------------------
+{
+    echo "# Generated by refresh-ip-reputation.sh at $(date -u +%FT%TZ)"
+    echo "# Lookup is first-match-wins — Tor listed first as the strongest signal."
+    echo
+    echo "# Tor exits — $TOR_URL ($TOR_COUNT entries)"
+    printf '%s\n' "$TOR_LINES"
+    echo
+    echo "# AWS — $AWS_URL ($AWS_COUNT entries)"
+    printf '%s\n' "$AWS_LINES"
+    echo
+    echo "# Google Cloud — $GCP_URL ($GCP_COUNT entries)"
+    printf '%s\n' "$GCP_LINES"
+    echo
+    echo "# Cloudflare — $CF_V4_URL + $CF_V6_URL ($CF_COUNT entries)"
+    printf '%s\n' "$CF_LINES"
+    echo
+    echo "# DigitalOcean — $DO_URL ($DO_COUNT entries)"
+    printf '%s\n' "$DO_LINES"
+} > "$TMP"
+
+mv "$TMP" "$OUT"
+trap - EXIT
+
+TOTAL=$((TOR_COUNT + AWS_COUNT + GCP_COUNT + CF_COUNT + DO_COUNT))
+echo "wrote $OUT — $TOTAL entries (tor=$TOR_COUNT aws=$AWS_COUNT gcp=$GCP_COUNT cf=$CF_COUNT do=$DO_COUNT)"

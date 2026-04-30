@@ -13,8 +13,8 @@ use rust_captcha::puzzle::challenge::PuzzleEngine;
 use rust_captcha::puzzle::difficulty::DifficultyCalculator;
 use rust_captcha::puzzle::types::PuzzleConfig;
 use rust_captcha::risk::{
-    CidrListReputation, CookieSigner, FingerprintBlocklist, RiskScorer, TrustedProxies,
-    VerifyScorer,
+    CidrListReputation, CookieSigner, FingerprintBlocklist, ReputationStore, RiskScorer,
+    TrustedProxies, VerifyScorer,
 };
 use rust_captcha::storage::Store;
 use rust_captcha::storage::memory::InMemoryStore;
@@ -121,20 +121,22 @@ async fn main() {
         }
     });
 
-    // IP reputation: load CIDR list if a path is configured.
-    let reputation = match &config.ip_reputation_file {
-        Some(path) => match CidrListReputation::from_file(path) {
+    // IP reputation: load CIDR list if a path is configured. The store is
+    // hot-swappable; when a path is set we also spawn an fs-watcher that
+    // reloads the file on change (debounced to coalesce editor save bursts).
+    let reputation = Arc::new(ReputationStore::empty());
+    if let Some(path) = config.ip_reputation_file.clone() {
+        match CidrListReputation::from_file(&path) {
             Ok(rep) => {
                 tracing::info!("IP reputation loaded: {} entries from {path}", rep.len());
-                Arc::new(rep)
+                reputation.replace(rep);
             }
             Err(e) => {
                 tracing::warn!("IP reputation: {e} — falling back to empty list");
-                Arc::new(CidrListReputation::empty())
             }
-        },
-        None => Arc::new(CidrListReputation::empty()),
-    };
+        }
+        spawn_reputation_watcher(path, Arc::clone(&reputation));
+    }
 
     // Cookie signing: only enabled when a secret is configured.
     let cookie_signer = match &config.cookie_signing_secret {
@@ -315,6 +317,94 @@ async fn main() {
 }
 
 /// Wait for SIGINT (Ctrl-C) or SIGTERM (orchestrator stop). Either signal
+/// Watch the IP reputation file for changes and hot-swap the in-memory list
+/// when it's rewritten. The debouncer coalesces atomic-rename save bursts
+/// (vim/sed) into a single reload. Runs on a dedicated OS thread because
+/// the debouncer hands us a synchronous `mpsc::Receiver`. Errors during
+/// reload (e.g. transient ENOENT mid-rename) are logged and the previous
+/// list is kept — the request path can never observe an empty/partial list.
+fn spawn_reputation_watcher(path: String, store: Arc<ReputationStore>) {
+    use notify_debouncer_full::new_debouncer;
+    use notify_debouncer_full::notify::RecursiveMode;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    let target = PathBuf::from(&path);
+    // Watch the parent directory: many editors save by writing a temp file
+    // and renaming it over the target, which invalidates a direct file watch
+    // on some platforms. Filtering by filename inside the handler is robust
+    // to that pattern.
+    let watch_dir = target
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let target_name = target.file_name().map(|n| n.to_owned());
+
+    std::thread::Builder::new()
+        .name("ip-reputation-watcher".into())
+        .spawn(move || {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let mut debouncer = match new_debouncer(Duration::from_millis(500), None, tx) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!("IP reputation watcher: failed to create debouncer: {e}");
+                    return;
+                }
+            };
+            if let Err(e) = debouncer.watch(&watch_dir, RecursiveMode::NonRecursive) {
+                tracing::warn!(
+                    "IP reputation watcher: failed to watch {}: {e}",
+                    watch_dir.display()
+                );
+                return;
+            }
+            tracing::info!(
+                "IP reputation watcher: watching {} for changes to {}",
+                watch_dir.display(),
+                target.display()
+            );
+
+            for result in rx {
+                let events = match result {
+                    Ok(events) => events,
+                    Err(errors) => {
+                        for e in errors {
+                            tracing::warn!("IP reputation watcher: {e}");
+                        }
+                        continue;
+                    }
+                };
+                let touched = events.iter().any(|e| {
+                    e.event
+                        .paths
+                        .iter()
+                        .any(|p| match (&target_name, p.file_name()) {
+                            (Some(want), Some(got)) => want == got,
+                            _ => false,
+                        })
+                });
+                if !touched {
+                    continue;
+                }
+                match CidrListReputation::from_file(&target) {
+                    Ok(rep) => {
+                        tracing::info!(
+                            "IP reputation reloaded: {} entries from {}",
+                            rep.len(),
+                            target.display()
+                        );
+                        store.replace(rep);
+                    }
+                    Err(e) => {
+                        tracing::warn!("IP reputation reload failed: {e} — keeping previous list");
+                    }
+                }
+            }
+        })
+        .expect("spawn ip-reputation-watcher thread");
+}
+
 /// completes the future; whichever fires first is the signal we shut down on.
 /// SIGTERM is the one Kubernetes / Docker / systemd send on stop, so it must
 /// be handled — without it, in-flight requests are killed mid-flight and the
