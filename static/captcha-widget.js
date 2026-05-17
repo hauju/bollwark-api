@@ -702,15 +702,31 @@
 
   // ── Auto-Init ──
 
-  document.addEventListener("DOMContentLoaded", () => {
+  // Scan the DOM for `[data-sitekey]` containers and mount a widget on each.
+  // Idempotent: we tag mounted nodes so re-runs (after async script load in
+  // an SPA, or a subsequent `RustCaptcha.scan()`) don't double-mount.
+  function autoInit() {
     document.querySelectorAll("[data-sitekey]").forEach((el) => {
+      if (el.dataset.rustcaptchaMounted === "1") return;
       const widget = new CaptchaWidget(el, {
         sitekey: el.dataset.sitekey,
         serverUrl: el.dataset.serverUrl || "",
         debug: el.dataset.debug,
         mode: el.dataset.mode,
       });
+      el.dataset.rustcaptchaMounted = "1";
       window.RustCaptcha._instances.push(widget);
     });
-  });
+  }
+  window.RustCaptcha.scan = autoInit;
+
+  // SPA-friendly bootstrap: if `DOMContentLoaded` has already fired by the
+  // time this script lands (typical when injected dynamically by a Dioxus
+  // / React / Vue app after first paint), the listener would never run. Fall
+  // through to an immediate scan in that case.
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", autoInit);
+  } else {
+    autoInit();
+  }
 })();
