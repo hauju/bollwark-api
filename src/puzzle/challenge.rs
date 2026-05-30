@@ -4,7 +4,7 @@ use rand::RngExt;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use super::types::{Algorithm, Argon2idParams, Challenge, ChallengeKind, PuzzleConfig};
+use super::types::{Algorithm, Argon2idParams, Challenge, PuzzleConfig};
 
 pub struct PuzzleEngine {
     config: PuzzleConfig,
@@ -27,55 +27,12 @@ impl PuzzleEngine {
         Challenge {
             id: Uuid::new_v4(),
             site_key,
-            kind: ChallengeKind::Pow,
             algorithm: self.config.algorithm,
             prefix,
             difficulty,
             created_at: now,
             expires_at,
             solved: false,
-            visual_answer: None,
-            visual_image: None,
-        }
-    }
-
-    /// Generate a visual (image-text) challenge. The expected answer is
-    /// stored on the `Challenge` server-side and the rendered PNG is
-    /// returned as a base64 data URL ready to drop into an `<img src>`.
-    ///
-    /// Issued when the risk pipeline classifies a request as
-    /// `EscalationTier::VisualChallenge` — the user must read the image
-    /// and type the characters back. There is no PoW for these; the
-    /// `algorithm`/`prefix`/`difficulty` fields on the returned challenge
-    /// are placeholders and ignored at verify time.
-    pub fn generate_visual(&self, site_key: Uuid) -> Challenge {
-        let cap = captcha_rs::CaptchaBuilder::new()
-            .length(5)
-            .width(220)
-            .height(60)
-            .dark_mode(false)
-            .complexity(5)
-            .compression(40)
-            .build();
-
-        let answer = cap.text.to_lowercase();
-        let image = cap.to_base64();
-
-        let now = Utc::now();
-        let expires_at = now + Duration::seconds(self.config.ttl_secs as i64);
-
-        Challenge {
-            id: Uuid::new_v4(),
-            site_key,
-            kind: ChallengeKind::Image,
-            algorithm: self.config.algorithm,
-            prefix: String::new(),
-            difficulty: 0,
-            created_at: now,
-            expires_at,
-            solved: false,
-            visual_answer: Some(answer),
-            visual_image: Some(image),
         }
     }
 
@@ -91,29 +48,6 @@ impl PuzzleEngine {
                 None => false,
             },
         }
-    }
-
-    /// Compare a user-submitted text answer against the stored expected
-    /// answer for a visual challenge. Trim + lowercase before comparing
-    /// to match the normalisation applied at generation time. Compares in
-    /// constant time to avoid leaking byte-by-byte timing on length
-    /// matches; an early length mismatch is fine because the expected
-    /// length is fixed and not secret.
-    pub fn verify_visual(&self, challenge: &Challenge, submitted: &str) -> bool {
-        let Some(expected) = challenge.visual_answer.as_deref() else {
-            return false;
-        };
-        let normalised = submitted.trim().to_lowercase();
-        let a = expected.as_bytes();
-        let b = normalised.as_bytes();
-        if a.len() != b.len() {
-            return false;
-        }
-        let mut diff: u8 = 0;
-        for (x, y) in a.iter().zip(b.iter()) {
-            diff |= x ^ y;
-        }
-        diff == 0
     }
 
     pub fn default_difficulty(&self) -> u32 {
@@ -323,57 +257,6 @@ mod tests {
         let engine = PuzzleEngine::new(config);
         let challenge = engine.generate(Uuid::new_v4(), 4);
         assert!(!engine.verify(&challenge, u64::MAX));
-    }
-
-    // --- Visual ---
-
-    #[test]
-    fn test_visual_generate_and_verify_roundtrip() {
-        let config = PuzzleConfig {
-            algorithm: Algorithm::Sha256,
-            default_difficulty: 8,
-            min_difficulty: 4,
-            max_difficulty: 16,
-            ttl_secs: 300,
-        };
-        let engine = PuzzleEngine::new(config);
-        let challenge = engine.generate_visual(Uuid::new_v4());
-
-        assert!(matches!(challenge.kind, super::ChallengeKind::Image));
-        let answer = challenge.visual_answer.as_deref().unwrap();
-        assert!(!answer.is_empty());
-        assert!(
-            challenge
-                .visual_image
-                .as_deref()
-                .is_some_and(|s| s.starts_with("data:image/"))
-        );
-
-        // Correct answer (case-insensitive, with surrounding whitespace).
-        let typed = format!("  {}  ", answer.to_uppercase());
-        assert!(engine.verify_visual(&challenge, &typed));
-
-        // Wrong answer.
-        assert!(!engine.verify_visual(&challenge, "definitely-wrong"));
-
-        // Empty answer.
-        assert!(!engine.verify_visual(&challenge, ""));
-    }
-
-    #[test]
-    fn test_visual_verify_rejects_pow_challenge_without_answer() {
-        let config = PuzzleConfig {
-            algorithm: Algorithm::Sha256,
-            default_difficulty: 4,
-            min_difficulty: 4,
-            max_difficulty: 16,
-            ttl_secs: 300,
-        };
-        let engine = PuzzleEngine::new(config);
-        // A PoW challenge has no `visual_answer` — verify_visual must
-        // reject regardless of what the caller submits, never panic.
-        let challenge = engine.generate(Uuid::new_v4(), 4);
-        assert!(!engine.verify_visual(&challenge, "anything"));
     }
 
     #[test]

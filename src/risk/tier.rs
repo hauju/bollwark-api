@@ -6,7 +6,6 @@ pub enum EscalationTier {
     InvisiblePass,
     Checkbox,
     HardPow,
-    VisualChallenge,
     Block,
 }
 
@@ -14,7 +13,6 @@ pub enum EscalationTier {
 pub struct TierThresholds {
     pub checkbox: u32,
     pub hard_pow: u32,
-    pub visual: u32,
     pub block: u32,
 }
 
@@ -23,7 +21,6 @@ impl Default for TierThresholds {
         Self {
             checkbox: 20,
             hard_pow: 40,
-            visual: 65,
             block: 85,
         }
     }
@@ -33,8 +30,6 @@ impl TierThresholds {
     pub fn classify(&self, score: u32) -> EscalationTier {
         if score >= self.block {
             EscalationTier::Block
-        } else if score >= self.visual {
-            EscalationTier::VisualChallenge
         } else if score >= self.hard_pow {
             EscalationTier::HardPow
         } else if score >= self.checkbox {
@@ -46,8 +41,7 @@ impl TierThresholds {
 }
 
 /// Map a chosen tier to a PoW difficulty adjustment relative to the base.
-/// Returns `None` for tiers that don't issue a PoW (`VisualChallenge` is
-/// served as an image-text captcha, `Block` is rejected with 429).
+/// Returns `None` for `Block` (rejected with 429, no puzzle issued).
 pub fn difficulty_for(
     tier: EscalationTier,
     default_difficulty: u32,
@@ -57,7 +51,7 @@ pub fn difficulty_for(
         EscalationTier::InvisiblePass => 0,
         EscalationTier::Checkbox => 2,
         EscalationTier::HardPow => 4,
-        EscalationTier::VisualChallenge | EscalationTier::Block => return None,
+        EscalationTier::Block => return None,
     };
     Some(default_difficulty.saturating_add(bump).min(max_difficulty))
 }
@@ -79,9 +73,10 @@ mod tests {
         assert_eq!(t.classify(20), EscalationTier::Checkbox);
         assert_eq!(t.classify(39), EscalationTier::Checkbox);
         assert_eq!(t.classify(40), EscalationTier::HardPow);
+        // The old VisualChallenge band (65–84) now folds into HardPow.
         assert_eq!(t.classify(64), EscalationTier::HardPow);
-        assert_eq!(t.classify(65), EscalationTier::VisualChallenge);
-        assert_eq!(t.classify(84), EscalationTier::VisualChallenge);
+        assert_eq!(t.classify(65), EscalationTier::HardPow);
+        assert_eq!(t.classify(84), EscalationTier::HardPow);
         assert_eq!(t.classify(85), EscalationTier::Block);
         assert_eq!(t.classify(200), EscalationTier::Block);
     }
@@ -101,12 +96,8 @@ mod tests {
     }
 
     #[test]
-    fn difficulty_mapping_block_and_visual_are_none() {
+    fn difficulty_mapping_block_is_none() {
         assert_eq!(difficulty_for(EscalationTier::Block, 20, 28), None);
-        assert_eq!(
-            difficulty_for(EscalationTier::VisualChallenge, 20, 28),
-            None
-        );
     }
 
     #[test]
@@ -120,8 +111,8 @@ mod tests {
             "\"hard_pow\""
         );
         assert_eq!(
-            serde_json::to_string(&EscalationTier::VisualChallenge).unwrap(),
-            "\"visual_challenge\""
+            serde_json::to_string(&EscalationTier::Block).unwrap(),
+            "\"block\""
         );
     }
 }

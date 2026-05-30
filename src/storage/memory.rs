@@ -360,7 +360,7 @@ fn lock_err<T>(_: T) -> CaptchaError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::puzzle::types::{Algorithm, ChallengeKind};
+    use crate::puzzle::types::Algorithm;
     use chrono::Duration;
 
     fn make_challenge(site_key: Uuid, ttl_secs: i64) -> Challenge {
@@ -368,15 +368,12 @@ mod tests {
         Challenge {
             id: Uuid::new_v4(),
             site_key,
-            kind: ChallengeKind::Pow,
             algorithm: Algorithm::Sha256,
             prefix: "deadbeef".into(),
             difficulty: 8,
             created_at: now,
             expires_at: now + Duration::seconds(ttl_secs),
             solved: false,
-            visual_answer: None,
-            visual_image: None,
         }
     }
 

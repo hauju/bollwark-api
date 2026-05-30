@@ -95,11 +95,10 @@ If you bundle or proxy the script from your own app origin, set `data-server-url
 
 The widget has two modes selected via `data-mode`:
 
-- **`data-mode="default"`** (used when the attribute is omitted): the checkbox row and brand footer always render. The visible UX is uniform across pass tiers — visitors always see the same "I'm not a robot" → spinner → "Verified" sequence. On low-risk visitors (`invisible_pass`) the widget auto-runs the spinner without a click; on higher tiers it waits for a click. The visual challenge UI replaces the checkbox when the server returns an image-text challenge. This is the simplest integration — no other wiring required.
+- **`data-mode="default"`** (used when the attribute is omitted): the checkbox row and brand footer always render. The visible UX is uniform across pass tiers — visitors always see the same "I'm not a robot" → spinner → "Verified" sequence. On low-risk visitors (`invisible_pass`) the widget auto-runs the spinner without a click; on higher tiers it waits for a click. This is the simplest integration — no other wiring required.
 - **`data-mode="invisible"`**: the widget renders no chrome at all for the `invisible_pass` tier — PoW runs in the background and the `captcha-token` field is injected silently when the visitor submits. If the server escalates the tier, the widget falls back to its visible UI on demand:
   - `invisible_pass` → no UI, silent PoW.
   - `checkbox` / `hard_pow` → checkbox appears, visitor clicks.
-  - `visual` → image-text challenge appears, visitor types the answer.
   - `block` → **the widget renders nothing**. Your page must listen for the `rustcaptcha:puzzle` event to surface a failure UX (an inline message, a redirect, or anything else). Without a listener the block is silent and the visitor sees nothing happen. The widget logs a one-shot `console.warn` in this case to flag missed wiring during development.
 
 ```html
@@ -117,7 +116,7 @@ The widget has two modes selected via `data-mode`:
 
 The `rustcaptcha:puzzle` event fires in default mode too if you want to drive your own UI alongside the widget — it bubbles, so a listener on a parent element works.
 
-The widget writes a hidden form field named `captcha-token` whose value is a single **opaque token** (a hex string). It already carries everything `/v1/verify` needs — the challenge id, the PoW nonce (or the typed `text_answer` for a visual challenge), the honeypot, and behavioural telemetry. Your backend treats it as a black box: read the field and forward it verbatim. There is nothing to parse.
+The widget writes a hidden form field named `captcha-token` whose value is a single **opaque token** (a hex string). It already carries everything `/v1/verify` needs — the challenge id, the PoW nonce, the honeypot, and behavioural telemetry. Your backend treats it as a black box: read the field and forward it verbatim. There is nothing to parse.
 
 ```
 a3f1c0...    # opaque; do not parse or depend on its contents
@@ -142,7 +141,7 @@ curl -s -X POST https://captcha.example.com/v1/verify \
   -d '{ "token": "<captcha-token value>" }'
 ```
 
-> **Server-to-server callers** that build the request without the widget can send the explicit fields instead of `token`: `challenge_id` plus `nonce` (PoW) or `text_answer` (visual), with optional `honeypot` and `behavior`.
+> **Server-to-server callers** that build the request without the widget can send the explicit fields instead of `token`: `challenge_id` plus `nonce`, with optional `honeypot` and `behavior`.
 
 Successful response:
 
@@ -279,7 +278,7 @@ Common responses:
 | Case | Response | What to do |
 |---|---|---|
 | Missing or bad `site_key` | `400` from `/v1/puzzle` | Check frontend config |
-| High-risk puzzle request (`block` tier) | `429` from `/v1/puzzle` | Show a retry/error state or fall back to your own moderation path. (The `visual_challenge` tier returns `200` with `kind=image`, not `429`.) |
+| High-risk puzzle request (`block` tier) | `429` from `/v1/puzzle` | Show a retry/error state or fall back to your own moderation path. |
 | Missing verify auth | `401` from `/v1/verify` | Check backend `secret_key` |
 | Challenge expired | `410` from `/v1/verify` | Ask user to retry the form |
 | Replayed challenge | `404` or `409` from `/v1/verify` | Ask user to retry; do not accept the form |

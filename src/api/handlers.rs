@@ -10,7 +10,6 @@ use axum::response::IntoResponse;
 use crate::config::CookieSameSiteCfg;
 use crate::dashboard::types::{PuzzleRecord, VerifyRecord};
 use crate::error::CaptchaError;
-use crate::puzzle::types::ChallengeKind;
 use crate::risk::cookie::{CookieSameSite, extract_cookie, now_secs, set_cookie_header};
 use crate::risk::{
     BehaviorPresence, CookiePresence, EscalationTier, SignalContext, TlsFingerprint, VerifyContext,
@@ -116,9 +115,8 @@ pub async fn get_puzzle(
         (shadow.unwrap_or(score), score)
     };
 
-    // Tiers that don't issue a PoW puzzle (Block always rejects with 429;
-    // VisualChallenge issues an image instead — see below). PoW tiers map
-    // to a difficulty here.
+    // Block is the only tier that doesn't issue a PoW puzzle (it rejects
+    // with 429 below). Every other tier maps to a difficulty here.
     let maybe_difficulty = difficulty_for(
         score.tier,
         state.config.default_difficulty,
@@ -189,15 +187,10 @@ pub async fn get_puzzle(
         return Ok((StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response());
     }
 
-    // Build the challenge. VisualChallenge tier issues an image-text
-    // puzzle (no PoW); every other tier issues a PoW at the tier's
-    // difficulty.
-    let challenge = if score.tier == EscalationTier::VisualChallenge {
-        state.engine.generate_visual(params.site_key)
-    } else {
-        let difficulty = maybe_difficulty.expect("PoW tiers must have a difficulty");
-        state.engine.generate(params.site_key, difficulty)
-    };
+    // Build the PoW challenge at the tier's difficulty (every non-Block tier
+    // issues a PoW; Block already returned above).
+    let difficulty = maybe_difficulty.expect("non-Block tiers must have a difficulty");
+    let challenge = state.engine.generate(params.site_key, difficulty);
 
     if let Some(log) = &state.decision_log {
         log.record_puzzle(PuzzleRecord {
@@ -223,11 +216,9 @@ pub async fn get_puzzle(
 
     let response = PuzzleResponse {
         challenge_id: challenge.id,
-        kind: challenge.kind,
         algorithm: challenge.algorithm,
         prefix: challenge.prefix.clone(),
         difficulty: challenge.difficulty,
-        image: challenge.visual_image.clone(),
         expires_at: challenge.expires_at.to_rfc3339(),
         tier: score.tier,
         info_urls: state.info_urls.clone(),
@@ -301,21 +292,9 @@ pub async fn verify(
     // a longer dwell than actually elapsed to dodge the fast-submit penalty.
     let time_on_page_ms = (verify_at - challenge.created_at).num_milliseconds().max(0) as u64;
 
-    // Verify the puzzle. PoW challenges check the nonce against the
-    // hash target; image challenges compare the typed text to the
-    // server-stored expected answer. The "puzzle invalid" outcome is
-    // logged with a kind-aware label so the dashboard can distinguish
-    // brute-force misses from typos.
-    let (puzzle_valid, invalid_outcome) = match challenge.kind {
-        ChallengeKind::Pow => (state.engine.verify(&challenge, req.nonce), "pow_invalid"),
-        ChallengeKind::Image => {
-            let answer = req.text_answer.as_deref().unwrap_or("");
-            (
-                state.engine.verify_visual(&challenge, answer),
-                "visual_invalid",
-            )
-        }
-    };
+    // Verify the PoW: check the nonce against the hash target.
+    let puzzle_valid = state.engine.verify(&challenge, req.nonce);
+    let invalid_outcome = "pow_invalid";
 
     if !puzzle_valid {
         tracing::info!(

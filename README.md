@@ -2,7 +2,7 @@
 
 Self-hostable proof-of-work CAPTCHA service in Rust. Clients solve a SHA-256 (or Argon2id) puzzle to prove they aren't bots; the server brackets each solve with two scoring passes that adapt difficulty — or short-circuit — based on per-request risk signals.
 
-- **Two-pass risk scoring.** A puzzle-time pass picks an escalation tier (invisible / checkbox / hard PoW / visual image-text challenge / 429 block). A verify-time pass re-scores after submit using time-on-page, cookie age, honeypot, and behavioural telemetry, returning `pass` / `shadow_fail` / `block`.
+- **Two-pass risk scoring.** A puzzle-time pass picks an escalation tier (invisible / checkbox / hard PoW / 429 block) and issues a proof-of-work puzzle at a tier-adjusted difficulty. A verify-time pass re-scores after submit using time-on-page, cookie age, honeypot, and behavioural telemetry, returning `pass` / `shadow_fail` / `block`.
 - **Pluggable signals.** Rate, header anomaly, IP reputation (CIDR list), cookie age (HMAC-signed `__captcha_trust`), and TLS fingerprint (read from a trusted reverse-proxy header). The fingerprinting signals are opt-in via `FULL_FINGERPRINT_MODE=1`; the default posture is rate + honeypot + time-on-page + PoW only.
 - **Drop-in browser widget.** `static/captcha-widget.js` mounts on a `<div data-sitekey="…">`, runs the PoW in a Web Worker, and posts a token into your form. SHA-256 uses `crypto.subtle`; Argon2id uses a vendored hash-wasm build.
 - **Validation dashboard.** Optional SQLite-backed decision log with a vanilla-JS admin UI for inspecting puzzle/verify sessions.
@@ -67,15 +67,15 @@ COOKIE_SECURE=true
 
 The widget evaluates its risk tier once on mount (matching Turnstile / hCaptcha behaviour), solves the PoW off-thread, and writes the resulting token into a hidden `<input name="captcha-token">` on submit. Your backend then calls `POST /v1/verify` with the site secret to confirm.
 
-> **Token contract:** The widget writes a single **opaque token** (like Turnstile / hCaptcha) into the hidden input. Your form handler forwards it verbatim as `{"token": "<value>"}` in the `/v1/verify` body — no parsing required. The server unpacks the challenge id, nonce (or `text_answer` for visual challenges), honeypot, and behaviour from inside the token. Dwell time is **not** carried in the token; it's derived server-side from the challenge's issuance timestamp, so a client can't claim a longer dwell than actually elapsed. Server-to-server callers that build the request themselves may instead send the explicit fields (`challenge_id` + `nonce`/`text_answer`, optional `honeypot`/`behavior`).
+> **Token contract:** The widget writes a single **opaque token** (like Turnstile / hCaptcha) into the hidden input. Your form handler forwards it verbatim as `{"token": "<value>"}` in the `/v1/verify` body — no parsing required. The server unpacks the challenge id, PoW nonce, honeypot, and behaviour from inside the token. Dwell time is **not** carried in the token; it's derived server-side from the challenge's issuance timestamp, so a client can't claim a longer dwell than actually elapsed. Server-to-server callers that build the request themselves may instead send the explicit fields (`challenge_id` + `nonce`, optional `honeypot`/`behavior`).
 
 ## API
 
 | Endpoint | Auth | Purpose |
 |---|---|---|
 | `POST /v1/sites` | Bearer (`ADMIN_TOKEN`) | Register a site. Returns `{ site_key, secret_key }`. Returns 404 when `ADMIN_TOKEN` is unset. |
-| `GET /v1/puzzle?site_key=<uuid>` | None | Score the request and issue a puzzle. Returns `kind=pow` for tiers up to `hard_pow`, `kind=image` (base64 PNG) for `visual_challenge`, or `429` for `block`. May set the `__captcha_trust` cookie. |
-| `POST /v1/verify` | Bearer (site secret) | Verify a solution. Body: either the opaque `token` from the widget, or explicit `challenge_id` plus `nonce` (for `kind=pow`) / `text_answer` (for `kind=image`) with optional `honeypot`, `behavior`. Dwell time is derived server-side, not accepted from the client. |
+| `GET /v1/puzzle?site_key=<uuid>` | None | Score the request and issue a PoW puzzle (`algorithm`/`prefix`/`difficulty`) for any non-block tier, or `429` for `block`. May set the `__captcha_trust` cookie. |
+| `POST /v1/verify` | Bearer (site secret) | Verify a solution. Body: either the opaque `token` from the widget, or explicit `challenge_id` plus `nonce`, with optional `honeypot`, `behavior`. Dwell time is derived server-side, not accepted from the client. |
 | `GET /healthz` | None | Liveness probe. Always returns `200 ok`. |
 | `GET /v1/admin/sessions[/:id]` | Bearer (`ADMIN_TOKEN`) | Decision log read API. Mounted only when `ADMIN_DB_PATH` is set. |
 | `GET /v1/admin/stats` | Bearer (`ADMIN_TOKEN`) | Aggregate decision-log stats (counts, tier/decision breakdowns) for the dashboard. |
@@ -92,7 +92,7 @@ Everything is env-var driven and every setting has a default — `cargo run` wor
 - `LISTEN_ADDR` (default `0.0.0.0:3000`), `RUST_LOG` (default `info`)
 - `PUZZLE_ALGORITHM` — `sha256` (default) or `argon2id`. With Argon2id, drop `DEFAULT_DIFFICULTY` to `4`–`6` and tune `ARGON2_M_COST` / `ARGON2_T_COST` / `ARGON2_P_COST`.
 - `DEFAULT_DIFFICULTY` / `MIN_DIFFICULTY` / `MAX_DIFFICULTY` — PoW difficulty in leading zero bits (`18` / `16` / `28`).
-- `TIER_CHECKBOX_MIN` / `TIER_HARD_POW_MIN` / `TIER_VISUAL_MIN` / `TIER_BLOCK_MIN` — puzzle-time score → tier thresholds.
+- `TIER_CHECKBOX_MIN` / `TIER_HARD_POW_MIN` / `TIER_BLOCK_MIN` — puzzle-time score → tier thresholds.
 - `VERIFY_SHADOW_MIN` / `VERIFY_BLOCK_MIN` — verify-time score thresholds.
 - `FULL_FINGERPRINT_MODE=1` — opt in to header anomaly, IP reputation, cookie age, TLS fingerprint, and behaviour signals. Off by default; enabling this changes your GDPR / ePrivacy posture (cookie consent, fingerprinting disclosure, DPIA).
 - Optional signal inputs (off until configured): `IP_REPUTATION_FILE`, `COOKIE_SIGNING_SECRET` (+ `COOKIE_SECURE`), `TLS_FINGERPRINT_HEADER` (+ `TLS_FINGERPRINT_FILE`, `TRUSTED_PROXIES`).
@@ -131,8 +131,8 @@ static/        Embeddable widget, Web Worker, admin UI, test harness
 
 Two passes bracket every successful solve:
 
-1. **Puzzle-time** (`GET /v1/puzzle`): score the request, pick an `EscalationTier`, issue a PoW puzzle (or an image-text challenge for the `VisualChallenge` tier) at a tier-adjusted difficulty, or return `429` for `Block`.
-2. **Verify-time** (`POST /v1/verify`): after the puzzle check passes (PoW nonce or visual text), re-score using submit-only signals and return `Pass` / `ShadowFail` (success + WARN log) / `Block`.
+1. **Puzzle-time** (`GET /v1/puzzle`): score the request, pick an `EscalationTier`, issue a PoW puzzle at a tier-adjusted difficulty, or return `429` for `Block`.
+2. **Verify-time** (`POST /v1/verify`): after the PoW check passes, re-score using submit-only signals and return `Pass` / `ShadowFail` (success + WARN log) / `Block`.
 
 Challenges are single-use and deleted after a successful PoW verification — even if the verify-time decision is `Block`.
 

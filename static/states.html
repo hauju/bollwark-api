@@ -88,7 +88,6 @@
     .tier-invisible_pass   { background: #d4edda; color: #155724; }
     .tier-checkbox         { background: #fff3cd; color: #856404; }
     .tier-hard_pow         { background: #ffe5cc; color: #cc5500; }
-    .tier-visual_challenge { background: #f8d7da; color: #721c24; }
     .tier-block            { background: #721c24; color: #fff; }
     .stage {
       background: #fafafa;
@@ -106,8 +105,7 @@
       font-size: 12px;
       min-height: 60px;
     }
-    /* Force the inline-block widget to fill the stage so visual challenge
-       images don't blow out narrower cards. */
+    /* Force the inline-block widget to fill the stage. */
     .stage .rc-captcha {
       width: 100%;
     }
@@ -119,8 +117,8 @@
     <p class="lead">
       Visual reference for every tier / state combination the embeddable widget renders.
       The puzzle-time risk score determines the tier; the widget then either runs
-      proof-of-work invisibly, prompts the visitor to click a checkbox, presents an
-      image-text challenge, or surfaces a blocked message.
+      proof-of-work invisibly, prompts the visitor to click a checkbox, or surfaces
+      a blocked message.
     </p>
 
     <h2>Default mode <span class="mode-tag">data-mode unset</span></h2>
@@ -253,79 +251,6 @@
         </div>
       </div>
 
-      <!-- ── visual_challenge ── -->
-      <div class="card">
-        <div class="card-head">
-          <span class="card-title">Visual challenge — idle</span>
-          <span class="tier-pill tier-visual_challenge">visual_challenge</span>
-        </div>
-        <p class="card-desc">
-          Score crossed <code>TIER_VISUAL_MIN</code>. Server returns a 5-character image-text
-          captcha (220×60 PNG); checkbox row is hidden.
-        </p>
-        <div class="stage">
-          <div class="rc-captcha">
-            <div class="rc-captcha-row" style="display:none;">
-              <div class="rc-captcha-checkbox"></div>
-              <span class="rc-captcha-label">I'm not a robot</span>
-            </div>
-            <div class="rc-captcha-visual">
-              <div class="rc-captcha-visual-prompt">Type the characters you see:</div>
-              <img class="rc-captcha-visual-image" alt="captcha" src="data:image/svg+xml;utf8,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 220 60'&gt;&lt;rect width='220' height='60' fill='%23f3f3f3'/&gt;&lt;g font-family='Georgia,serif' font-size='30' font-weight='700' fill='%23222'&gt;&lt;text x='18' y='42' transform='rotate(-12 33 42)'&gt;A&lt;/text&gt;&lt;text x='58' y='44' transform='rotate(8 73 44)'&gt;b&lt;/text&gt;&lt;text x='95' y='40' transform='rotate(-5 110 40)'&gt;7&lt;/text&gt;&lt;text x='135' y='44' transform='rotate(14 150 44)'&gt;K&lt;/text&gt;&lt;text x='178' y='41' transform='rotate(-9 193 41)'&gt;9&lt;/text&gt;&lt;/g&gt;&lt;path d='M5 30 Q60 8 110 32 T215 28' stroke='%23999' stroke-width='1.4' fill='none'/&gt;&lt;path d='M0 50 Q70 60 140 44 T220 50' stroke='%23bbb' stroke-width='1.2' fill='none'/&gt;&lt;/svg&gt;">
-              <form class="rc-captcha-visual-form" onsubmit="event.preventDefault();">
-                <input type="text" class="rc-captcha-visual-input" placeholder="ABCDE" autocomplete="off" spellcheck="false">
-                <button type="submit" class="rc-captcha-visual-button">Verify</button>
-              </form>
-            </div>
-            <div class="rc-captcha-status"></div>
-            <div class="rc-captcha-footer">
-              <span class="rc-captcha-brand">
-                <a class="rc-captcha-brand-name" href="#">RustCaptcha</a>
-                <span class="rc-captcha-brand-links">
-                  <a href="#">Privacy</a> · <a href="#">Terms</a>
-                </span>
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-head">
-          <span class="card-title">Visual challenge — submitting</span>
-          <span class="tier-pill tier-visual_challenge">visual_challenge</span>
-        </div>
-        <p class="card-desc">
-          Visitor typed an answer and clicked <em>Verify</em>. Form locks while the host page
-          posts to <code>/v1/verify</code>.
-        </p>
-        <div class="stage">
-          <div class="rc-captcha">
-            <div class="rc-captcha-row" style="display:none;">
-              <div class="rc-captcha-checkbox"></div>
-              <span class="rc-captcha-label">I'm not a robot</span>
-            </div>
-            <div class="rc-captcha-visual">
-              <div class="rc-captcha-visual-prompt">Type the characters you see:</div>
-              <img class="rc-captcha-visual-image" alt="captcha" src="data:image/svg+xml;utf8,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 220 60'&gt;&lt;rect width='220' height='60' fill='%23f3f3f3'/&gt;&lt;g font-family='Georgia,serif' font-size='30' font-weight='700' fill='%23222'&gt;&lt;text x='18' y='42' transform='rotate(-12 33 42)'&gt;A&lt;/text&gt;&lt;text x='58' y='44' transform='rotate(8 73 44)'&gt;b&lt;/text&gt;&lt;text x='95' y='40' transform='rotate(-5 110 40)'&gt;7&lt;/text&gt;&lt;text x='135' y='44' transform='rotate(14 150 44)'&gt;K&lt;/text&gt;&lt;text x='178' y='41' transform='rotate(-9 193 41)'&gt;9&lt;/text&gt;&lt;/g&gt;&lt;path d='M5 30 Q60 8 110 32 T215 28' stroke='%23999' stroke-width='1.4' fill='none'/&gt;&lt;path d='M0 50 Q70 60 140 44 T220 50' stroke='%23bbb' stroke-width='1.2' fill='none'/&gt;&lt;/svg&gt;">
-              <form class="rc-captcha-visual-form" onsubmit="event.preventDefault();">
-                <input type="text" class="rc-captcha-visual-input" value="ab7k9" disabled>
-                <button type="submit" class="rc-captcha-visual-button" disabled>Verify</button>
-              </form>
-            </div>
-            <div class="rc-captcha-status">Submitting answer…</div>
-            <div class="rc-captcha-footer">
-              <span class="rc-captcha-brand">
-                <a class="rc-captcha-brand-name" href="#">RustCaptcha</a>
-                <span class="rc-captcha-brand-links">
-                  <a href="#">Privacy</a> · <a href="#">Terms</a>
-                </span>
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-
       <!-- ── block ── -->
       <div class="card">
         <div class="card-head">
@@ -442,40 +367,6 @@
         </div>
       </div>
 
-      <div class="card">
-        <div class="card-head">
-          <span class="card-title">Promoted to visual</span>
-          <span class="tier-pill tier-visual_challenge">visual_challenge</span>
-        </div>
-        <p class="card-desc">
-          Server returned an image-text challenge; the widget materialises the image + input UI.
-        </p>
-        <div class="stage">
-          <div class="rc-captcha">
-            <div class="rc-captcha-row" style="display:none;">
-              <div class="rc-captcha-checkbox"></div>
-              <span class="rc-captcha-label">I'm not a robot</span>
-            </div>
-            <div class="rc-captcha-visual">
-              <div class="rc-captcha-visual-prompt">Type the characters you see:</div>
-              <img class="rc-captcha-visual-image" alt="captcha" src="data:image/svg+xml;utf8,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 220 60'&gt;&lt;rect width='220' height='60' fill='%23f3f3f3'/&gt;&lt;g font-family='Georgia,serif' font-size='30' font-weight='700' fill='%23222'&gt;&lt;text x='18' y='42' transform='rotate(-12 33 42)'&gt;A&lt;/text&gt;&lt;text x='58' y='44' transform='rotate(8 73 44)'&gt;b&lt;/text&gt;&lt;text x='95' y='40' transform='rotate(-5 110 40)'&gt;7&lt;/text&gt;&lt;text x='135' y='44' transform='rotate(14 150 44)'&gt;K&lt;/text&gt;&lt;text x='178' y='41' transform='rotate(-9 193 41)'&gt;9&lt;/text&gt;&lt;/g&gt;&lt;path d='M5 30 Q60 8 110 32 T215 28' stroke='%23999' stroke-width='1.4' fill='none'/&gt;&lt;path d='M0 50 Q70 60 140 44 T220 50' stroke='%23bbb' stroke-width='1.2' fill='none'/&gt;&lt;/svg&gt;">
-              <form class="rc-captcha-visual-form" onsubmit="event.preventDefault();">
-                <input type="text" class="rc-captcha-visual-input" placeholder="ABCDE" autocomplete="off" spellcheck="false">
-                <button type="submit" class="rc-captcha-visual-button">Verify</button>
-              </form>
-            </div>
-            <div class="rc-captcha-status"></div>
-            <div class="rc-captcha-footer">
-              <span class="rc-captcha-brand">
-                <a class="rc-captcha-brand-name" href="#">RustCaptcha</a>
-                <span class="rc-captcha-brand-links">
-                  <a href="#">Privacy</a> · <a href="#">Terms</a>
-                </span>
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
 
       <div class="card">
         <div class="card-head">

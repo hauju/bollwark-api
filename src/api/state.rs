@@ -60,7 +60,6 @@ pub fn tier_thresholds_from_config(config: &AppConfig) -> TierThresholds {
     TierThresholds {
         checkbox: config.tier_checkbox_min,
         hard_pow: config.tier_hard_pow_min,
-        visual: config.tier_visual_min,
         block: config.tier_block_min,
     }
 }

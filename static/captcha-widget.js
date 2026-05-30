@@ -54,7 +54,6 @@
    *     user interaction:
    *       invisible_pass → silent PoW + onVerify; no UI ever rendered.
    *       checkbox / hard_pow → checkbox UI appears; user clicks.
-   *       visual → image-text UI appears; user types the answer.
    *       block → widget renders nothing. The embedder MUST listen for
    *         the `rustcaptcha:puzzle` event (detail.ok=false) to surface
    *         a failure UX — otherwise the block is silent and the user
@@ -159,8 +158,7 @@
 
         // Invisible mode renders nothing for `invisible_pass` — just runs
         // PoW silently and fires onVerify. Any other tier needs user
-        // interaction (a click, an image-text answer), so promote to the
-        // full visible UI.
+        // interaction (a checkbox click), so promote to the full visible UI.
         if (this.mode === "invisible" && this.tier === "invisible_pass") {
           this._runVerify();
         } else {
@@ -212,7 +210,7 @@
     // Honeypot + (optionally) the visible UI. In invisible mode the visible
     // UI is deferred until `_promoteToInteractiveUI()` — the widget runs
     // silently for the `invisible_pass` tier and only materialises a
-    // checkbox / visual challenge if the server escalates.
+    // checkbox if the server escalates.
     _render() {
       this.container.innerHTML = "";
       this.container.classList.remove("rc-captcha");
@@ -279,7 +277,7 @@
       // Brand footer: clickable name → about, tiny Privacy / Terms links
       // beneath. Mirrors the reCAPTCHA / hCaptcha pattern. Lives in its
       // own persistent footer (not inside `row`) so it stays visible
-      // across every tier state — invisible-pass, visual challenge, and
+      // across every tier state — invisible-pass, checkbox, and
       // block included — which is exactly when the user is most likely
       // to want "why am I seeing this?". Hrefs default to the bundled
       // /static/*.html and are patched by `_applyInfoUrls` once the
@@ -336,13 +334,6 @@
 
     // Branch the visible UI based on the tier the server assigned.
     _renderForTier() {
-      // Visual challenge: server returned an image-text captcha. Hide the
-      // checkbox row and render the image + input UI; the user reads the
-      // characters and types the answer instead of running PoW.
-      if (this.puzzle && this.puzzle.kind === "image") {
-        this._renderVisualChallenge();
-        return;
-      }
       // Default mode shows the same checkbox UI for every pass tier so
       // the visitor can't tell whether the server escalated. The only
       // behavioural difference: invisible_pass auto-runs the worker;
@@ -350,90 +341,6 @@
       this.row.style.display = "";
       this._updateUI();
       if (this.tier === "invisible_pass") this._runVerify();
-    }
-
-    // Render the image-text challenge UI: a captcha PNG, a text input,
-    // and a submit button. The user types what they see; on submit the
-    // widget stores the answer in the form-bound hidden input so the
-    // host page can forward it to /v1/verify exactly like the PoW path.
-    _renderVisualChallenge() {
-      this.row.style.display = "none";
-      this.statusEl.textContent = "";
-
-      // Idempotent: tear down a previous visual UI if `reset()` cycled us.
-      if (this._visualEl) {
-        this._visualEl.remove();
-        this._visualEl = null;
-      }
-
-      const wrap = document.createElement("div");
-      wrap.className = "rc-captcha-visual";
-
-      const prompt = document.createElement("div");
-      prompt.className = "rc-captcha-visual-prompt";
-      prompt.textContent = "Type the characters you see:";
-
-      const img = document.createElement("img");
-      img.className = "rc-captcha-visual-image";
-      img.alt = "captcha";
-      img.src = this.puzzle.image;
-
-      const form = document.createElement("form");
-      form.className = "rc-captcha-visual-form";
-      form.addEventListener("submit", (e) => {
-        e.preventDefault();
-        this._onVisualSubmit();
-      });
-
-      const input = document.createElement("input");
-      input.type = "text";
-      input.className = "rc-captcha-visual-input";
-      input.autocomplete = "off";
-      input.autocapitalize = "off";
-      input.spellcheck = false;
-      input.maxLength = 16;
-      input.placeholder = "ABCDE";
-
-      const button = document.createElement("button");
-      button.type = "submit";
-      button.className = "rc-captcha-visual-button";
-      button.textContent = "Verify";
-
-      form.appendChild(input);
-      form.appendChild(button);
-
-      wrap.appendChild(prompt);
-      wrap.appendChild(img);
-      wrap.appendChild(form);
-
-      // Insert before the status element so debug details stay at the bottom.
-      this.container.insertBefore(wrap, this.statusEl);
-      this._visualEl = wrap;
-      this._visualInput = input;
-      this._visualButton = button;
-      input.focus();
-    }
-
-    _onVisualSubmit() {
-      if (!this.puzzle || !this._visualInput) return;
-      const answer = this._visualInput.value.trim();
-      if (!answer) {
-        this.statusEl.textContent = "Please type the characters above.";
-        return;
-      }
-      this._textAnswer = answer;
-      this.state = "verified";
-      this._visualButton.disabled = true;
-      this._visualInput.disabled = true;
-      this.statusEl.textContent = "Submitting answer…";
-      this._injectToken(this.puzzle.challenge_id, 0);
-      if (this.onVerify) {
-        this.onVerify({
-          challenge_id: this.puzzle.challenge_id,
-          text_answer: answer,
-          tier: this.tier,
-        });
-      }
     }
 
     _renderBlocked(message) {
@@ -659,7 +566,6 @@
         nonce: this._nonce,
         behavior: { ...this._behavior },
       };
-      if (this._textAnswer) payload.text_answer = this._textAnswer;
       const honeypotValue = this.honeypot ? this.honeypot.value : "";
       if (honeypotValue) payload.honeypot = honeypotValue;
       // Hex-encode the JSON so the form host treats it as an opaque token and
@@ -672,13 +578,6 @@
     reset() {
       this._destroyWorker();
       this._teardownBehaviorListeners();
-      if (this._visualEl) {
-        this._visualEl.remove();
-        this._visualEl = null;
-        this._visualInput = null;
-        this._visualButton = null;
-      }
-      this._textAnswer = null;
       this.state = "idle";
       this.puzzle = null;
       this.tier = null;

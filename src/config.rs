@@ -27,7 +27,6 @@ pub struct AppConfig {
     pub cleanup_interval_secs: u64,
     pub tier_checkbox_min: u32,
     pub tier_hard_pow_min: u32,
-    pub tier_visual_min: u32,
     pub tier_block_min: u32,
     /// Path to a CIDR reputation file. If unset, the IP reputation signal contributes 0.
     pub ip_reputation_file: Option<String>,
@@ -134,10 +133,6 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(40),
-            tier_visual_min: env::var("TIER_VISUAL_MIN")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(65),
             tier_block_min: env::var("TIER_BLOCK_MIN")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -226,7 +221,6 @@ impl Default for AppConfig {
             cleanup_interval_secs: 60,
             tier_checkbox_min: 20,
             tier_hard_pow_min: 40,
-            tier_visual_min: 65,
             tier_block_min: 85,
             ip_reputation_file: None,
             cookie_signing_secret: None,

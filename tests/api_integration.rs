@@ -68,12 +68,6 @@ struct TestAppBuilder {
     /// Set to `Some(None)` to disable the token entirely (so `/v1/sites`
     /// returns 404).
     admin_token: Option<Option<&'static str>>,
-    /// Override TIER_VISUAL_MIN; lets a test force every request into the
-    /// VisualChallenge tier by setting this to 0.
-    tier_visual_min: Option<u32>,
-    /// Override TIER_BLOCK_MIN; pair with `tier_visual_min: 0` to keep
-    /// requests pinned in the visual band rather than tipping into Block.
-    tier_block_min: Option<u32>,
 }
 
 const TEST_ADMIN_TOKEN: &str = "test-admin-token-32bytes-of-entropy";
@@ -93,7 +87,7 @@ impl TestAppBuilder {
             Algorithm::Sha256 => 8,
             Algorithm::Argon2id(_) => 4,
         };
-        let mut config = AppConfig {
+        let config = AppConfig {
             puzzle_algorithm: algorithm,
             default_difficulty,
             min_difficulty: 1,
@@ -102,12 +96,6 @@ impl TestAppBuilder {
             tls_fingerprint_header: self.tls_header.map(String::from),
             ..AppConfig::default()
         };
-        if let Some(v) = self.tier_visual_min {
-            config.tier_visual_min = v;
-        }
-        if let Some(b) = self.tier_block_min {
-            config.tier_block_min = b;
-        }
         let puzzle_config = PuzzleConfig {
             algorithm: config.puzzle_algorithm,
             default_difficulty: config.default_difficulty,
@@ -240,54 +228,6 @@ async fn get_test_puzzle(
 }
 
 // --- Tests ---
-
-#[tokio::test]
-async fn test_visual_challenge_full_flow() {
-    use rust_captcha::puzzle::types::ChallengeKind;
-
-    // Force every request into the VisualChallenge tier (visual=0, block
-    // moved out of reach so a high score doesn't tip past it).
-    let app = test_app_with(|b| {
-        b.tier_visual_min = Some(0);
-        b.tier_block_min = Some(1000);
-    });
-    let site = create_test_site(&app).await;
-
-    let (status, puzzle) = get_test_puzzle(&app, &site.site_key.to_string()).await;
-    assert_eq!(status, StatusCode::OK);
-    let puzzle = puzzle.unwrap();
-    assert_eq!(puzzle.tier, EscalationTier::VisualChallenge);
-    assert_eq!(puzzle.kind, ChallengeKind::Image);
-    assert!(
-        puzzle
-            .image
-            .as_deref()
-            .is_some_and(|s| s.starts_with("data:image/"))
-    );
-
-    // We can't OCR the captcha from the test, so bypass the engine via
-    // a wrong-answer round-trip: server should reject and not consume
-    // the challenge, then the same id can still be looked up. The
-    // happy-path verification is unit-tested in puzzle::challenge.
-    let verify_body = serde_json::json!({
-        "challenge_id": puzzle.challenge_id,
-        "text_answer": "definitely-not-the-answer",
-    });
-    let req = Request::builder()
-        .method("POST")
-        .uri("/v1/verify")
-        .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {}", site.secret_key))
-        .body(Body::from(serde_json::to_vec(&verify_body).unwrap()))
-        .unwrap();
-    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let result: VerifyResponse = serde_json::from_slice(&body).unwrap();
-    assert!(!result.success, "wrong text answer should fail to verify");
-}
 
 #[tokio::test]
 async fn test_full_flow() {
@@ -688,7 +628,7 @@ async fn test_spammed_ip_with_clean_headers_escalates_to_checkbox() {
 }
 
 #[tokio::test]
-async fn test_spam_plus_suspicious_ua_serves_visual_challenge() {
+async fn test_spam_plus_suspicious_ua_serves_hard_pow() {
     let app = test_app();
     let site = create_test_site(&app).await;
     let key = site.site_key.to_string();
@@ -704,19 +644,16 @@ async fn test_spam_plus_suspicious_ua_serves_visual_challenge() {
     // Now send a request with curl UA and no language/encoding:
     //   header_anomaly = 25 (UA) + 10 (lang) + 10 (enc) = 45
     //   rate = 30
-    //   total = 75 → VisualChallenge band (>=65), which now serves an
-    //   image-text captcha instead of returning 429.
+    //   total = 75 → HardPow band (>=40, <85). The old VisualChallenge band
+    //   folded into HardPow, so this serves a harder PoW (no image-text).
     let bad = puzzle_request(&key, Some("curl/8.0"), None, None);
     let (status, puzzle) = send_puzzle(&app, with_connect_info_ip(bad, attacker_ip)).await;
     assert_eq!(status, StatusCode::OK);
-    let puzzle = puzzle.expect("VisualChallenge tier returns a puzzle");
-    assert_eq!(puzzle.tier, EscalationTier::VisualChallenge);
-    assert_eq!(
-        puzzle.kind,
-        rust_captcha::puzzle::types::ChallengeKind::Image
-    );
-    let image = puzzle.image.as_deref().expect("image data url present");
-    assert!(image.starts_with("data:image/"));
+    let puzzle = puzzle.expect("HardPow tier returns a puzzle");
+    assert_eq!(puzzle.tier, EscalationTier::HardPow);
+    // Difficulty bump for HardPow in tier::difficulty_for is +4 (base 8 → 12).
+    assert_eq!(puzzle.difficulty, 12);
+    assert!(!puzzle.prefix.is_empty(), "PoW challenge carries a prefix");
 }
 
 #[tokio::test]

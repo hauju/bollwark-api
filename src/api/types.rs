@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::CaptchaError;
-use crate::puzzle::types::{Algorithm, ChallengeKind};
+use crate::puzzle::types::Algorithm;
 use crate::risk::{BehaviorReport, EscalationTier};
 
 // --- Requests ---
@@ -19,8 +19,8 @@ pub struct GetPuzzleParams {
 ///    no parsing required. When present it is the sole source of truth and the
 ///    explicit fields below are ignored.
 /// 2. **Explicit fields** (server-to-server path): `challenge_id` plus
-///    `nonce`/`text_answer` and optional `honeypot`/`behavior`, for callers
-///    that build the request themselves.
+///    `nonce` and optional `honeypot`/`behavior`, for callers that build the
+///    request themselves.
 ///
 /// Note there is no `time_on_page_ms`: dwell time is derived server-side from
 /// the challenge's issuance timestamp, so a client can't claim a longer dwell
@@ -34,15 +34,9 @@ pub struct VerifyRequest {
     /// Required when `token` is absent.
     #[serde(default)]
     pub challenge_id: Option<Uuid>,
-    /// PoW nonce. Required for `kind=pow` challenges; ignored for
-    /// `kind=image` (defaults to 0 so visual-only clients don't need to
-    /// send a placeholder).
+    /// PoW nonce.
     #[serde(default)]
     pub nonce: u64,
-    /// User-typed answer for visual (image-text) challenges. Required when
-    /// the challenge is `kind=image`; ignored for `kind=pow`.
-    #[serde(default)]
-    pub text_answer: Option<String>,
     #[serde(default)]
     pub honeypot: Option<String>,
     /// Compact behavioural telemetry collected by the widget between mount
@@ -59,8 +53,6 @@ struct TokenPayload {
     #[serde(default)]
     nonce: u64,
     #[serde(default)]
-    text_answer: Option<String>,
-    #[serde(default)]
     honeypot: Option<String>,
     #[serde(default)]
     behavior: Option<BehaviorReport>,
@@ -72,7 +64,6 @@ struct TokenPayload {
 pub struct ResolvedVerify {
     pub challenge_id: Uuid,
     pub nonce: u64,
-    pub text_answer: Option<String>,
     pub honeypot: Option<String>,
     pub behavior: Option<BehaviorReport>,
 }
@@ -89,7 +80,6 @@ impl VerifyRequest {
             Ok(ResolvedVerify {
                 challenge_id: p.challenge_id,
                 nonce: p.nonce,
-                text_answer: p.text_answer,
                 honeypot: p.honeypot,
                 behavior: p.behavior,
             })
@@ -100,7 +90,6 @@ impl VerifyRequest {
             Ok(ResolvedVerify {
                 challenge_id,
                 nonce: self.nonce,
-                text_answer: self.text_answer,
                 honeypot: self.honeypot,
                 behavior: self.behavior,
             })
@@ -134,19 +123,9 @@ impl InfoUrls {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PuzzleResponse {
     pub challenge_id: Uuid,
-    /// Discriminator for the puzzle type. `pow` (default for backward-compat)
-    /// uses `algorithm`/`prefix`/`difficulty` and is solved by the worker;
-    /// `image` uses `image` (a base64 PNG data URL) and is solved by the
-    /// user reading and typing the characters.
-    #[serde(default)]
-    pub kind: ChallengeKind,
     pub algorithm: Algorithm,
     pub prefix: String,
     pub difficulty: u32,
-    /// Base64 PNG data URL of a visual challenge. Present only when
-    /// `kind == image`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image: Option<String>,
     pub expires_at: String,
     pub tier: EscalationTier,
     /// Operator-overridden URLs for the about/privacy/terms pages, when

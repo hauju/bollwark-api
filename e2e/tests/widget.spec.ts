@@ -124,7 +124,7 @@ test("rate spam pushes tier toward HardPow / 429", async ({ page }) => {
     .allTextContents();
 
   const escalated = tiers.some((t) =>
-    ["hard_pow", "checkbox", "block", "blocked-429", "visual_challenge"].includes(
+    ["hard_pow", "checkbox", "block", "blocked-429"].includes(
       t.trim(),
     ),
   );
