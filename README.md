@@ -67,7 +67,7 @@ COOKIE_SECURE=true
 
 The widget evaluates its risk tier once on mount (matching Turnstile / hCaptcha behaviour), solves the PoW off-thread, and writes the resulting token into a hidden `<input name="captcha-token">` on submit. Your backend then calls `POST /v1/verify` with the site secret to confirm.
 
-> **Token contract:** Unlike Turnstile/hCaptcha which return an opaque string, this widget writes a **JSON blob** of the form `{"challenge_id": "...", "nonce": 12345, "time_on_page_ms": 4200, "behavior": {...}, "honeypot": ""}` into the hidden input — or, for visual-tier challenges, `{"challenge_id": "...", "text_answer": "abcde", ...}` (no `nonce`). Your form handler must `JSON.parse` it server-side and forward the fields verbatim in the `/v1/verify` body.
+> **Token contract:** The widget writes a single **opaque token** (like Turnstile / hCaptcha) into the hidden input. Your form handler forwards it verbatim as `{"token": "<value>"}` in the `/v1/verify` body — no parsing required. The server unpacks the challenge id, nonce (or `text_answer` for visual challenges), honeypot, and behaviour from inside the token. Dwell time is **not** carried in the token; it's derived server-side from the challenge's issuance timestamp, so a client can't claim a longer dwell than actually elapsed. Server-to-server callers that build the request themselves may instead send the explicit fields (`challenge_id` + `nonce`/`text_answer`, optional `honeypot`/`behavior`).
 
 ## API
 
@@ -75,7 +75,7 @@ The widget evaluates its risk tier once on mount (matching Turnstile / hCaptcha 
 |---|---|---|
 | `POST /v1/sites` | Bearer (`ADMIN_TOKEN`) | Register a site. Returns `{ site_key, secret_key }`. Returns 404 when `ADMIN_TOKEN` is unset. |
 | `GET /v1/puzzle?site_key=<uuid>` | None | Score the request and issue a puzzle. Returns `kind=pow` for tiers up to `hard_pow`, `kind=image` (base64 PNG) for `visual_challenge`, or `429` for `block`. May set the `__captcha_trust` cookie. |
-| `POST /v1/verify` | Bearer (site secret) | Verify a solution. Body: `challenge_id` plus either `nonce` (for `kind=pow`) or `text_answer` (for `kind=image`). Optional `honeypot`, `time_on_page_ms`, `behavior`. |
+| `POST /v1/verify` | Bearer (site secret) | Verify a solution. Body: either the opaque `token` from the widget, or explicit `challenge_id` plus `nonce` (for `kind=pow`) / `text_answer` (for `kind=image`) with optional `honeypot`, `behavior`. Dwell time is derived server-side, not accepted from the client. |
 | `GET /healthz` | None | Liveness probe. Always returns `200 ok`. |
 | `GET /v1/admin/sessions[/:id]` | Bearer (`ADMIN_TOKEN`) | Decision log read API. Mounted only when `ADMIN_DB_PATH` is set. |
 | `GET /v1/admin/stats` | Bearer (`ADMIN_TOKEN`) | Aggregate decision-log stats (counts, tier/decision breakdowns) for the dashboard. |

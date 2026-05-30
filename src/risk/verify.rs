@@ -67,9 +67,9 @@ pub const HONEYPOT_TRIPPED_SCORE: u32 = 100;
 
 // Time-on-page bands. Anything under 500ms is essentially impossible for a
 // human (no time to read the form, let alone fill it). 500ms–2s is suspicious.
-// The widget needs at least the PoW solve time, but we deliberately don't
-// account for that here — the scoring assumes the client's `page_load_at`
-// is set at widget mount, before solving.
+// The handler derives this value server-side as `now - challenge.created_at`
+// (issuance ≈ widget mount), so it's the true elapsed time including PoW solve
+// — not a client-reported figure a bot could inflate.
 pub const TIME_VERY_SHORT_MS: u64 = 500;
 pub const TIME_SHORT_MS: u64 = 2_000;
 pub const TIME_VERY_SHORT_SCORE: u32 = 50;

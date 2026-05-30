@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::error::CaptchaError;
 use crate::puzzle::types::{Algorithm, ChallengeKind};
 use crate::risk::{BehaviorReport, EscalationTier};
 
@@ -11,9 +12,28 @@ pub struct GetPuzzleParams {
     pub site_key: Uuid,
 }
 
+/// Verify request. Two shapes are accepted:
+///
+/// 1. **Opaque token** (the widget path): a single `token` string the widget
+///    wrote into the hidden form field. The form host forwards it verbatim —
+///    no parsing required. When present it is the sole source of truth and the
+///    explicit fields below are ignored.
+/// 2. **Explicit fields** (server-to-server path): `challenge_id` plus
+///    `nonce`/`text_answer` and optional `honeypot`/`behavior`, for callers
+///    that build the request themselves.
+///
+/// Note there is no `time_on_page_ms`: dwell time is derived server-side from
+/// the challenge's issuance timestamp, so a client can't claim a longer dwell
+/// than actually elapsed.
 #[derive(Debug, Deserialize)]
 pub struct VerifyRequest {
-    pub challenge_id: Uuid,
+    /// Opaque token produced by the widget (hex-encoded JSON). Takes
+    /// precedence over the explicit fields when present.
+    #[serde(default)]
+    pub token: Option<String>,
+    /// Required when `token` is absent.
+    #[serde(default)]
+    pub challenge_id: Option<Uuid>,
     /// PoW nonce. Required for `kind=pow` challenges; ignored for
     /// `kind=image` (defaults to 0 so visual-only clients don't need to
     /// send a placeholder).
@@ -25,14 +45,67 @@ pub struct VerifyRequest {
     pub text_answer: Option<String>,
     #[serde(default)]
     pub honeypot: Option<String>,
-    /// Milliseconds elapsed between widget mount and form submit. Optional —
-    /// callers that don't use the bundled widget may not send this.
-    #[serde(default)]
-    pub time_on_page_ms: Option<u64>,
     /// Compact behavioural telemetry collected by the widget between mount
     /// and submit. Absent for non-widget integrations.
     #[serde(default)]
     pub behavior: Option<BehaviorReport>,
+}
+
+/// Inner payload carried by the opaque `token`. The widget hex-encodes the
+/// JSON form of this so the form host treats it as an opaque blob.
+#[derive(Debug, Deserialize)]
+struct TokenPayload {
+    challenge_id: Uuid,
+    #[serde(default)]
+    nonce: u64,
+    #[serde(default)]
+    text_answer: Option<String>,
+    #[serde(default)]
+    honeypot: Option<String>,
+    #[serde(default)]
+    behavior: Option<BehaviorReport>,
+}
+
+/// Normalised verify fields after resolving either the opaque token or the
+/// explicit body. `time_on_page_ms` is deliberately not here — it's computed
+/// server-side from the challenge's `created_at`.
+pub struct ResolvedVerify {
+    pub challenge_id: Uuid,
+    pub nonce: u64,
+    pub text_answer: Option<String>,
+    pub honeypot: Option<String>,
+    pub behavior: Option<BehaviorReport>,
+}
+
+impl VerifyRequest {
+    /// Resolve into the normalised fields. Decodes the opaque token when
+    /// present, otherwise falls back to the explicit fields.
+    pub fn resolve(self) -> Result<ResolvedVerify, CaptchaError> {
+        if let Some(token) = self.token.as_deref() {
+            let bytes = hex::decode(token.trim())
+                .map_err(|_| CaptchaError::BadRequest("invalid captcha token".into()))?;
+            let p: TokenPayload = serde_json::from_slice(&bytes)
+                .map_err(|_| CaptchaError::BadRequest("invalid captcha token".into()))?;
+            Ok(ResolvedVerify {
+                challenge_id: p.challenge_id,
+                nonce: p.nonce,
+                text_answer: p.text_answer,
+                honeypot: p.honeypot,
+                behavior: p.behavior,
+            })
+        } else {
+            let challenge_id = self.challenge_id.ok_or_else(|| {
+                CaptchaError::BadRequest("challenge_id or token is required".into())
+            })?;
+            Ok(ResolvedVerify {
+                challenge_id,
+                nonce: self.nonce,
+                text_answer: self.text_answer,
+                honeypot: self.honeypot,
+                behavior: self.behavior,
+            })
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

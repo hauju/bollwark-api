@@ -47,7 +47,7 @@ Self-hostable proof-of-work CAPTCHA service. Clients solve SHA-256 puzzles (find
 Two scoring passes bracket every successful solve:
 
 1. **Puzzle-time** (`GET /v1/puzzle`): score the request, pick an `EscalationTier`, then either issue a PoW puzzle at a tier-adjusted difficulty, issue an image-text (visual) challenge for the `VisualChallenge` tier, or short-circuit with `429` for the `Block` tier.
-2. **Verify-time** (`POST /v1/verify`): after the puzzle check passes (PoW nonce or visual text), run a second scoring pass on signals only available at submit (time-on-page, cookie age now, honeypot, behavioural telemetry). Decision is `Pass` / `ShadowFail` (return `success: true` but emit a WARN log) / `Block` (return `success: false`).
+2. **Verify-time** (`POST /v1/verify`): after the puzzle check passes (PoW nonce or visual text), run a second scoring pass on signals only available at submit (time-on-page — derived server-side as `now - challenge.created_at`, not client-reported — cookie age now, honeypot, behavioural telemetry). Decision is `Pass` / `ShadowFail` (return `success: true` but emit a WARN log) / `Block` (return `success: false`).
 
 ### Module Layout
 
@@ -74,7 +74,7 @@ Two scoring passes bracket every successful solve:
 | Endpoint | Auth | Purpose |
 |---|---|---|
 | `GET /v1/puzzle?site_key=<uuid>` | None | Score request and issue a puzzle. Returns `kind=pow` (with `algorithm`/`prefix`/`difficulty`) for tiers up to `HardPow`, `kind=image` (with a base64 PNG `image` data URL) for `VisualChallenge`, or `429` for `Block`. May set `__captcha_trust` cookie. |
-| `POST /v1/verify` | Bearer (site secret) | Verify a solution server-to-server. Body fields: `challenge_id`, plus either `nonce` (for `kind=pow`) or `text_answer` (for `kind=image`). Optional `honeypot`, `time_on_page_ms`, `behavior`. |
+| `POST /v1/verify` | Bearer (site secret) | Verify a solution server-to-server. Body is either the widget's opaque `token` (hex-encoded JSON, unpacked by `VerifyRequest::resolve`) or explicit fields: `challenge_id` plus `nonce` (for `kind=pow`) / `text_answer` (for `kind=image`), optional `honeypot`, `behavior`. Time-on-page is derived server-side from `challenge.created_at`, never trusted from the client. |
 | `POST /v1/sites` | Bearer (`ADMIN_TOKEN`) | Register a site, returns site_key + secret. Returns 404 when `ADMIN_TOKEN` is unset. |
 | `GET /healthz` | None | Liveness probe. Returns `200 ok`. |
 | `GET /v1/admin/sessions` | Bearer (`ADMIN_TOKEN`) | List recent puzzle/verify sessions for the dashboard. Only mounted when `ADMIN_DB_PATH` is set. |

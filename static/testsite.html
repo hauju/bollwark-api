@@ -442,11 +442,9 @@
       const formData = new FormData(this);
       const data = Object.fromEntries(formData.entries());
 
-      // Parse captcha token
-      let token = null;
-      try {
-        token = JSON.parse(data["captcha-token"] || "null");
-      } catch (_) {}
+      // The widget writes an opaque token into the hidden field. The form
+      // host forwards it verbatim — no parsing of its contents.
+      const token = data["captcha-token"] || null;
 
       const resultSection = document.getElementById("result-section");
       const resultData = document.getElementById("result-data");
@@ -467,14 +465,7 @@
               "Content-Type": "application/json",
               Authorization: "Bearer " + siteSecret,
             },
-            body: JSON.stringify({
-              challenge_id: token.challenge_id,
-              nonce: token.nonce,
-              text_answer: token.text_answer,
-              honeypot: token.honeypot,
-              time_on_page_ms: token.time_on_page_ms,
-              behavior: token.behavior,
-            }),
+            body: JSON.stringify({ token }),
           });
           verification = await resp.json();
         } catch (err) {

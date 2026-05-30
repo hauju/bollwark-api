@@ -5,7 +5,7 @@ This guide shows the full flow for adding rust-captcha to a real application:
 1. Run the CAPTCHA service.
 2. Register your application as a site.
 3. Embed the browser widget in your form.
-4. Parse the widget token in your backend.
+4. Forward the opaque widget token from your backend.
 5. Verify the token server-to-server before accepting the form.
 
 ## 1. Run the Service
@@ -117,77 +117,32 @@ The widget has two modes selected via `data-mode`:
 
 The `rustcaptcha:puzzle` event fires in default mode too if you want to drive your own UI alongside the widget — it bubbles, so a listener on a parent element works.
 
-The widget writes a hidden form field named `captcha-token`. Its value is a JSON string. For PoW-tier challenges (the common case):
+The widget writes a hidden form field named `captcha-token` whose value is a single **opaque token** (a hex string). It already carries everything `/v1/verify` needs — the challenge id, the PoW nonce (or the typed `text_answer` for a visual challenge), the honeypot, and behavioural telemetry. Your backend treats it as a black box: read the field and forward it verbatim. There is nothing to parse.
 
-```json
-{
-  "challenge_id": "00000000-0000-0000-0000-000000000000",
-  "nonce": 123456,
-  "time_on_page_ms": 4200,
-  "behavior": {
-    "mouse_moves": 12,
-    "touches": 0,
-    "interactions": 3,
-    "first_interaction_ms": 800,
-    "webdriver": false
-  }
-}
+```
+a3f1c0...    # opaque; do not parse or depend on its contents
 ```
 
-For visual-tier challenges (image-text), the widget submits `text_answer` instead of `nonce`:
-
-```json
-{
-  "challenge_id": "00000000-0000-0000-0000-000000000000",
-  "text_answer": "abcde",
-  "time_on_page_ms": 4200,
-  "behavior": { "...": "..." }
-}
-```
-
-Your backend must parse this field and forward the values verbatim to `/v1/verify` — including whichever of `nonce` / `text_answer` is present.
+> Dwell time is **not** carried in the token. The server derives it from the challenge's issuance timestamp, so a bot can't claim a longer time-on-page than actually elapsed.
 
 ## 4. Verify on Your Backend
 
 Your form handler should reject the submission if:
 
-- `captcha-token` is missing.
-- `captcha-token` is not valid JSON.
+- `captcha-token` is missing or empty.
 - `/v1/verify` does not return HTTP 200.
 - `/v1/verify` returns `{ "success": false }`.
 
-Request:
+Forward the token verbatim:
 
 ```bash
 curl -s -X POST https://captcha.example.com/v1/verify \
   -H "Authorization: Bearer <SECRET_KEY>" \
   -H "Content-Type: application/json" \
-  -d '{
-    "challenge_id": "00000000-0000-0000-0000-000000000000",
-    "nonce": 123456,
-    "time_on_page_ms": 4200,
-    "behavior": {
-      "mouse_moves": 12,
-      "touches": 0,
-      "interactions": 3,
-      "first_interaction_ms": 800,
-      "webdriver": false
-    }
-  }'
+  -d '{ "token": "<captcha-token value>" }'
 ```
 
-Send `text_answer` instead of `nonce` when the widget produced an image-text token:
-
-```bash
-curl -s -X POST https://captcha.example.com/v1/verify \
-  -H "Authorization: Bearer <SECRET_KEY>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "challenge_id": "00000000-0000-0000-0000-000000000000",
-    "text_answer": "abcde",
-    "time_on_page_ms": 4200
-  }'
-```
+> **Server-to-server callers** that build the request without the widget can send the explicit fields instead of `token`: `challenge_id` plus `nonce` (PoW) or `text_answer` (visual), with optional `honeypot` and `behavior`.
 
 Successful response:
 
@@ -207,16 +162,8 @@ Challenges are single-use. A second submit with the same `challenge_id` will fai
 
 ```js
 app.post("/signup", express.urlencoded({ extended: false }), async (req, res) => {
-  let token;
-  try {
-    token = JSON.parse(req.body["captcha-token"] || "null");
-  } catch {
-    return res.status(400).send("CAPTCHA failed");
-  }
-
-  // Token carries either `nonce` (PoW tiers) or `text_answer` (visual tier).
-  const hasSolution = token.nonce !== undefined || typeof token.text_answer === "string";
-  if (!token || !token.challenge_id || !hasSolution) {
+  const token = req.body["captcha-token"];
+  if (!token) {
     return res.status(400).send("CAPTCHA failed");
   }
 
@@ -226,14 +173,7 @@ app.post("/signup", express.urlencoded({ extended: false }), async (req, res) =>
       "Authorization": `Bearer ${process.env.RUST_CAPTCHA_SECRET_KEY}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      challenge_id: token.challenge_id,
-      nonce: token.nonce,
-      text_answer: token.text_answer,
-      honeypot: token.honeypot,
-      time_on_page_ms: token.time_on_page_ms,
-      behavior: token.behavior,
-    }),
+    body: JSON.stringify({ token }),
   });
 
   if (!verifyResp.ok) {
@@ -256,25 +196,14 @@ app.post("/signup", express.urlencoded({ extended: false }), async (req, res) =>
 use serde::Deserialize;
 
 #[derive(Deserialize)]
-struct CaptchaToken {
-    challenge_id: uuid::Uuid,
-    // Exactly one of `nonce` (PoW tiers) or `text_answer` (visual tier) is present.
-    nonce: Option<u64>,
-    text_answer: Option<String>,
-    honeypot: Option<String>,
-    time_on_page_ms: Option<u64>,
-    behavior: Option<serde_json::Value>,
-}
-
-#[derive(Deserialize)]
 struct VerifyResponse {
     success: bool,
 }
 
-async fn verify_captcha(token_json: &str) -> anyhow::Result<bool> {
-    let token: CaptchaToken = serde_json::from_str(token_json)?;
-
-    if token.nonce.is_none() && token.text_answer.is_none() {
+/// `token` is the opaque value of the hidden `captcha-token` field, forwarded
+/// verbatim — no parsing.
+async fn verify_captcha(token: &str) -> anyhow::Result<bool> {
+    if token.is_empty() {
         return Ok(false);
     }
 
@@ -282,14 +211,7 @@ async fn verify_captcha(token_json: &str) -> anyhow::Result<bool> {
     let resp = client
         .post("https://captcha.example.com/v1/verify")
         .bearer_auth(std::env::var("RUST_CAPTCHA_SECRET_KEY")?)
-        .json(&serde_json::json!({
-            "challenge_id": token.challenge_id,
-            "nonce": token.nonce,
-            "text_answer": token.text_answer,
-            "honeypot": token.honeypot,
-            "time_on_page_ms": token.time_on_page_ms,
-            "behavior": token.behavior,
-        }))
+        .json(&serde_json::json!({ "token": token }))
         .send()
         .await?;
 

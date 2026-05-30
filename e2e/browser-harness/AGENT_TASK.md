@@ -6,7 +6,7 @@ You have access to the browser-harness skill. A captcha-protected registration f
 
 The form is at `http://127.0.0.1:3000/static/testsite.html`. Open it in your harness-controlled Chrome.
 
-The form has three required fields (`#name`, `#email`) plus a captcha widget (`#captcha-widget`). When the captcha verifies, the page sets `<input name="captcha-token">` to a JSON token and the server-side `/v1/verify` is called when the form is submitted.
+The form has three required fields (`#name`, `#email`) plus a captcha widget (`#captcha-widget`). When the captcha verifies, the page sets `<input name="captcha-token">` to an opaque token and the server-side `/v1/verify` is called when the form is submitted.
 
 To "set up" the test site, click `#setup-btn` once — that creates a site key on the server and wires the widget. The button text changes to "Site Created" when ready.
 

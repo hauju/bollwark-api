@@ -255,6 +255,10 @@ pub async fn verify(
     headers: HeaderMap,
     Json(body): Json<VerifyRequest>,
 ) -> Result<Json<VerifyResponse>, CaptchaError> {
+    // Normalise the request: decode the opaque widget token, or take the
+    // explicit fields for server-to-server callers.
+    let req = body.resolve()?;
+
     // Extract and validate bearer token
     let token = headers
         .get(AUTHORIZATION)
@@ -271,7 +275,7 @@ pub async fn verify(
     // Look up challenge
     let challenge = state
         .store
-        .get_challenge(&body.challenge_id)
+        .get_challenge(&req.challenge_id)
         .await?
         .ok_or(CaptchaError::ChallengeNotFound)?;
 
@@ -280,7 +284,8 @@ pub async fn verify(
     }
 
     // Check expiry
-    if challenge.expires_at < chrono::Utc::now() {
+    let verify_at = chrono::Utc::now();
+    if challenge.expires_at < verify_at {
         state.store.delete_challenge(&challenge.id).await?;
         return Err(CaptchaError::ChallengeExpired);
     }
@@ -290,15 +295,21 @@ pub async fn verify(
         return Err(CaptchaError::ChallengeAlreadyUsed);
     }
 
+    // Server-authoritative time-on-page: elapsed since the challenge was
+    // issued (≈ widget mount, since the widget fetches a puzzle on mount).
+    // Derived here rather than trusted from the client, so a bot can't claim
+    // a longer dwell than actually elapsed to dodge the fast-submit penalty.
+    let time_on_page_ms = (verify_at - challenge.created_at).num_milliseconds().max(0) as u64;
+
     // Verify the puzzle. PoW challenges check the nonce against the
     // hash target; image challenges compare the typed text to the
     // server-stored expected answer. The "puzzle invalid" outcome is
     // logged with a kind-aware label so the dashboard can distinguish
     // brute-force misses from typos.
     let (puzzle_valid, invalid_outcome) = match challenge.kind {
-        ChallengeKind::Pow => (state.engine.verify(&challenge, body.nonce), "pow_invalid"),
+        ChallengeKind::Pow => (state.engine.verify(&challenge, req.nonce), "pow_invalid"),
         ChallengeKind::Image => {
-            let answer = body.text_answer.as_deref().unwrap_or("");
+            let answer = req.text_answer.as_deref().unwrap_or("");
             (
                 state.engine.verify_visual(&challenge, answer),
                 "visual_invalid",
@@ -321,7 +332,7 @@ pub async fn verify(
                 outcome: invalid_outcome,
                 score: 0,
                 breakdown: Default::default(),
-                time_on_page_ms: body.time_on_page_ms,
+                time_on_page_ms: Some(time_on_page_ms),
                 cookie_presence: "Unknown".into(),
                 webdriver: "n/a",
                 score_full: 0,
@@ -355,14 +366,14 @@ pub async fn verify(
         CookiePresence::Disabled
     };
 
-    let honeypot_tripped = body.honeypot.as_deref().is_some_and(|s| !s.is_empty());
-    let behavior = match body.behavior {
+    let honeypot_tripped = req.honeypot.as_deref().is_some_and(|s| !s.is_empty());
+    let behavior = match req.behavior {
         Some(report) => BehaviorPresence::Present(report),
         None => BehaviorPresence::Absent,
     };
     let vctx = VerifyContext {
         honeypot_tripped,
-        time_on_page_ms: body.time_on_page_ms,
+        time_on_page_ms: Some(time_on_page_ms),
         cookie,
         behavior,
     };
@@ -396,7 +407,7 @@ pub async fn verify(
     // Surface the raw webdriver flag for log analysis: the aggregate
     // `sig_behavior` score doesn't tell you which sub-signal contributed,
     // and webdriver is the most operationally-interesting one.
-    let webdriver_flag = match body.behavior {
+    let webdriver_flag = match req.behavior {
         Some(b) => match b.webdriver {
             Some(true) => "true",
             Some(false) => "false",
@@ -419,7 +430,7 @@ pub async fn verify(
                 sig_cookie_age = vscore.breakdown.cookie_age,
                 sig_behavior = vscore.breakdown.behavior,
                 webdriver = webdriver_flag,
-                time_on_page_ms = body.time_on_page_ms.unwrap_or(0),
+                time_on_page_ms = time_on_page_ms,
                 cookie_presence = ?cookie,
                 "Verify decision"
             )
@@ -439,7 +450,7 @@ pub async fn verify(
             outcome,
             score: vscore.total,
             breakdown: vscore.breakdown,
-            time_on_page_ms: body.time_on_page_ms,
+            time_on_page_ms: Some(time_on_page_ms),
             cookie_presence: format!("{cookie:?}"),
             webdriver: webdriver_flag,
             score_full: vscore_full.total,

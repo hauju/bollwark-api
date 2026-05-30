@@ -8,6 +8,7 @@ use axum::http::HeaderValue;
 use axum::http::Method;
 use axum::http::StatusCode;
 use axum::http::header;
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use tower::ServiceBuilder;
 use tower_http::cors::{AllowCredentials, AllowOrigin, CorsLayer};
@@ -38,6 +39,10 @@ pub fn router(state: SharedState, admin: Option<AdminState>) -> Router {
         .with_state(state);
 
     let mut app = Router::new()
+        // Marketing landing page at `/`. Static file read on each request —
+        // tiny overhead, lets operators edit `static/landing.html` without
+        // recompiling. Failing to read falls back to a redirect to `/static/`.
+        .route("/", get(landing))
         // Liveness probe for load balancers / orchestrators. No auth, no
         // state read — returns immediately. We deliberately don't expose
         // dependency health (SQLite, etc.) here: a degraded backend
@@ -63,6 +68,13 @@ pub fn router(state: SharedState, admin: Option<AdminState>) -> Router {
 
 async fn healthz() -> (StatusCode, &'static str) {
     (StatusCode::OK, "ok")
+}
+
+async fn landing() -> Response {
+    match tokio::fs::read_to_string("static/landing.html").await {
+        Ok(body) => Html(body).into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "landing page not found").into_response(),
+    }
 }
 
 /// Build the CORS layer for the public puzzle endpoint.

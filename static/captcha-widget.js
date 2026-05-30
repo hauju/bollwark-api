@@ -24,6 +24,18 @@
     }
   }
 
+  // Hex-encode a UTF-8 JSON payload into the opaque token the form host
+  // forwards to /v1/verify. Hex (not base64) matches the server's existing
+  // token conventions and decodes with the same `hex` crate.
+  function encodeToken(payload) {
+    const bytes = new TextEncoder().encode(JSON.stringify(payload));
+    let hex = "";
+    for (let i = 0; i < bytes.length; i++) {
+      hex += bytes[i].toString(16).padStart(2, "0");
+    }
+    return hex;
+  }
+
   // ── CaptchaWidget Class ──
 
   /**
@@ -628,11 +640,11 @@
       this._tokenInput = input;
       this._refreshTokenInput();
 
-      // Refresh the token at submit time so `time_on_page_ms` and the
-      // behavior counters reflect actual user interaction — not the
-      // moment the worker happened to finish solving the PoW. Critical
-      // for invisible_pass tier where PoW completes before any user
-      // interaction.
+      // Refresh the token at submit time so the behavior counters reflect
+      // actual user interaction — not the moment the worker happened to
+      // finish solving the PoW. Critical for invisible_pass tier where PoW
+      // completes before any user interaction. (Dwell time is derived
+      // server-side from the challenge timestamp, so it isn't carried here.)
       if (!this._submitListenerInstalled) {
         const handler = () => this._refreshTokenInput();
         form.addEventListener("submit", handler, { capture: true });
@@ -645,13 +657,14 @@
       const payload = {
         challenge_id: this._challengeId,
         nonce: this._nonce,
-        time_on_page_ms: Date.now() - this.pageLoadAt,
         behavior: { ...this._behavior },
       };
       if (this._textAnswer) payload.text_answer = this._textAnswer;
       const honeypotValue = this.honeypot ? this.honeypot.value : "";
       if (honeypotValue) payload.honeypot = honeypotValue;
-      this._tokenInput.value = JSON.stringify(payload);
+      // Hex-encode the JSON so the form host treats it as an opaque token and
+      // forwards it verbatim — it never needs to parse the contents.
+      this._tokenInput.value = encodeToken(payload);
     }
 
     // ── Public Methods ──

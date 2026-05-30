@@ -33,6 +33,28 @@ fn test_app_with(customize: impl FnOnce(&mut TestAppBuilder)) -> axum::Router {
     builder.build()
 }
 
+/// Like `test_app_with`, but also returns the underlying store so a test can
+/// reach in and backdate a challenge (see `backdate_challenge`) to simulate a
+/// realistic dwell time — the verify handler derives time-on-page from the
+/// challenge's `created_at`, which is otherwise milliseconds in-test.
+fn test_app_with_store(
+    customize: impl FnOnce(&mut TestAppBuilder),
+) -> (axum::Router, Arc<InMemoryStore>) {
+    let mut builder = TestAppBuilder::default();
+    customize(&mut builder);
+    builder.build_with_store()
+}
+
+/// Move a stored challenge's `created_at` back by `secs` so the verify-time
+/// time-on-page signal sees a realistic elapsed time instead of the ~0ms gap
+/// between issuing and verifying in a test.
+async fn backdate_challenge(store: &InMemoryStore, id: uuid::Uuid, secs: i64) {
+    use rust_captcha::storage::Store;
+    let mut challenge = store.get_challenge(&id).await.unwrap().unwrap();
+    challenge.created_at -= chrono::Duration::seconds(secs);
+    store.store_challenge(&challenge).await.unwrap();
+}
+
 #[derive(Default)]
 struct TestAppBuilder {
     reputation_cidrs: Option<String>,
@@ -58,6 +80,10 @@ const TEST_ADMIN_TOKEN: &str = "test-admin-token-32bytes-of-entropy";
 
 impl TestAppBuilder {
     fn build(self) -> axum::Router {
+        self.build_with_store().0
+    }
+
+    fn build_with_store(self) -> (axum::Router, Arc<InMemoryStore>) {
         let algorithm = self.algorithm.unwrap_or(Algorithm::Sha256);
         // Argon2id needs a much lower default difficulty than SHA-256 — even
         // 4 leading zero bits at minimum-cost params already takes a few
@@ -115,8 +141,9 @@ impl TestAppBuilder {
             Some(Some(t)) => Some(Arc::new(t.to_string())),
             None => Some(Arc::new(TEST_ADMIN_TOKEN.to_string())),
         };
+        let store = Arc::new(InMemoryStore::new());
         let state = Arc::new(AppState {
-            store: Arc::new(InMemoryStore::new()),
+            store: store.clone(),
             engine: PuzzleEngine::new(puzzle_config),
             difficulty: DifficultyCalculator::new(&config),
             risk,
@@ -130,7 +157,7 @@ impl TestAppBuilder {
             full_fingerprint_mode: true,
             config,
         });
-        api::router(state, None)
+        (api::router(state, None), store)
     }
 }
 
@@ -694,11 +721,10 @@ async fn test_spam_plus_suspicious_ua_serves_visual_challenge() {
 
 #[tokio::test]
 async fn test_very_fast_submit_with_missing_cookie_blocks() {
-    // time_on_page_ms=100 → +50; cookie missing → +5 → total 55. With default
-    // VERIFY_BLOCK_MIN=60 that's still ShadowFail (success=true). Push it past
-    // by also tripping honeypot — but that alone is +100, so test the time
-    // path explicitly with a tighter override via env, or just accept that
-    // very-fast alone is ShadowFail in default config.
+    // No backdating: the challenge is issued and verified ~instantly, so the
+    // server-derived time-on-page is well under 500ms → +50. Cookie missing →
+    // +5 → total 55. With default VERIFY_BLOCK_MIN=60 that's still ShadowFail
+    // (success=true).
     //
     // For this assertion we verify the ShadowFail path: success returned
     // despite a suspicious time. A future test with tightened thresholds can
@@ -714,7 +740,6 @@ async fn test_very_fast_submit_with_missing_cookie_blocks() {
     let verify_body = serde_json::json!({
         "challenge_id": puzzle.challenge_id,
         "nonce": nonce,
-        "time_on_page_ms": 100,
     });
     let req = Request::builder()
         .method("POST")
@@ -736,16 +761,17 @@ async fn test_very_fast_submit_with_missing_cookie_blocks() {
 
 #[tokio::test]
 async fn test_normal_submit_with_reasonable_time_passes() {
-    let app = test_app();
+    let (app, store) = test_app_with_store(|_| {});
     let site = create_test_site(&app).await;
     let (_, puzzle) = get_test_puzzle(&app, &site.site_key.to_string()).await;
     let puzzle = puzzle.unwrap();
     let nonce = solve_challenge(&puzzle.prefix, puzzle.difficulty);
+    // Simulate a real visitor who dwelled 5s before submitting.
+    backdate_challenge(&store, puzzle.challenge_id, 5).await;
 
     let verify_body = serde_json::json!({
         "challenge_id": puzzle.challenge_id,
         "nonce": nonce,
-        "time_on_page_ms": 5_000,
     });
     let req = Request::builder()
         .method("POST")
@@ -761,6 +787,54 @@ async fn test_normal_submit_with_reasonable_time_passes() {
         .unwrap();
     let result: VerifyResponse = serde_json::from_slice(&body).unwrap();
     assert!(result.success);
+}
+
+#[tokio::test]
+async fn test_verify_accepts_opaque_token() {
+    // The widget hex-encodes a JSON blob and the form host forwards it as a
+    // single opaque `token` — no parsing on the host side.
+    let (app, store) = test_app_with_store(|_| {});
+    let site = create_test_site(&app).await;
+    let (_, puzzle) = get_test_puzzle(&app, &site.site_key.to_string()).await;
+    let puzzle = puzzle.unwrap();
+    let nonce = solve_challenge(&puzzle.prefix, puzzle.difficulty);
+    backdate_challenge(&store, puzzle.challenge_id, 5).await;
+
+    let inner = serde_json::json!({ "challenge_id": puzzle.challenge_id, "nonce": nonce });
+    let token = hex::encode(serde_json::to_vec(&inner).unwrap());
+
+    let verify_body = serde_json::json!({ "token": token });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/verify")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", site.secret_key))
+        .body(Body::from(serde_json::to_vec(&verify_body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: VerifyResponse = serde_json::from_slice(&body).unwrap();
+    assert!(result.success, "opaque token round-trip should verify");
+}
+
+#[tokio::test]
+async fn test_verify_rejects_malformed_token() {
+    let app = test_app();
+    let site = create_test_site(&app).await;
+
+    let verify_body = serde_json::json!({ "token": "not-valid-hex-zzz" });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/verify")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", site.secret_key))
+        .body(Body::from(serde_json::to_vec(&verify_body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -935,7 +1009,7 @@ async fn test_argon2id_full_flow() {
         t_cost: 1,
         p_cost: 1,
     };
-    let app = test_app_with(|b| {
+    let (app, store) = test_app_with_store(|b| {
         b.algorithm = Some(Algorithm::Argon2id(params));
     });
     let site = create_test_site(&app).await;
@@ -953,10 +1027,10 @@ async fn test_argon2id_full_flow() {
     );
 
     let nonce = solve_argon2id_challenge(&puzzle.prefix, puzzle.difficulty, params);
+    backdate_challenge(&store, puzzle.challenge_id, 5).await;
     let verify_body = serde_json::json!({
         "challenge_id": puzzle.challenge_id,
         "nonce": nonce,
-        "time_on_page_ms": 5_000,
     });
     let req = Request::builder()
         .method("POST")
@@ -1030,12 +1104,11 @@ async fn test_behavior_flatline_with_fast_submit_blocks() {
     let nonce = solve_challenge(&puzzle.prefix, puzzle.difficulty);
 
     // 0 mouse moves + 0 touches + 0 interactions → flatline = 30
-    // time_on_page_ms 100 → very-short = 50
+    // instant submit (no backdating) → server-derived time < 500ms → +50
     // total = 80 → above default block_min (60) → success: false
     let verify_body = serde_json::json!({
         "challenge_id": puzzle.challenge_id,
         "nonce": nonce,
-        "time_on_page_ms": 100,
         "behavior": {
             "mouse_moves": 0,
             "touches": 0,
@@ -1062,16 +1135,18 @@ async fn test_behavior_flatline_with_fast_submit_blocks() {
 async fn test_webdriver_flag_alone_shadow_fails() {
     // webdriver=true alone scores 30 → exactly at shadow_min, so the
     // request still returns success=true but the WARN log records it.
-    let app = test_app();
+    // Backdate so the server-derived time-on-page is 0 and webdriver is the
+    // only contributing signal.
+    let (app, store) = test_app_with_store(|_| {});
     let site = create_test_site(&app).await;
     let (_, puzzle) = get_test_puzzle(&app, &site.site_key.to_string()).await;
     let puzzle = puzzle.unwrap();
     let nonce = solve_challenge(&puzzle.prefix, puzzle.difficulty);
+    backdate_challenge(&store, puzzle.challenge_id, 5).await;
 
     let verify_body = serde_json::json!({
         "challenge_id": puzzle.challenge_id,
         "nonce": nonce,
-        "time_on_page_ms": 5_000,
         "behavior": {
             "mouse_moves": 25,
             "interactions": 3,
@@ -1104,17 +1179,18 @@ async fn test_webdriver_flag_alone_shadow_fails() {
 async fn test_webdriver_plus_flatline_blocks() {
     // CDP-driven Chrome with no mouse interaction — exactly the
     // browser-harness baseline pattern: flatline (30) + webdriver (30) = 60
-    // → block_min boundary → success=false.
-    let app = test_app();
+    // → block_min boundary → success=false. Backdate so time-on-page is 0
+    // and the two behaviour signals are exactly what tips it over.
+    let (app, store) = test_app_with_store(|_| {});
     let site = create_test_site(&app).await;
     let (_, puzzle) = get_test_puzzle(&app, &site.site_key.to_string()).await;
     let puzzle = puzzle.unwrap();
     let nonce = solve_challenge(&puzzle.prefix, puzzle.difficulty);
+    backdate_challenge(&store, puzzle.challenge_id, 5).await;
 
     let verify_body = serde_json::json!({
         "challenge_id": puzzle.challenge_id,
         "nonce": nonce,
-        "time_on_page_ms": 5_000,
         "behavior": {
             "mouse_moves": 0,
             "touches": 0,
@@ -1140,16 +1216,16 @@ async fn test_webdriver_plus_flatline_blocks() {
 
 #[tokio::test]
 async fn test_behavior_organic_passes() {
-    let app = test_app();
+    let (app, store) = test_app_with_store(|_| {});
     let site = create_test_site(&app).await;
     let (_, puzzle) = get_test_puzzle(&app, &site.site_key.to_string()).await;
     let puzzle = puzzle.unwrap();
     let nonce = solve_challenge(&puzzle.prefix, puzzle.difficulty);
+    backdate_challenge(&store, puzzle.challenge_id, 5).await;
 
     let verify_body = serde_json::json!({
         "challenge_id": puzzle.challenge_id,
         "nonce": nonce,
-        "time_on_page_ms": 5_000,
         "behavior": {
             "mouse_moves": 25,
             "touches": 0,
@@ -1177,16 +1253,16 @@ async fn test_behavior_organic_passes() {
 async fn test_behavior_absent_doesnt_penalise_legacy_clients() {
     // No behavior field at all → BehaviorPresence::Absent → 0 contribution.
     // Combined with everything else clean, should still pass.
-    let app = test_app();
+    let (app, store) = test_app_with_store(|_| {});
     let site = create_test_site(&app).await;
     let (_, puzzle) = get_test_puzzle(&app, &site.site_key.to_string()).await;
     let puzzle = puzzle.unwrap();
     let nonce = solve_challenge(&puzzle.prefix, puzzle.difficulty);
+    backdate_challenge(&store, puzzle.challenge_id, 5).await;
 
     let verify_body = serde_json::json!({
         "challenge_id": puzzle.challenge_id,
         "nonce": nonce,
-        "time_on_page_ms": 5_000,
     });
     let req = Request::builder()
         .method("POST")
