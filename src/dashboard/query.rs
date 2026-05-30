@@ -268,7 +268,6 @@ fn stats_blocking(conn: &Connection) -> rusqlite::Result<Stats> {
             SUM(CASE WHEN p.tier = 'InvisiblePass'    THEN 1 ELSE 0 END),
             SUM(CASE WHEN p.tier = 'Checkbox'         THEN 1 ELSE 0 END),
             SUM(CASE WHEN p.tier = 'HardPow'          THEN 1 ELSE 0 END),
-            SUM(CASE WHEN p.tier = 'VisualChallenge'  THEN 1 ELSE 0 END),
             SUM(CASE WHEN p.tier = 'Block'            THEN 1 ELSE 0 END),
             SUM(CASE WHEN p.tier_full <> '' AND p.tier_minimal <> '' AND p.tier_full <> p.tier_minimal THEN 1 ELSE 0 END),
             SUM(CASE WHEN p.tier_full <> '' AND p.tier_minimal <> '' THEN 1 ELSE 0 END),
@@ -309,14 +308,13 @@ fn stats_blocking(conn: &Connection) -> rusqlite::Result<Stats> {
                     invisible_pass: opt_i64(r, 20)? as u64,
                     checkbox: opt_i64(r, 21)? as u64,
                     hard_pow: opt_i64(r, 22)? as u64,
-                    visual_challenge: opt_i64(r, 23)? as u64,
-                    block: opt_i64(r, 24)? as u64,
+                    block: opt_i64(r, 23)? as u64,
                 },
                 privacy_compare: PrivacyCompare {
-                    puzzle_diverged: opt_i64(r, 25)? as u64,
-                    puzzle_total: opt_i64(r, 26)? as u64,
-                    verify_diverged: opt_i64(r, 27)? as u64,
-                    verify_total: opt_i64(r, 28)? as u64,
+                    puzzle_diverged: opt_i64(r, 24)? as u64,
+                    puzzle_total: opt_i64(r, 25)? as u64,
+                    verify_diverged: opt_i64(r, 26)? as u64,
+                    verify_total: opt_i64(r, 27)? as u64,
                 },
             })
         },
@@ -368,4 +366,68 @@ fn site_activity_blocking(conn: &Connection) -> rusqlite::Result<HashMap<String,
         out.insert(k, v);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Guards the positional column→field mapping in `stats_blocking`. The
+    /// SELECT list and the `Stats` construction are aligned only by index, so
+    /// an off-by-one (e.g. when a tier column is added/removed) would silently
+    /// return wrong numbers. Insert known rows and assert the aggregates —
+    /// especially the tier counts and the privacy-compare pair, which sit at
+    /// the tail of the SELECT and shift when a tier column changes.
+    #[test]
+    fn stats_mapping_is_aligned() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::dashboard::log::SCHEMA).unwrap();
+
+        // Two puzzle rows: one HardPow (full≠minimal → diverged), one Block
+        // (full=minimal → not diverged). c1 also gets a verify row whose
+        // full/minimal outcomes diverge.
+        conn.execute_batch(
+            "INSERT INTO puzzle_decisions
+               (ts, challenge_id, site_key, ip, ip_count, site_count, score, tier, difficulty,
+                outcome, sig_rate, sig_header_anomaly, sig_ip_reputation, sig_cookie_age,
+                sig_tls_fingerprint, cookie_presence, tls_fingerprint, user_agent,
+                score_full, tier_full, score_minimal, tier_minimal)
+             VALUES
+               ('2026-01-01T00:00:00Z','c1','s','1.2.3.4',1,1,45,'HardPow',12,'issued',
+                30,15,0,0,0,'Disabled','Skipped',NULL,45,'HardPow',20,'Checkbox'),
+               ('2026-01-01T00:00:01Z','c2','s','1.2.3.4',2,2,90,'Block',0,'rejected',
+                30,30,30,0,0,'Disabled','Skipped',NULL,90,'Block',90,'Block');
+             INSERT INTO verify_decisions
+               (ts, challenge_id, success, outcome, score, sig_honeypot, sig_time_on_page,
+                sig_cookie_age, sig_behavior, time_on_page_ms, cookie_presence, webdriver,
+                score_full, outcome_full, score_minimal, outcome_minimal)
+             VALUES
+               ('2026-01-01T00:00:02Z','c1',1,'pass',0,0,0,0,0,5000,'Disabled','false',
+                0,'pass',30,'shadow_fail');",
+        )
+        .unwrap();
+
+        let stats = stats_blocking(&conn).unwrap();
+
+        assert_eq!(stats.total_sessions, 2);
+        assert_eq!(stats.verified_sessions, 1);
+
+        // Tier counts (indices 20–23).
+        assert_eq!(stats.tiers.invisible_pass, 0);
+        assert_eq!(stats.tiers.checkbox, 0);
+        assert_eq!(stats.tiers.hard_pow, 1);
+        assert_eq!(stats.tiers.block, 1);
+
+        // Outcomes.
+        assert_eq!(stats.outcomes.puzzle_issued, 1);
+        assert_eq!(stats.outcomes.puzzle_rejected, 1);
+        assert_eq!(stats.outcomes.verify_pass, 1);
+
+        // Privacy compare (indices 24–27) — the tail that shifts when a tier
+        // column is added/removed.
+        assert_eq!(stats.privacy_compare.puzzle_total, 2);
+        assert_eq!(stats.privacy_compare.puzzle_diverged, 1);
+        assert_eq!(stats.privacy_compare.verify_total, 1);
+        assert_eq!(stats.privacy_compare.verify_diverged, 1);
+    }
 }

@@ -178,7 +178,6 @@ pub struct TierCounts {
     pub invisible_pass: u64,
     pub checkbox: u64,
     pub hard_pow: u64,
-    pub visual_challenge: u64,
     pub block: u64,
 }
 

@@ -22,7 +22,7 @@ use super::types::{PuzzleRecord, VerifyRecord};
 /// SQLite write speed, not the channel.
 const CHANNEL_CAPACITY: usize = 8192;
 
-const SCHEMA: &str = r"
+pub(crate) const SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS puzzle_decisions (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     ts              TEXT    NOT NULL,

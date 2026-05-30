@@ -256,7 +256,13 @@ mod tests {
         };
         let engine = PuzzleEngine::new(config);
         let challenge = engine.generate(Uuid::new_v4(), 4);
-        assert!(!engine.verify(&challenge, u64::MAX));
+        // At difficulty 4, ~1/16 nonces satisfy the target by luck, so a fixed
+        // nonce (e.g. u64::MAX) is ~6% flaky. Search deterministically for one
+        // that does NOT satisfy and assert verify rejects it.
+        let bad_nonce = (0u64..)
+            .find(|&n| !engine.verify(&challenge, n))
+            .expect("some nonce fails at difficulty 4");
+        assert!(!engine.verify(&challenge, bad_nonce));
     }
 
     #[test]
