@@ -376,13 +376,18 @@ fn spawn_reputation_watcher(path: String, store: Arc<ReputationStore>) {
                     }
                 };
                 let touched = events.iter().any(|e| {
-                    e.event
-                        .paths
-                        .iter()
-                        .any(|p| match (&target_name, p.file_name()) {
-                            (Some(want), Some(got)) => want == got,
-                            _ => false,
-                        })
+                    // Only react to content changes (create / write / rename).
+                    // Our own reload reads the file, which on Linux emits
+                    // inotify Access events for the same filename — reacting to
+                    // those would spin a read→event→read feedback loop.
+                    is_content_change(&e.event.kind)
+                        && e.event
+                            .paths
+                            .iter()
+                            .any(|p| match (&target_name, p.file_name()) {
+                                (Some(want), Some(got)) => want == got,
+                                _ => false,
+                            })
                 });
                 if !touched {
                     continue;
@@ -403,6 +408,23 @@ fn spawn_reputation_watcher(path: String, store: Arc<ReputationStore>) {
             }
         })
         .expect("spawn ip-reputation-watcher thread");
+}
+
+/// Whether a filesystem event actually changes file content. Excludes
+/// `Access` (reads — which our own reload triggers) and `Modify(Metadata)`
+/// (atime/permission changes), both of which would otherwise spin a
+/// read→event→read loop on Linux/inotify.
+fn is_content_change(kind: &notify_debouncer_full::notify::EventKind) -> bool {
+    use notify_debouncer_full::notify::EventKind;
+    use notify_debouncer_full::notify::event::ModifyKind;
+    matches!(
+        kind,
+        EventKind::Create(_)
+            | EventKind::Remove(_)
+            | EventKind::Modify(ModifyKind::Data(_))
+            | EventKind::Modify(ModifyKind::Name(_))
+            | EventKind::Modify(ModifyKind::Any)
+    )
 }
 
 /// completes the future; whichever fires first is the signal we shut down on.
