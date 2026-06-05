@@ -71,12 +71,12 @@ test("invisible mode: invisible_pass tier renders no visible UI but verifies", a
   });
 
   // For the invisible_pass tier the widget must render zero chrome —
-  // no rc-captcha class, no checkbox, no label, no footer. The honeypot
+  // no rc-captcha class, no checkbox, no label, no brand. The honeypot
   // input is the one element that stays present so naive bots still trip.
   await expect(page.locator("#captcha-widget.rc-captcha")).toHaveCount(0);
   await expect(page.locator(".rc-captcha-checkbox")).toHaveCount(0);
   await expect(page.locator(".rc-captcha-label")).toHaveCount(0);
-  await expect(page.locator(".rc-captcha-footer")).toHaveCount(0);
+  await expect(page.locator(".rc-captcha-brand")).toHaveCount(0);
   await expect(
     page.locator('#captcha-widget input[aria-hidden="true"]'),
   ).toHaveCount(1);

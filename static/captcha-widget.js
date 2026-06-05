@@ -274,16 +274,17 @@
         this.container.appendChild(this.detailsEl);
       }
 
-      // Brand footer: clickable name → about, tiny Privacy / Terms links
-      // beneath. Mirrors the reCAPTCHA / hCaptcha pattern. Lives in its
-      // own persistent footer (not inside `row`) so it stays visible
-      // across every tier state — invisible-pass, checkbox, and
-      // block included — which is exactly when the user is most likely
-      // to want "why am I seeing this?". Hrefs default to the bundled
-      // /static/*.html and are patched by `_applyInfoUrls` once the
-      // puzzle response (or 429 body) arrives with operator overrides.
-      this.footer = document.createElement("div");
-      this.footer.className = "rc-captcha-footer";
+      // Brand corner: clickable name → about, with tiny Privacy / Terms
+      // links stacked beneath. Mirrors the reCAPTCHA / hCaptcha pattern.
+      // Sits at the right edge of the checkbox row (pushed over by
+      // `margin-left:auto`) so "RustCaptcha" rides the same line as the
+      // checkbox and the legal links hang just below it. `_renderBlocked`
+      // hides only the checkbox + label, never the brand, so this stays
+      // visible across every tier — invisible-pass, checkbox, and the 429
+      // block path included — which is exactly when the user is most
+      // likely to want "why am I seeing this?". Hrefs default to the
+      // bundled /static/*.html and are patched by `_applyInfoUrls` once
+      // the puzzle response (or 429 body) arrives with operator overrides.
       const brand = document.createElement("span");
       brand.className = "rc-captcha-brand";
       const linkBase = this.serverUrl || "";
@@ -312,8 +313,7 @@
       });
       brand.appendChild(brandLink);
       brand.appendChild(brandLinks);
-      this.footer.appendChild(brand);
-      this.container.appendChild(this.footer);
+      this.row.appendChild(brand);
 
       this._updateUI();
     }
@@ -344,9 +344,13 @@
     }
 
     _renderBlocked(message) {
-      this.row.style.display = "none";
+      // Hide the interactive checkbox + label, but keep the row — the
+      // brand corner lives inside it now, and the Privacy / Terms links
+      // must survive the block path (the "always a route to why am I
+      // seeing this?" guarantee).
+      if (this.checkbox) this.checkbox.style.display = "none";
+      if (this.label) this.label.style.display = "none";
       if (this.statusEl) this.statusEl.textContent = message;
-      if (this.label) this.label.textContent = "Blocked";
     }
 
     _updateUI() {
