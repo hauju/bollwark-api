@@ -9,8 +9,9 @@ use std::path::PathBuf;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row};
 
 use super::types::{
-    OutcomeCounts, PuzzleBreakdownDto, PuzzleSignalSums, Session, SiteActivity, Stats, TierCounts,
-    VerifyBreakdownDto, VerifySection, VerifySignalSums,
+    Analytics, BrowserCount, OutcomeCounts, PuzzleBreakdownDto, PuzzleSignalSums, Session,
+    SignalFires, SiteActivity, Stats, TierCounts, TimeBucket, VerifyBreakdownDto, VerifySection,
+    VerifySignalSums,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -58,6 +59,24 @@ impl Sessions {
         tokio::task::spawn_blocking(move || -> Result<Stats, rusqlite::Error> {
             let conn = open_ro(&path)?;
             stats_blocking(&conn)
+        })
+        .await?
+        .map_err(QueryError::Sqlite)
+    }
+
+    /// Windowed analytics over the last `hours`, optionally filtered to one
+    /// site. Bucket size is derived from the window so the chart always has
+    /// a readable number of points.
+    pub async fn analytics(
+        &self,
+        hours: u32,
+        site_key: Option<String>,
+    ) -> Result<Analytics, QueryError> {
+        let path = self.db_path.clone();
+        let now_epoch = chrono::Utc::now().timestamp();
+        tokio::task::spawn_blocking(move || -> Result<Analytics, rusqlite::Error> {
+            let conn = open_ro(&path)?;
+            analytics_blocking(&conn, hours, now_epoch, site_key.as_deref())
         })
         .await?
         .map_err(QueryError::Sqlite)
@@ -287,6 +306,207 @@ fn opt_i64(row: &Row<'_>, idx: usize) -> rusqlite::Result<i64> {
     Ok(row.get::<_, Option<i64>>(idx)?.unwrap_or(0))
 }
 
+/// Bucket width for a given window. Tuned so a window never renders more
+/// than ~50 points.
+fn bucket_secs_for(hours: u32) -> i64 {
+    match hours {
+        0..=2 => 300,      // 5 min  → ≤ 24 buckets
+        3..=12 => 1800,    // 30 min → ≤ 24
+        13..=48 => 3600,   // 1 h    → ≤ 48
+        49..=240 => 21600, // 6 h    → ≤ 40
+        _ => 86400,        // 1 d    → ≤ 30
+    }
+}
+
+/// Classify a User-Agent into a coarse browser family. Order matters:
+/// Chromium-family browsers all contain "chrome/", so the more specific
+/// tokens are checked first.
+fn browser_family(ua: Option<&str>) -> &'static str {
+    let Some(ua) = ua else { return "(none)" };
+    let l = ua.to_ascii_lowercase();
+    const SCRIPTED: &[&str] = &[
+        "bot", "crawler", "spider", "curl", "wget", "python", "go-http", "headless",
+    ];
+    if SCRIPTED.iter().any(|m| l.contains(m)) {
+        "bot/script"
+    } else if l.contains("edg/") {
+        "Edge"
+    } else if l.contains("opr/") || l.contains("opera") {
+        "Opera"
+    } else if l.contains("firefox/") || l.contains("fxios/") {
+        "Firefox"
+    } else if l.contains("chrome/") || l.contains("crios/") {
+        "Chrome"
+    } else if l.contains("safari/") {
+        "Safari"
+    } else {
+        "Other"
+    }
+}
+
+#[allow(clippy::cast_sign_loss)]
+fn analytics_blocking(
+    conn: &Connection,
+    hours: u32,
+    now_epoch: i64,
+    site_key: Option<&str>,
+) -> rusqlite::Result<Analytics> {
+    let bucket_secs = bucket_secs_for(hours);
+    // Align the window start down to a bucket boundary so the first bucket
+    // isn't a partial sliver.
+    let since_epoch = (now_epoch - i64::from(hours) * 3600) / bucket_secs * bucket_secs;
+
+    // All three queries share the same window + site filter. `ts` is RFC3339
+    // UTC, which SQLite's strftime parses directly. This is a window scan
+    // (no index on the computed epoch) — fine at operator-driven volume,
+    // same as the stats aggregation.
+    const FILTER: &str = "CAST(strftime('%s', p.ts) AS INTEGER) >= ?1
+         AND (?2 IS NULL OR p.site_key = ?2)";
+
+    // 1. Time-bucketed counts.
+    let mut by_bucket: std::collections::HashMap<i64, TimeBucket> =
+        std::collections::HashMap::new();
+    let mut stmt = conn.prepare(&format!(
+        "SELECT
+            CAST(strftime('%s', p.ts) AS INTEGER) / ?3 * ?3 AS bucket,
+            COUNT(*),
+            COUNT(v.id),
+            SUM(CASE WHEN p.outcome = 'issued'   THEN 1 ELSE 0 END),
+            SUM(CASE WHEN p.outcome = 'rejected' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN v.outcome = 'pass'        THEN 1 ELSE 0 END),
+            SUM(CASE WHEN v.outcome = 'shadow_fail' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN v.outcome = 'block'       THEN 1 ELSE 0 END),
+            SUM(CASE WHEN v.outcome = 'pow_invalid' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN p.tier = 'InvisiblePass' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN p.tier = 'Checkbox'      THEN 1 ELSE 0 END),
+            SUM(CASE WHEN p.tier = 'HardPow'       THEN 1 ELSE 0 END),
+            SUM(CASE WHEN p.tier = 'Block'         THEN 1 ELSE 0 END)
+         FROM puzzle_decisions p
+         LEFT JOIN verify_decisions v ON v.challenge_id = p.challenge_id
+         WHERE {FILTER}
+         GROUP BY bucket"
+    ))?;
+    let rows = stmt.query_map(rusqlite::params![since_epoch, site_key, bucket_secs], |r| {
+        let epoch: i64 = r.get(0)?;
+        Ok((
+            epoch,
+            TimeBucket {
+                t: String::new(), // filled in the dense pass below
+                puzzles: r.get::<_, i64>(1)? as u64,
+                verifies: r.get::<_, i64>(2)? as u64,
+                issued: opt_i64(r, 3)? as u64,
+                rejected: opt_i64(r, 4)? as u64,
+                pass: opt_i64(r, 5)? as u64,
+                shadow_fail: opt_i64(r, 6)? as u64,
+                block: opt_i64(r, 7)? as u64,
+                pow_invalid: opt_i64(r, 8)? as u64,
+                tier_invisible_pass: opt_i64(r, 9)? as u64,
+                tier_checkbox: opt_i64(r, 10)? as u64,
+                tier_hard_pow: opt_i64(r, 11)? as u64,
+                tier_block: opt_i64(r, 12)? as u64,
+            },
+        ))
+    })?;
+    for row in rows {
+        let (epoch, bucket) = row?;
+        by_bucket.insert(epoch, bucket);
+    }
+
+    // Dense, zero-filled series from window start to now.
+    let mut buckets = Vec::new();
+    let mut epoch = since_epoch;
+    while epoch <= now_epoch {
+        let mut b = by_bucket.remove(&epoch).unwrap_or_default();
+        b.t = chrono::DateTime::from_timestamp(epoch, 0)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_default();
+        buckets.push(b);
+        epoch += bucket_secs;
+    }
+
+    // 2. Bot-probability histogram (combined score, same formula as
+    // `bot_probability`) + signal fire counts, one pass.
+    let mut bot_histogram = vec![0u64; 10];
+    let mut stmt = conn.prepare(&format!(
+        "SELECT
+            MIN(MIN(MAX(p.score, COALESCE(v.score, 0)), 100) / 10, 9) AS bin,
+            COUNT(*)
+         FROM puzzle_decisions p
+         LEFT JOIN verify_decisions v ON v.challenge_id = p.challenge_id
+         WHERE {FILTER}
+         GROUP BY bin"
+    ))?;
+    let rows = stmt.query_map(rusqlite::params![since_epoch, site_key], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+    })?;
+    for row in rows {
+        let (bin, count) = row?;
+        bot_histogram[bin.clamp(0, 9) as usize] = count as u64;
+    }
+
+    let signal_fires = conn.query_row(
+        &format!(
+            "SELECT
+                SUM(CASE WHEN p.sig_rate            > 0 THEN 1 ELSE 0 END),
+                SUM(CASE WHEN p.sig_header_anomaly  > 0 THEN 1 ELSE 0 END),
+                SUM(CASE WHEN p.sig_ip_reputation   > 0 THEN 1 ELSE 0 END),
+                SUM(CASE WHEN p.sig_tls_fingerprint > 0 THEN 1 ELSE 0 END),
+                SUM(CASE WHEN COALESCE(v.sig_honeypot, 0)     > 0 THEN 1 ELSE 0 END),
+                SUM(CASE WHEN COALESCE(v.sig_time_on_page, 0) > 0 THEN 1 ELSE 0 END),
+                SUM(CASE WHEN COALESCE(v.sig_behavior, 0)     > 0 THEN 1 ELSE 0 END)
+             FROM puzzle_decisions p
+             LEFT JOIN verify_decisions v ON v.challenge_id = p.challenge_id
+             WHERE {FILTER}"
+        ),
+        rusqlite::params![since_epoch, site_key],
+        |r| {
+            Ok(SignalFires {
+                rate: opt_i64(r, 0)? as u64,
+                header_anomaly: opt_i64(r, 1)? as u64,
+                ip_reputation: opt_i64(r, 2)? as u64,
+                tls_fingerprint: opt_i64(r, 3)? as u64,
+                honeypot: opt_i64(r, 4)? as u64,
+                time_on_page: opt_i64(r, 5)? as u64,
+                behavior: opt_i64(r, 6)? as u64,
+            })
+        },
+    )?;
+
+    // 3. Browser families. Group raw UA strings in SQL (cheap dedup), then
+    // classify and merge the families in Rust.
+    let mut families: HashMap<&'static str, u64> = HashMap::new();
+    let mut stmt = conn.prepare(&format!(
+        "SELECT p.user_agent, COUNT(*)
+         FROM puzzle_decisions p
+         WHERE {FILTER}
+         GROUP BY p.user_agent"
+    ))?;
+    let rows = stmt.query_map(rusqlite::params![since_epoch, site_key], |r| {
+        Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?))
+    })?;
+    for row in rows {
+        let (ua, count) = row?;
+        *families.entry(browser_family(ua.as_deref())).or_default() += count as u64;
+    }
+    let mut browsers: Vec<BrowserCount> = families
+        .into_iter()
+        .map(|(name, count)| BrowserCount {
+            name: name.to_string(),
+            count,
+        })
+        .collect();
+    browsers.sort_by(|a, b| b.count.cmp(&a.count).then(a.name.cmp(&b.name)));
+
+    Ok(Analytics {
+        window_hours: hours,
+        bucket_secs: bucket_secs as u32,
+        buckets,
+        bot_histogram,
+        browsers,
+        signal_fires,
+    })
+}
+
 #[allow(clippy::cast_sign_loss)]
 fn site_activity_blocking(conn: &Connection) -> rusqlite::Result<HashMap<String, SiteActivity>> {
     // Group puzzle decisions by site_key, then left-join verify decisions
@@ -377,5 +597,97 @@ mod tests {
         assert_eq!(stats.outcomes.puzzle_issued, 1);
         assert_eq!(stats.outcomes.puzzle_rejected, 1);
         assert_eq!(stats.outcomes.verify_pass, 1);
+    }
+
+    /// Same positional-alignment guard for `analytics_blocking`: known rows
+    /// in, exact bucket counts / histogram / browser families / fire counts
+    /// out. Uses a fixed `now_epoch` so bucket boundaries are deterministic.
+    #[test]
+    fn analytics_mapping_is_aligned() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::dashboard::log::SCHEMA).unwrap();
+
+        // now = 2026-01-02T00:00:00Z. Window: 24h → 3600s buckets.
+        let now_epoch = 1_767_312_000;
+        let ts_in = "2026-01-01T12:30:00+00:00"; // in window
+        let ts_in2 = "2026-01-01T12:45:00+00:00"; // same bucket as ts_in
+        let ts_out = "2025-12-30T00:00:00+00:00"; // outside window
+
+        conn.execute_batch(&format!(
+            "INSERT INTO puzzle_decisions
+               (ts, challenge_id, site_key, ip, ip_count, site_count, score, tier, difficulty,
+                outcome, sig_rate, sig_header_anomaly, sig_ip_reputation,
+                sig_tls_fingerprint, tls_fingerprint, user_agent)
+             VALUES
+               ('{ts_in}','c1','s1','1.2.3.0',1,1,10,'InvisiblePass',18,'issued',
+                10,0,0,0,'Skipped','Mozilla/5.0 Chrome/120.0 Safari/537.36'),
+               ('{ts_in2}','c2','s1','1.2.3.0',2,2,95,'Block',0,'rejected',
+                30,35,30,0,'Skipped','curl/8.4.0'),
+               ('{ts_in2}','c3','s2','5.6.7.0',1,1,5,'InvisiblePass',18,'issued',
+                0,5,0,0,'Skipped',NULL),
+               ('{ts_out}','c4','s1','1.2.3.0',1,1,50,'HardPow',24,'issued',
+                50,0,0,0,'Skipped','Mozilla/5.0 Firefox/121.0');
+             INSERT INTO verify_decisions
+               (ts, challenge_id, success, outcome, score, sig_honeypot, sig_time_on_page,
+                sig_behavior, time_on_page_ms, webdriver)
+             VALUES
+               ('{ts_in}','c1',1,'pass',0,0,0,0,5000,'false');"
+        ))
+        .unwrap();
+
+        let a = analytics_blocking(&conn, 24, now_epoch, None).unwrap();
+
+        assert_eq!(a.window_hours, 24);
+        assert_eq!(a.bucket_secs, 3600);
+
+        // Dense series: 24h window aligned to the hour + the current bucket.
+        assert_eq!(a.buckets.len(), 25);
+        assert!(a.buckets.iter().all(|b| !b.t.is_empty()));
+
+        // All three in-window rows share the 12:00 bucket.
+        let busy = a
+            .buckets
+            .iter()
+            .find(|b| b.t.starts_with("2026-01-01T12:00:00"))
+            .unwrap();
+        assert_eq!(busy.puzzles, 3);
+        assert_eq!(busy.verifies, 1);
+        assert_eq!(busy.issued, 2);
+        assert_eq!(busy.rejected, 1);
+        assert_eq!(busy.pass, 1);
+        assert_eq!(busy.tier_invisible_pass, 2);
+        assert_eq!(busy.tier_block, 1);
+        // The out-of-window row contributes nowhere.
+        assert_eq!(a.buckets.iter().map(|b| b.puzzles).sum::<u64>(), 3);
+
+        // Histogram: scores 10 (bin 1), 95 (bin 9), 5 (bin 0).
+        assert_eq!(a.bot_histogram[0], 1);
+        assert_eq!(a.bot_histogram[1], 1);
+        assert_eq!(a.bot_histogram[9], 1);
+        assert_eq!(a.bot_histogram.iter().sum::<u64>(), 3);
+
+        // Browsers: Chrome, bot/script (curl), (none) — Firefox is outside
+        // the window.
+        let by_name: HashMap<_, _> = a
+            .browsers
+            .iter()
+            .map(|b| (b.name.as_str(), b.count))
+            .collect();
+        assert_eq!(by_name.get("Chrome"), Some(&1));
+        assert_eq!(by_name.get("bot/script"), Some(&1));
+        assert_eq!(by_name.get("(none)"), Some(&1));
+        assert_eq!(by_name.get("Firefox"), None);
+
+        // Signal fires (in-window only).
+        assert_eq!(a.signal_fires.rate, 2);
+        assert_eq!(a.signal_fires.header_anomaly, 2);
+        assert_eq!(a.signal_fires.ip_reputation, 1);
+        assert_eq!(a.signal_fires.honeypot, 0);
+
+        // Site filter narrows to s2's single clean request.
+        let s2 = analytics_blocking(&conn, 24, now_epoch, Some("s2")).unwrap();
+        assert_eq!(s2.buckets.iter().map(|b| b.puzzles).sum::<u64>(), 1);
+        assert_eq!(s2.bot_histogram[0], 1);
+        assert_eq!(s2.bot_histogram.iter().sum::<u64>(), 1);
     }
 }

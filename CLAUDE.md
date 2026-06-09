@@ -83,6 +83,7 @@ Two scoring passes bracket every successful solve:
 | `GET /v1/admin/sessions` | Bearer (`ADMIN_TOKEN`) | List recent puzzle/verify sessions for the dashboard. Only mounted when `ADMIN_DB_PATH` is set. |
 | `GET /v1/admin/sessions/:id` | Bearer (`ADMIN_TOKEN`) | Detail for a single session. |
 | `GET /v1/admin/stats` | Bearer (`ADMIN_TOKEN`) | Aggregate stats over the decision log (counts, tier/decision breakdowns) for the dashboard summary cards. |
+| `GET /v1/admin/analytics?hours=&site_key=` | Bearer (`ADMIN_TOKEN`) | Windowed analytics for the dashboard's Analytics tab: time-bucketed traffic/outcome/tier series (dense, zero-filled), bot-probability histogram, browser-family breakdown, per-signal fire counts. `hours` clamped to 1–720, optional `site_key` filter. |
 | `GET /v1/admin/sites` | Bearer (`ADMIN_TOKEN`) | List registered sites (no secrets) merged with per-site activity from the decision log. |
 | `POST /v1/admin/sites/:id/rotate` | Bearer (`ADMIN_TOKEN`) | Issue a new `secret_key` for a site; old one invalidated immediately. |
 | `DELETE /v1/admin/sites/:id` | Bearer (`ADMIN_TOKEN`) | Delete a site. |

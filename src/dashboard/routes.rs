@@ -33,6 +33,7 @@ pub fn router(state: AdminState) -> Router {
         )
         .route("/v1/admin/sessions/{id}", get(get_session))
         .route("/v1/admin/stats", get(get_stats))
+        .route("/v1/admin/analytics", get(get_analytics))
         .route("/v1/admin/sites", get(list_sites))
         .route("/v1/admin/sites/{id}", axum::routing::delete(delete_site))
         .route(
@@ -114,6 +115,35 @@ async fn get_stats(State(state): State<AdminState>, headers: HeaderMap) -> impl 
         Ok(stats) => Json(stats).into_response(),
         Err(e) => {
             tracing::warn!(error = %e, "admin get_stats failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "query failed").into_response()
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct AnalyticsParams {
+    #[serde(default)]
+    hours: Option<u32>,
+    #[serde(default)]
+    site_key: Option<String>,
+}
+
+async fn get_analytics(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Query(params): Query<AnalyticsParams>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_auth(&state, &headers) {
+        return resp;
+    }
+
+    // Clamp the window to 30 days; below 1h the bucket math degenerates.
+    let hours = params.hours.unwrap_or(24).clamp(1, 720);
+    let site_key = params.site_key.filter(|s| !s.is_empty());
+    match state.sessions.analytics(hours, site_key).await {
+        Ok(analytics) => Json(analytics).into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "admin get_analytics failed");
             (StatusCode::INTERNAL_SERVER_ERROR, "query failed").into_response()
         }
     }

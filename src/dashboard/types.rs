@@ -133,6 +133,61 @@ pub struct TierCounts {
     pub block: u64,
 }
 
+/// Windowed analytics for the dashboard's Analytics tab: time-bucketed
+/// traffic/outcome/tier series plus distribution breakdowns, all computed
+/// over the last `window_hours` (optionally filtered to one site).
+#[derive(Debug, Clone, Serialize)]
+pub struct Analytics {
+    pub window_hours: u32,
+    pub bucket_secs: u32,
+    /// Dense series — every bucket in the window is present, zero-filled,
+    /// so the chart renderer never has to interpolate gaps.
+    pub buckets: Vec<TimeBucket>,
+    /// Combined bot-probability distribution, 10 bins (0–9 … 90–100).
+    pub bot_histogram: Vec<u64>,
+    /// Browser-family counts parsed from the logged User-Agent, sorted
+    /// descending.
+    pub browsers: Vec<BrowserCount>,
+    /// Per-signal fire counts: number of sessions in the window where the
+    /// signal contributed a non-zero score.
+    pub signal_fires: SignalFires,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TimeBucket {
+    /// Bucket start, RFC3339 UTC.
+    pub t: String,
+    pub puzzles: u64,
+    pub verifies: u64,
+    pub issued: u64,
+    pub rejected: u64,
+    pub pass: u64,
+    pub shadow_fail: u64,
+    pub block: u64,
+    pub pow_invalid: u64,
+    pub tier_invisible_pass: u64,
+    pub tier_checkbox: u64,
+    pub tier_hard_pow: u64,
+    pub tier_block: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BrowserCount {
+    pub name: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SignalFires {
+    pub rate: u64,
+    pub header_anomaly: u64,
+    pub ip_reputation: u64,
+    pub tls_fingerprint: u64,
+    pub honeypot: u64,
+    pub time_on_page: u64,
+    pub behavior: u64,
+}
+
 /// Aggregate counts for a single site, drawn from the decision log.
 /// Keyed by `site_key` (string-formatted UUID) so the route handler can
 /// merge it with the in-memory site registry by lookup.

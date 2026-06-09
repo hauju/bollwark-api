@@ -177,6 +177,56 @@
   .sig-table .pct { font-family: ui-monospace, monospace; text-align: right; color: var(--muted); width: 44px; }
   .sig-empty { color: var(--muted); font-style: italic; font-size: 12.5px; padding: 4px 0; }
   #status { color: var(--muted); font-size: 12px; }
+  .analytics { padding: 16px 18px; overflow: auto; }
+  .controls { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+  .controls .seg { display: flex; gap: 4px; }
+  .controls .seg button {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 5px 10px;
+    color: var(--muted);
+    cursor: pointer;
+    font: inherit;
+    font-size: 12.5px;
+  }
+  .controls .seg button:hover { color: var(--text); }
+  .controls .seg button.active {
+    color: var(--text);
+    background: var(--panel-2);
+    border-color: var(--border);
+  }
+  .controls select {
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 5px 8px;
+    font: inherit;
+    font-size: 12.5px;
+  }
+  .chart-panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 14px;
+    min-width: 0;
+  }
+  .chart-panel h3 { margin: 0 0 10px; font-size: 12px; text-transform: uppercase; color: var(--muted); letter-spacing: 0.04em; }
+  .chart-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+  .chart-svg { width: 100%; height: 150px; display: block; }
+  .cols { display: flex; align-items: flex-end; gap: 2px; height: 140px; }
+  .cols .col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; height: 100%; min-width: 2px; }
+  .cols .col > div { width: 100%; min-height: 0; }
+  .cols .col:hover { opacity: 0.8; }
+  .x-labels { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-top: 4px; font-family: ui-monospace, monospace; }
+  .hbar-row { display: grid; grid-template-columns: 110px 1fr 44px; gap: 8px; align-items: center; font-size: 12.5px; margin-bottom: 6px; }
+  .hbar-row .lbl { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hbar-row .n { font-family: ui-monospace, monospace; color: var(--muted); text-align: right; }
+  .hbar { height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
+  .hbar > div { height: 100%; }
+  .chart-empty { color: var(--muted); font-style: italic; font-size: 12.5px; padding: 12px 0; }
   .login {
     max-width: 360px;
     margin: 80px auto;
@@ -361,11 +411,35 @@ function renderApp(token) {
     ),
   );
 
+  // Analytics view: window + site filters and a body re-rendered on each
+  // refresh from /v1/admin/analytics.
+  let aHours = 24;
+  let aSite = '';
+  const WINDOWS = [[1, '1h'], [6, '6h'], [24, '24h'], [168, '7d'], [720, '30d']];
+  const winBtns = WINDOWS.map(([hrs, label]) =>
+    h('button', { class: hrs === aHours ? 'active' : '', onclick: () => {
+      aHours = hrs;
+      winBtns.forEach((b, i) => b.classList.toggle('active', WINDOWS[i][0] === hrs));
+      refresh();
+    } }, label));
+  const siteSelect = h('select', { onchange: e => { aSite = e.target.value; refresh(); } },
+    h('option', { value: '' }, 'all sites'));
+  const analyticsBody = h('div', {}, h('div', { class: 'chart-empty' }, 'loading…'));
+  const analyticsView = h('div', { class: 'left analytics', style: 'border-right: none; grid-column: 1 / -1;' },
+    h('div', { class: 'controls' },
+      h('span', { class: 'seg' }, ...winBtns),
+      siteSelect,
+    ),
+    analyticsBody,
+  );
+
   const mainEl = h('main', {}, sessionsView, aside);
   const clearBtn = h('button', { class: 'danger', onclick: () => clearAll() }, 'Clear all');
   const addSiteBtn = h('button', { style: 'display: none;', onclick: () => openAddSite() }, 'Add site');
   const sessionsTabBtn = h('button', { class: 'active', onclick: () => switchTab('sessions') }, 'Sessions');
+  const analyticsTabBtn = h('button', { onclick: () => switchTab('analytics') }, 'Analytics');
   const sitesTabBtn = h('button', { onclick: () => switchTab('sites') }, 'Sites');
+  const tabBtns = { sessions: sessionsTabBtn, analytics: analyticsTabBtn, sites: sitesTabBtn };
 
   const refreshSessions = async () => {
     const [sRes, statsRes] = await Promise.all([
@@ -399,9 +473,42 @@ function renderApp(token) {
     statusEl.textContent = `${data.sites.length} sites · refreshed ${new Date().toLocaleTimeString()}`;
   };
 
+  const refreshAnalytics = async () => {
+    const qs = `hours=${aHours}&site_key=${encodeURIComponent(aSite)}`;
+    const [aRes, sitesRes] = await Promise.all([
+      fetch(`/v1/admin/analytics?${qs}`, { headers: { Authorization: `Bearer ${token}` } }),
+      fetch('/v1/admin/sites', { headers: { Authorization: `Bearer ${token}` } }),
+    ]);
+    if (aRes.status === 401 || sitesRes.status === 401) {
+      sessionStorage.removeItem(TOKEN_KEY);
+      location.reload();
+      return;
+    }
+    if (!aRes.ok) throw new Error(`HTTP ${aRes.status}`);
+    if (!sitesRes.ok) throw new Error(`HTTP ${sitesRes.status}`);
+    const data = await aRes.json();
+    updateSiteOptions((await sitesRes.json()).sites);
+    analyticsBody.replaceChildren(...renderAnalytics(data));
+    const total = data.buckets.reduce((n, b) => n + b.puzzles, 0);
+    statusEl.textContent = `${total} requests in window · refreshed ${new Date().toLocaleTimeString()}`;
+  };
+
+  // Rebuild the site dropdown only when the set of sites changed, so the
+  // 3s poll doesn't close an open dropdown under the operator's cursor.
+  const updateSiteOptions = (sites) => {
+    if (siteSelect.options.length === sites.length + 1) return;
+    const cur = siteSelect.value;
+    siteSelect.replaceChildren(
+      h('option', { value: '' }, 'all sites'),
+      ...sites.map(s => h('option', { value: s.site_key }, s.name)),
+    );
+    siteSelect.value = cur;
+  };
+
   const refresh = async () => {
     try {
       if (activeTab === 'sessions') await refreshSessions();
+      else if (activeTab === 'analytics') await refreshAnalytics();
       else await refreshSites();
     } catch (e) {
       statusEl.textContent = `error: ${e.message}`;
@@ -411,12 +518,13 @@ function renderApp(token) {
   const switchTab = (tab) => {
     if (tab === activeTab) return;
     activeTab = tab;
-    sessionsTabBtn.classList.toggle('active', tab === 'sessions');
-    sitesTabBtn.classList.toggle('active', tab === 'sites');
+    for (const [k, btn] of Object.entries(tabBtns)) btn.classList.toggle('active', k === tab);
     clearBtn.style.display = tab === 'sessions' ? '' : 'none';
     addSiteBtn.style.display = tab === 'sites' ? '' : 'none';
     if (tab === 'sessions') {
       mainEl.replaceChildren(sessionsView, aside);
+    } else if (tab === 'analytics') {
+      mainEl.replaceChildren(analyticsView);
     } else {
       mainEl.replaceChildren(sitesView);
     }
@@ -608,7 +716,7 @@ function renderApp(token) {
     h('header', {},
       h('h1', {}, 'rust-captcha'),
       h('span', { class: 'muted' }, 'validation dashboard'),
-      h('span', { class: 'tabs' }, sessionsTabBtn, sitesTabBtn),
+      h('span', { class: 'tabs' }, sessionsTabBtn, analyticsTabBtn, sitesTabBtn),
       h('span', { class: 'grow' }),
       statusEl,
       h('button', { onclick: () => refresh() }, 'Refresh'),
@@ -766,6 +874,164 @@ function renderContribution(breakdown, keys, total) {
 
 const PUZZLE_KEYS = ['rate', 'header_anomaly', 'ip_reputation', 'tls_fingerprint'];
 const VERIFY_KEYS = ['honeypot', 'time_on_page', 'behavior'];
+
+// ---- Analytics charts (vanilla SVG/divs, no chart library) ----
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const sv = (tag, attrs = {}, ...kids) => {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  for (const k of kids) el.append(k.nodeType ? k : document.createTextNode(k));
+  return el;
+};
+
+const PROB_COLORS = ['#3fb950', '#d29922', '#f85149']; // good / warn / bad
+const probabilityColor = (p) => PROB_COLORS[p >= 60 ? 2 : p >= 30 ? 1 : 0];
+
+const TRAFFIC_SERIES = [
+  { key: 'puzzles',  label: 'puzzle requests', color: '#58a6ff' },
+  { key: 'verifies', label: 'verifies',        color: '#3fb950' },
+];
+const OUTCOME_SERIES = [
+  { key: 'pass',        label: 'pass',           color: '#3fb950' },
+  { key: 'shadow_fail', label: 'shadow fail',    color: '#d29922' },
+  { key: 'block',       label: 'block',          color: '#f85149' },
+  { key: 'pow_invalid', label: 'pow invalid',    color: '#ff7b72' },
+  { key: 'rejected',    label: 'rejected (429)', color: '#da3633' },
+];
+const TIER_SERIES = [
+  { key: 'tier_invisible_pass', label: 'invisible', color: '#3fb950' },
+  { key: 'tier_checkbox',       label: 'checkbox',  color: '#58a6ff' },
+  { key: 'tier_hard_pow',       label: 'hard pow',  color: '#d29922' },
+  { key: 'tier_block',          label: 'block',     color: '#f85149' },
+];
+
+const fmtBucketTime = (iso, bucketSecs) => {
+  const d = new Date(iso);
+  return bucketSecs >= 86400
+    ? d.toLocaleDateString()
+    : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+};
+
+const xLabels = (buckets, bucketSecs) => {
+  const at = (i) => fmtBucketTime(buckets[i].t, bucketSecs);
+  return h('div', { class: 'x-labels' },
+    h('span', {}, at(0)),
+    h('span', {}, at(Math.floor((buckets.length - 1) / 2))),
+    h('span', {}, at(buckets.length - 1)),
+  );
+};
+
+const chartLegend = (series) =>
+  h('div', { class: 'dist-row', style: 'margin-top: 6px;' },
+    ...series.map(s =>
+      h('span', { class: 'dist-chip' },
+        h('span', { style: `background: ${s.color}; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle;` }),
+        s.label,
+      )));
+
+const bucketTitle = (b, series) =>
+  `${new Date(b.t).toLocaleString()}\n${series.map(s => `${s.label}: ${b[s.key]}`).join('\n')}`;
+
+function lineChart(buckets, series) {
+  const W = 800, H = 150, PAD = 6;
+  const n = buckets.length;
+  const max = Math.max(1, ...buckets.flatMap(b => series.map(s => b[s.key])));
+  const x = (i) => n === 1 ? W / 2 : i / (n - 1) * W;
+  const y = (v) => H - PAD - v / max * (H - 2 * PAD);
+  const svg = sv('svg', { class: 'chart-svg', viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none' });
+  for (const s of series) {
+    const pts = buckets.map((b, i) => `${x(i)},${y(b[s.key])}`);
+    svg.append(
+      sv('path', {
+        d: `M${x(0)},${H - PAD} L${pts.join(' L')} L${x(n - 1)},${H - PAD} Z`,
+        fill: s.color, 'fill-opacity': '0.12',
+      }),
+      sv('polyline', {
+        points: pts.join(' '), fill: 'none', stroke: s.color,
+        'stroke-width': '1.5', 'vector-effect': 'non-scaling-stroke',
+      }),
+    );
+  }
+  // One invisible hover target per bucket carrying the tooltip.
+  buckets.forEach((b, i) => {
+    const r = sv('rect', { x: x(i) - W / n / 2, y: 0, width: W / n, height: H, fill: 'transparent' });
+    r.append(sv('title', {}, bucketTitle(b, series)));
+    svg.append(r);
+  });
+  return svg;
+}
+
+// Stacked column chart. Heights are relative to the tallest bucket total so
+// columns stay comparable across the window.
+function columnChart(buckets, series) {
+  const max = Math.max(1, ...buckets.map(b => series.reduce((n, s) => n + b[s.key], 0)));
+  return h('div', { class: 'cols' },
+    ...buckets.map(b =>
+      h('div', { class: 'col', title: bucketTitle(b, series) },
+        // Reversed so series[0] renders at the bottom of the stack.
+        ...series.filter(s => b[s.key] > 0).reverse().map(s =>
+          h('div', { style: `height: ${b[s.key] / max * 100}%; background: ${s.color}` })),
+      )));
+}
+
+function histogramChart(bins) {
+  const max = Math.max(1, ...bins);
+  return h('div', {},
+    h('div', { class: 'cols' },
+      ...bins.map((v, i) =>
+        h('div', { class: 'col', title: `${i * 10}–${i === 9 ? 100 : i * 10 + 9}%: ${v}` },
+          v > 0 ? h('div', { style: `height: ${v / max * 100}%; background: ${probabilityColor(i * 10 + 5)}` }) : null,
+        ))),
+    h('div', { class: 'x-labels' }, h('span', {}, '0%'), h('span', {}, '50%'), h('span', {}, '100%')),
+  );
+}
+
+// Horizontal bar list: [{label, value, color}], scaled to the largest value.
+function hbarList(entries) {
+  const shown = entries.filter(e => e.value > 0);
+  if (shown.length === 0) return h('div', { class: 'chart-empty' }, 'nothing recorded in window');
+  const max = Math.max(...shown.map(e => e.value));
+  return h('div', {},
+    ...shown.map(e =>
+      h('div', { class: 'hbar-row' },
+        h('span', { class: 'lbl', title: e.label }, e.label),
+        h('span', { class: 'hbar' }, h('div', { style: `width: ${e.value / max * 100}%; background: ${e.color}` })),
+        h('span', { class: 'n' }, String(e.value)),
+      )));
+}
+
+function renderAnalytics(a) {
+  const buckets = a.buckets;
+  const total = buckets.reduce((n, b) => n + b.puzzles, 0);
+  const panel = (title, ...kids) => h('div', { class: 'chart-panel' }, h('h3', {}, title), ...kids);
+
+  if (total === 0) {
+    return [panel('Traffic', h('div', { class: 'chart-empty' }, 'No requests in this window.'))];
+  }
+
+  return [
+    panel('Traffic',
+      lineChart(buckets, TRAFFIC_SERIES),
+      xLabels(buckets, a.bucket_secs),
+      chartLegend(TRAFFIC_SERIES)),
+    panel('Outcomes',
+      columnChart(buckets, OUTCOME_SERIES),
+      xLabels(buckets, a.bucket_secs),
+      chartLegend(OUTCOME_SERIES)),
+    panel('Escalation tiers',
+      columnChart(buckets, TIER_SERIES),
+      xLabels(buckets, a.bucket_secs),
+      chartLegend(TIER_SERIES)),
+    h('div', { class: 'chart-grid' },
+      panel('Bot probability', histogramChart(a.bot_histogram)),
+      panel('Browsers', hbarList(a.browsers.map(b => ({ label: b.name, value: b.count, color: '#58a6ff' })))),
+      panel('Signal fire rate', hbarList(
+        [...PUZZLE_KEYS, ...VERIFY_KEYS].map(k =>
+          ({ label: SIGNAL_LABELS[k], value: a.signal_fires[k], color: SIGNAL_COLORS[k] })))),
+    ),
+  ];
+}
 
 function renderDetail(s) {
   const p = s.bot_probability;
