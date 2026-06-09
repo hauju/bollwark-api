@@ -7,14 +7,14 @@ use rust_captcha::api;
 use rust_captcha::api::state::{
     AppState, info_urls_from_config, tier_thresholds_from_config, verify_thresholds_from_config,
 };
-use rust_captcha::config::{AppConfig, CookieSameSiteCfg};
+use rust_captcha::config::AppConfig;
 use rust_captcha::dashboard::{DecisionLog, Sessions, routes::AdminState};
 use rust_captcha::puzzle::challenge::PuzzleEngine;
 use rust_captcha::puzzle::difficulty::DifficultyCalculator;
 use rust_captcha::puzzle::types::PuzzleConfig;
 use rust_captcha::risk::{
-    CidrListReputation, CookieSigner, FingerprintBlocklist, ReputationStore, RiskScorer,
-    TrustedProxies, VerifyScorer,
+    CidrListReputation, FingerprintBlocklist, ReputationStore, RiskScorer, TrustedProxies,
+    VerifyScorer,
 };
 use rust_captcha::storage::Store;
 use rust_captcha::storage::memory::InMemoryStore;
@@ -50,16 +50,6 @@ async fn main() {
     }
 
     let mut config = AppConfig::from_env();
-
-    // Browsers refuse SameSite=None without Secure. Validate before binding
-    // the listener — if we proceed, the cookie signal silently breaks for
-    // every embedder, which is the worst kind of silent regression.
-    if config.cookie_samesite == CookieSameSiteCfg::None && !config.cookie_secure {
-        panic!(
-            "COOKIE_SAMESITE=None requires COOKIE_SECURE=true — browsers reject the cookie otherwise. \
-             Either terminate TLS and set COOKIE_SECURE=true, or use SameSite=Lax."
-        );
-    }
 
     if config.dev_disable_admin_auth {
         if cfg!(debug_assertions) {
@@ -137,19 +127,6 @@ async fn main() {
         }
         spawn_reputation_watcher(path, Arc::clone(&reputation));
     }
-
-    // Cookie signing: only enabled when a secret is configured.
-    let cookie_signer = match &config.cookie_signing_secret {
-        Some(secret) if secret.len() >= 16 => {
-            tracing::info!("Trust cookie signing enabled");
-            Some(CookieSigner::new(secret.clone().into_bytes()))
-        }
-        Some(_) => {
-            tracing::warn!("COOKIE_SIGNING_SECRET set but shorter than 16 bytes — ignored");
-            None
-        }
-        None => None,
-    };
 
     // TLS fingerprint signal: optional, requires both a header name and a
     // trusted-proxies CIDR list. The blocklist is loaded if a path is given.
@@ -267,18 +244,11 @@ async fn main() {
         }
     }
 
-    if config.full_fingerprint_mode {
-        tracing::warn!(
-            "FULL_FINGERPRINT_MODE enabled — live decisions use header / IP-reputation / \
-             cookie / TLS / behavior signals. Make sure your privacy notice and ePrivacy \
-             posture (cookie consent, fingerprinting disclosure, DPIA) reflect this."
-        );
-    } else {
-        tracing::info!(
-            "Running in minimal-privacy default — live decisions use rate + honeypot + \
-             time-on-page + PoW only. Set FULL_FINGERPRINT_MODE=1 to opt into fingerprinting."
-        );
-    }
+    tracing::info!(
+        "Cookie-free operation — live decisions use rate + header anomaly + honeypot + \
+         time-on-page + behavior + PoW (plus IP reputation / TLS fingerprint when configured). \
+         No client-side storage; signals run under legitimate interest with data minimization."
+    );
 
     let state = Arc::new(AppState {
         store,
@@ -290,13 +260,11 @@ async fn main() {
             tls_blocklist,
         ),
         verify_scorer: VerifyScorer::new(verify_thresholds_from_config(&config)),
-        cookie_signer,
         tls_fingerprint_header: config.tls_fingerprint_header.clone(),
         trusted_proxies,
         decision_log,
         admin_token,
         info_urls,
-        full_fingerprint_mode: config.full_fingerprint_mode,
         config: config.clone(),
     });
 

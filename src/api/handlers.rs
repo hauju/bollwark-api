@@ -4,16 +4,14 @@ use axum::Json;
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
-use axum::http::header::{AUTHORIZATION, COOKIE, HeaderValue, SET_COOKIE, USER_AGENT};
+use axum::http::header::{AUTHORIZATION, USER_AGENT};
 use axum::response::IntoResponse;
 
-use crate::config::CookieSameSiteCfg;
 use crate::dashboard::types::{PuzzleRecord, VerifyRecord};
 use crate::error::CaptchaError;
-use crate::risk::cookie::{CookieSameSite, extract_cookie, now_secs, set_cookie_header};
 use crate::risk::{
-    BehaviorPresence, CookiePresence, EscalationTier, SignalContext, TlsFingerprint, VerifyContext,
-    VerifyDecision, client_ip, difficulty_for,
+    BehaviorPresence, EscalationTier, SignalContext, TlsFingerprint, VerifyContext, VerifyDecision,
+    anonymize_ip, client_ip, difficulty_for,
 };
 use crate::site::types::Site;
 use crate::storage::Store;
@@ -43,28 +41,6 @@ pub async fn get_puzzle(
     let ip_count = state.store.increment_ip_count(&ip).await?;
     let site_count = state.store.increment_site_count(&params.site_key).await?;
 
-    // Trust cookie: if signing is configured, read & verify the existing cookie
-    // and feed its age into the score. Issue a fresh cookie when missing/invalid.
-    let now = now_secs();
-    let mut cookie = CookiePresence::Disabled;
-    let mut new_cookie_token: Option<String> = None;
-
-    if let Some(signer) = &state.cookie_signer {
-        let existing = headers
-            .get(COOKIE)
-            .and_then(|v| v.to_str().ok())
-            .and_then(extract_cookie);
-        match existing.and_then(|t| signer.verify(t, now)) {
-            Some(issued_at) => {
-                cookie = CookiePresence::Present(now.saturating_sub(issued_at));
-            }
-            None => {
-                cookie = CookiePresence::Missing;
-                new_cookie_token = Some(signer.issue(now));
-            }
-        }
-    }
-
     // TLS fingerprint: only honor the header when the immediate peer is in
     // the trusted-proxies CIDR. Direct clients can otherwise spoof the value.
     let tls_fingerprint = match (
@@ -78,42 +54,25 @@ pub async fn get_puzzle(
         _ => TlsFingerprint::Skipped,
     };
 
-    // Score the request. The live mode is driven by `full_fingerprint_mode`;
-    // the *other* mode is computed only when the dashboard is consuming it,
-    // so a baseline production deployment (FULL_FINGERPRINT_MODE unset,
-    // ADMIN_DB_PATH unset) never invokes the fingerprint scorers at all
-    // (header anomaly, IP reputation, cookie age, TLS fingerprint).
+    // Score the request. Every signal self-gates on its own input — header
+    // anomaly always computes, IP reputation is 0 without IP_REPUTATION_FILE,
+    // and TLS fingerprint is 0 unless a trusted proxy supplied the header — so
+    // the privacy-invasive signals only fire when their inputs are configured.
     let ctx = SignalContext {
         ip,
         headers: &headers,
         ip_count,
         site_count,
-        cookie,
         tls_fingerprint,
     };
-    let log_enabled = state.decision_log.is_some();
-    let score = if state.full_fingerprint_mode {
-        state.risk.score(&ctx)
-    } else {
-        state.risk.score_minimal(&ctx)
-    };
-    let shadow = if log_enabled {
-        Some(if state.full_fingerprint_mode {
-            state.risk.score_minimal(&ctx)
-        } else {
-            state.risk.score(&ctx)
-        })
-    } else {
-        None
-    };
-    // Decompose the live + shadow pair into the (full, minimal) the log
-    // record expects. When the dashboard is off, both halves carry the live
-    // score — the row is never read anyway.
-    let (score_full, score_minimal) = if state.full_fingerprint_mode {
-        (score, shadow.unwrap_or(score))
-    } else {
-        (shadow.unwrap_or(score), score)
-    };
+    let score = state.risk.score(&ctx);
+
+    // Aggregate site-load floor: when the whole site is under load, raise PoW
+    // difficulty for every visitor regardless of their individual risk score.
+    // It composes with the per-request tier via max() and never blocks — Block
+    // stays a per-request risk decision, so a load spike (launch, viral link)
+    // slows everyone fairly instead of 429-ing real users.
+    let load_floor = state.config.load_ladder.floor_for(site_count);
 
     // Block is the only tier that doesn't issue a PoW puzzle (it rejects
     // with 429 below). Every other tier maps to a difficulty here.
@@ -121,7 +80,8 @@ pub async fn get_puzzle(
         score.tier,
         state.config.default_difficulty,
         state.config.max_difficulty,
-    );
+    )
+    .map(|d| d.max(load_floor).min(state.config.max_difficulty));
     let outcome = match score.tier {
         EscalationTier::Block => "rejected",
         _ => "issued",
@@ -137,12 +97,11 @@ pub async fn get_puzzle(
         score = score.total,
         tier = ?score.tier,
         difficulty = maybe_difficulty.unwrap_or(0),
+        load_floor,
         sig_rate = score.breakdown.rate,
         sig_header_anomaly = score.breakdown.header_anomaly,
         sig_ip_reputation = score.breakdown.ip_reputation,
-        sig_cookie_age = score.breakdown.cookie_age,
         sig_tls_fingerprint = score.breakdown.tls_fingerprint,
-        cookie_presence = ?cookie,
         tls_fingerprint = ?tls_fingerprint,
         "Puzzle decision"
     );
@@ -154,12 +113,22 @@ pub async fn get_puzzle(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
+    // IP stored in the decision log. Scoring above already used the full `ip`;
+    // here we keep only the network prefix when ANONYMIZE_LOG_IP is on (the
+    // default) so the durable dashboard log holds no per-visitor address.
+    let logged_ip = if state.config.anonymize_log_ip {
+        anonymize_ip(ip)
+    } else {
+        ip
+    }
+    .to_string();
+
     if score.tier == EscalationTier::Block {
         if let Some(log) = &state.decision_log {
             log.record_puzzle(PuzzleRecord {
                 challenge_id: None,
                 site_key: params.site_key,
-                ip: ip.to_string(),
+                ip: logged_ip,
                 ip_count,
                 site_count,
                 score: score.total,
@@ -167,13 +136,8 @@ pub async fn get_puzzle(
                 difficulty: 0,
                 outcome: "rejected",
                 breakdown: score.breakdown,
-                cookie_presence: format!("{cookie:?}"),
                 tls_fingerprint: format!("{tls_fingerprint:?}"),
                 user_agent: ua,
-                score_full: score_full.total,
-                tier_full: score_full.tier,
-                score_minimal: score_minimal.total,
-                tier_minimal: score_minimal.tier,
             });
         }
         // Block-tier still returns a structured JSON body so the widget
@@ -196,7 +160,7 @@ pub async fn get_puzzle(
         log.record_puzzle(PuzzleRecord {
             challenge_id: Some(challenge.id),
             site_key: params.site_key,
-            ip: ip.to_string(),
+            ip: logged_ip,
             ip_count,
             site_count,
             score: score.total,
@@ -204,13 +168,8 @@ pub async fn get_puzzle(
             difficulty: challenge.difficulty,
             outcome: "issued",
             breakdown: score.breakdown,
-            cookie_presence: format!("{cookie:?}"),
             tls_fingerprint: format!("{tls_fingerprint:?}"),
             user_agent: ua,
-            score_full: score_full.total,
-            tier_full: score_full.tier,
-            score_minimal: score_minimal.total,
-            tier_minimal: score_minimal.tier,
         });
     }
 
@@ -226,19 +185,7 @@ pub async fn get_puzzle(
 
     state.store.store_challenge(&challenge).await?;
 
-    let mut response_headers = HeaderMap::new();
-    if let Some(token) = new_cookie_token {
-        let same_site = match state.config.cookie_samesite {
-            CookieSameSiteCfg::Lax => CookieSameSite::Lax,
-            CookieSameSiteCfg::None => CookieSameSite::None,
-        };
-        let cookie = set_cookie_header(&token, state.config.cookie_secure, same_site);
-        if let Ok(value) = HeaderValue::from_str(&cookie) {
-            response_headers.insert(SET_COOKIE, value);
-        }
-    }
-
-    Ok((response_headers, Json(response)).into_response())
+    Ok(Json(response).into_response())
 }
 
 pub async fn verify(
@@ -312,12 +259,7 @@ pub async fn verify(
                 score: 0,
                 breakdown: Default::default(),
                 time_on_page_ms: Some(time_on_page_ms),
-                cookie_presence: "Unknown".into(),
                 webdriver: "n/a",
-                score_full: 0,
-                outcome_full: invalid_outcome,
-                score_minimal: 0,
-                outcome_minimal: invalid_outcome,
             });
         }
         return Ok(Json(VerifyResponse { success: false }));
@@ -328,23 +270,9 @@ pub async fn verify(
     // cannot both pass.
     state.store.consume_challenge(&challenge.id).await?;
 
-    // Verify-time risk scoring: time-on-page, cookie age at verify, honeypot.
+    // Verify-time risk scoring: time-on-page, honeypot, behavioral telemetry.
     // The decision can promote a PoW-valid request to ShadowFail (success=true,
-    // logged) or Block (success=false) based on behavioral signals.
-    let now = now_secs();
-    let cookie = if let Some(signer) = &state.cookie_signer {
-        let token = headers
-            .get(axum::http::header::COOKIE)
-            .and_then(|v| v.to_str().ok())
-            .and_then(extract_cookie);
-        match token.and_then(|t| signer.verify(t, now)) {
-            Some(issued_at) => CookiePresence::Present(now.saturating_sub(issued_at)),
-            None => CookiePresence::Missing,
-        }
-    } else {
-        CookiePresence::Disabled
-    };
-
+    // logged) or Block (success=false) based on these signals.
     let honeypot_tripped = req.honeypot.as_deref().is_some_and(|s| !s.is_empty());
     let behavior = match req.behavior {
         Some(report) => BehaviorPresence::Present(report),
@@ -353,29 +281,9 @@ pub async fn verify(
     let vctx = VerifyContext {
         honeypot_tripped,
         time_on_page_ms: Some(time_on_page_ms),
-        cookie,
         behavior,
     };
-    let v_log_enabled = state.decision_log.is_some();
-    let vscore = if state.full_fingerprint_mode {
-        state.verify_scorer.score(&vctx)
-    } else {
-        state.verify_scorer.score_minimal(&vctx)
-    };
-    let v_shadow = if v_log_enabled {
-        Some(if state.full_fingerprint_mode {
-            state.verify_scorer.score_minimal(&vctx)
-        } else {
-            state.verify_scorer.score(&vctx)
-        })
-    } else {
-        None
-    };
-    let (vscore_full, vscore_minimal) = if state.full_fingerprint_mode {
-        (vscore, v_shadow.unwrap_or(vscore))
-    } else {
-        (v_shadow.unwrap_or(vscore), vscore)
-    };
+    let vscore = state.verify_scorer.score(&vctx);
 
     let (success, outcome) = match vscore.decision {
         VerifyDecision::Pass => (true, "pass"),
@@ -406,11 +314,9 @@ pub async fn verify(
                 score = vscore.total,
                 sig_honeypot = vscore.breakdown.honeypot,
                 sig_time_on_page = vscore.breakdown.time_on_page,
-                sig_cookie_age = vscore.breakdown.cookie_age,
                 sig_behavior = vscore.breakdown.behavior,
                 webdriver = webdriver_flag,
                 time_on_page_ms = time_on_page_ms,
-                cookie_presence = ?cookie,
                 "Verify decision"
             )
         };
@@ -421,8 +327,6 @@ pub async fn verify(
     }
 
     if let Some(log) = &state.decision_log {
-        let outcome_full = decision_outcome(vscore_full.decision);
-        let outcome_minimal = decision_outcome(vscore_minimal.decision);
         log.record_verify(VerifyRecord {
             challenge_id: challenge.id,
             success,
@@ -430,12 +334,7 @@ pub async fn verify(
             score: vscore.total,
             breakdown: vscore.breakdown,
             time_on_page_ms: Some(time_on_page_ms),
-            cookie_presence: format!("{cookie:?}"),
             webdriver: webdriver_flag,
-            score_full: vscore_full.total,
-            outcome_full,
-            score_minimal: vscore_minimal.total,
-            outcome_minimal,
         });
     }
 
@@ -475,14 +374,6 @@ pub async fn create_site(
         site_key,
         secret_key,
     }))
-}
-
-fn decision_outcome(decision: VerifyDecision) -> &'static str {
-    match decision {
-        VerifyDecision::Pass => "pass",
-        VerifyDecision::ShadowFail => "shadow_fail",
-        VerifyDecision::Block => "block",
-    }
 }
 
 /// Validate the `Authorization: Bearer <token>` header against the configured

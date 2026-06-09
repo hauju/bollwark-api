@@ -18,8 +18,8 @@ use rust_captcha::puzzle::challenge::{
 use rust_captcha::puzzle::difficulty::DifficultyCalculator;
 use rust_captcha::puzzle::types::{Algorithm, Argon2idParams, PuzzleConfig};
 use rust_captcha::risk::{
-    CidrListReputation, CookieSigner, EscalationTier, FingerprintBlocklist, ReputationStore,
-    RiskScorer, TrustedProxies, VerifyScorer,
+    CidrListReputation, EscalationTier, FingerprintBlocklist, ReputationStore, RiskScorer,
+    TrustedProxies, VerifyScorer,
 };
 use rust_captcha::storage::memory::InMemoryStore;
 
@@ -58,11 +58,12 @@ async fn backdate_challenge(store: &InMemoryStore, id: uuid::Uuid, secs: i64) {
 #[derive(Default)]
 struct TestAppBuilder {
     reputation_cidrs: Option<String>,
-    cookie_secret: Option<&'static str>,
     tls_blocklist: Option<String>,
     tls_header: Option<&'static str>,
     trusted_proxies: Option<&'static str>,
     algorithm: Option<Algorithm>,
+    /// `LOAD_LADDER` spec for the aggregate site-load difficulty floor.
+    load_ladder: Option<&'static str>,
     /// Override the admin token. Default is the constant `TEST_ADMIN_TOKEN`,
     /// which `create_test_site` sends as a bearer to satisfy the gate.
     /// Set to `Some(None)` to disable the token entirely (so `/v1/sites`
@@ -87,11 +88,16 @@ impl TestAppBuilder {
             Algorithm::Sha256 => 8,
             Algorithm::Argon2id(_) => 4,
         };
+        let load_ladder = self
+            .load_ladder
+            .map(|spec| rust_captcha::risk::LoadLadder::parse(spec).unwrap())
+            .unwrap_or_default();
         let config = AppConfig {
             puzzle_algorithm: algorithm,
             default_difficulty,
             min_difficulty: 1,
             max_difficulty: 16,
+            load_ladder,
             challenge_ttl_secs: 300,
             tls_fingerprint_header: self.tls_header.map(String::from),
             ..AppConfig::default()
@@ -107,9 +113,6 @@ impl TestAppBuilder {
             Some(content) => ReputationStore::new(CidrListReputation::parse(&content).unwrap()),
             None => ReputationStore::empty(),
         });
-        let cookie_signer = self
-            .cookie_secret
-            .map(|s| CookieSigner::new(s.as_bytes().to_vec()));
         let tls_blocklist = std::sync::Arc::new(match self.tls_blocklist {
             Some(content) => FingerprintBlocklist::parse(&content).unwrap(),
             None => FingerprintBlocklist::empty(),
@@ -136,13 +139,11 @@ impl TestAppBuilder {
             difficulty: DifficultyCalculator::new(&config),
             risk,
             verify_scorer,
-            cookie_signer,
             tls_fingerprint_header: self.tls_header.map(String::from),
             trusted_proxies,
             decision_log: None,
             admin_token,
             info_urls: None,
-            full_fingerprint_mode: true,
             config,
         });
         (api::router(state, None), store)
@@ -591,6 +592,38 @@ async fn test_clean_headers_low_rate_yields_invisible_pass() {
 }
 
 #[tokio::test]
+async fn test_load_ladder_floors_difficulty_under_site_load() {
+    // Floor difficulty to 12 bits once the site sees >= 3 requests in the
+    // window. The clients are individually clean (InvisiblePass), so this
+    // isolates the aggregate load floor from per-request risk.
+    let app = test_app_with(|b| b.load_ladder = Some("3:12"));
+    let site = create_test_site(&app).await;
+    let key = site.site_key.to_string();
+
+    // Each request comes from a distinct IP so per-IP rate never escalates the
+    // tier — only the per-site counter climbs toward the ladder threshold.
+    let mut difficulties = Vec::new();
+    let mut tiers = Vec::new();
+    for i in 0..3 {
+        let req = puzzle_request(&key, Some(CLEAN_UA), Some(CLEAN_LANG), Some(CLEAN_ENC));
+        let ip = format!("10.0.0.{}", 100 + i);
+        let (status, puzzle) = send_puzzle(&app, with_connect_info_ip(req, &ip)).await;
+        assert_eq!(status, StatusCode::OK);
+        let puzzle = puzzle.unwrap();
+        difficulties.push(puzzle.difficulty);
+        tiers.push(puzzle.tier);
+    }
+
+    // Below the threshold (site_count 1 and 2) the floor is 0 → base 8.
+    assert_eq!(difficulties[0], 8);
+    assert_eq!(difficulties[1], 8);
+    // The 3rd request meets the threshold → floor 12 = max(base 8, 12).
+    assert_eq!(difficulties[2], 12);
+    // The floor never changes the tier — it only raises difficulty.
+    assert!(tiers.iter().all(|t| *t == EscalationTier::InvisiblePass));
+}
+
+#[tokio::test]
 async fn test_missing_user_agent_bumps_to_checkbox() {
     let app = test_app();
     let site = create_test_site(&app).await;
@@ -657,18 +690,15 @@ async fn test_spam_plus_suspicious_ua_serves_hard_pow() {
 }
 
 #[tokio::test]
-async fn test_very_fast_submit_with_missing_cookie_blocks() {
+async fn test_very_fast_submit_shadow_fails() {
     // No backdating: the challenge is issued and verified ~instantly, so the
-    // server-derived time-on-page is well under 500ms → +50. Cookie missing →
-    // +5 → total 55. With default VERIFY_BLOCK_MIN=60 that's still ShadowFail
-    // (success=true).
+    // server-derived time-on-page is well under 500ms → +50. With default
+    // VERIFY_BLOCK_MIN=60 that's ShadowFail (success=true), not Block.
     //
     // For this assertion we verify the ShadowFail path: success returned
     // despite a suspicious time. A future test with tightened thresholds can
     // exercise Block.
-    let app = test_app_with(|b| {
-        b.cookie_secret = Some("0123456789abcdef-test-secret-32b!");
-    });
+    let app = test_app();
     let site = create_test_site(&app).await;
     let (_, puzzle) = get_test_puzzle(&app, &site.site_key.to_string()).await;
     let puzzle = puzzle.unwrap();
@@ -857,68 +887,19 @@ async fn test_tor_ip_escalates_to_hard_pow() {
 }
 
 #[tokio::test]
-async fn test_cookie_round_trip_lowers_score() {
-    // With cookies enabled, the first request issues a cookie. If we replay
-    // that cookie immediately on a second request, age is 0 → +20 (very young).
-    // If we wait conceptually (cookie says it's old) the score drops.
-    let app = test_app_with(|b| {
-        b.cookie_secret = Some("0123456789abcdef-test-secret-32b!");
-    });
+async fn test_no_cookie_is_ever_set() {
+    // Cookie-free: the puzzle endpoint must never emit a Set-Cookie header.
+    let app = test_app();
     let site = create_test_site(&app).await;
     let key = site.site_key.to_string();
 
-    // First call: no cookie → server issues one
     let req = puzzle_request(&key, Some(CLEAN_UA), Some(CLEAN_LANG), Some(CLEAN_ENC));
-    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let set_cookie = resp
-        .headers()
-        .get("set-cookie")
-        .expect("first response sets cookie")
-        .to_str()
-        .unwrap()
-        .to_string();
-    assert!(set_cookie.contains("__captcha_trust="));
-
-    // Second call: send cookie back. Age should be ~0 → server should NOT
-    // re-issue (no new Set-Cookie). Tier stays InvisiblePass since the
-    // very-young penalty (20) is right at the Checkbox threshold but the
-    // request is otherwise clean — actually 20 == Checkbox threshold, so tier
-    // == Checkbox.
-    let cookie_pair = set_cookie.split(';').next().unwrap();
-    let mut req = puzzle_request(&key, Some(CLEAN_UA), Some(CLEAN_LANG), Some(CLEAN_ENC));
-    req.headers_mut()
-        .insert("cookie", cookie_pair.parse().unwrap());
     let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(
         resp.headers().get("set-cookie").is_none(),
-        "valid cookie should not trigger re-issuance"
+        "service is cookie-free — no Set-Cookie should ever be issued"
     );
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let p: PuzzleResponse = serde_json::from_slice(&body).unwrap();
-    assert_eq!(p.tier, EscalationTier::Checkbox); // very-young cookie hits 20
-}
-
-#[tokio::test]
-async fn test_invalid_cookie_treated_as_missing() {
-    let app = test_app_with(|b| {
-        b.cookie_secret = Some("0123456789abcdef-test-secret-32b!");
-    });
-    let site = create_test_site(&app).await;
-    let key = site.site_key.to_string();
-
-    let mut req = puzzle_request(&key, Some(CLEAN_UA), Some(CLEAN_LANG), Some(CLEAN_ENC));
-    req.headers_mut().insert(
-        "cookie",
-        "__captcha_trust=garbage.signature".parse().unwrap(),
-    );
-    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    // Server should issue a fresh cookie since the supplied one is invalid.
-    assert!(resp.headers().get("set-cookie").is_some());
 }
 
 #[tokio::test]

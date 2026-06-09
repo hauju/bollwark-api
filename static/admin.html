@@ -702,33 +702,7 @@ function renderStats(s) {
           ),
         )
       : null,
-    renderPrivacyCompareStats(s.privacy_compare),
   ].filter(Boolean);
-}
-
-// Privacy mode rollup: how often the live decision diverged from the
-// minimal-mode shadow score across every recorded session. The percentage
-// is the answer to "how much detection power do I lose if I drop
-// fingerprinting/cookies?" — divergence above ~5–10% means the dropped
-// signals were doing real work and minimal mode would let some bots through.
-function renderPrivacyCompareStats(c) {
-  if (!c || c.puzzle_total === 0) return null;
-  const pct = (n, total) => total > 0 ? `${Math.round(n / total * 1000) / 10}%` : '—';
-  return h('div', { class: 'stats-row' },
-    h('span', { class: 'lbl' }, 'minimal vs. full'),
-    h('div', { class: 'dist-row' },
-      h('span', { class: 'dist-chip' },
-        'puzzle diff',
-        h('span', { class: 'n' }, `${c.puzzle_diverged} (${pct(c.puzzle_diverged, c.puzzle_total)})`),
-      ),
-      c.verify_total > 0
-        ? h('span', { class: 'dist-chip' },
-            'verify diff',
-            h('span', { class: 'n' }, `${c.verify_diverged} (${pct(c.verify_diverged, c.verify_total)})`),
-          )
-        : null,
-    ),
-  );
 }
 
 function sumValues(obj) {
@@ -741,7 +715,6 @@ const SIGNAL_COLORS = {
   rate:            '#58a6ff',
   header_anomaly:  '#d29922',
   ip_reputation:   '#f85149',
-  cookie_age:      '#bc8cff',
   tls_fingerprint: '#79c0ff',
   honeypot:        '#ff7b72',
   time_on_page:    '#ffa657',
@@ -752,7 +725,6 @@ const SIGNAL_LABELS = {
   rate: 'rate',
   header_anomaly: 'header anomaly',
   ip_reputation: 'ip reputation',
-  cookie_age: 'cookie age',
   tls_fingerprint: 'tls fingerprint',
   honeypot: 'honeypot',
   time_on_page: 'time on page',
@@ -792,8 +764,8 @@ function renderContribution(breakdown, keys, total) {
   return h('div', {}, stacked, table);
 }
 
-const PUZZLE_KEYS = ['rate', 'header_anomaly', 'ip_reputation', 'cookie_age', 'tls_fingerprint'];
-const VERIFY_KEYS = ['honeypot', 'time_on_page', 'cookie_age', 'behavior'];
+const PUZZLE_KEYS = ['rate', 'header_anomaly', 'ip_reputation', 'tls_fingerprint'];
+const VERIFY_KEYS = ['honeypot', 'time_on_page', 'behavior'];
 
 function renderDetail(s) {
   const p = s.bot_probability;
@@ -812,7 +784,6 @@ function renderDetail(s) {
       h('dt', {}, 'site key'), h('dd', {}, s.site_key),
       h('dt', {}, 'challenge'), h('dd', {}, s.challenge_id || '—'),
       h('dt', {}, 'user-agent'), h('dd', {}, s.user_agent || '(none)'),
-      h('dt', {}, 'cookie'), h('dd', {}, s.cookie_presence),
       h('dt', {}, 'tls fp'), h('dd', {}, s.tls_fingerprint),
       h('dt', {}, 'rate (ip/site)'), h('dd', {}, `${s.ip_count} / ${s.site_count}`),
     ),
@@ -823,8 +794,6 @@ function renderDetail(s) {
       h('span', { class: 'lbl' }, 'difficulty'), h('span', { class: 'val' }, String(s.difficulty)),
     ),
 
-    renderPrivacyComparison(s),
-
     verify
       ? h('div', {},
           h('h3', {}, `Verify · ${verify.outcome} · score ${verify.score}`),
@@ -832,67 +801,10 @@ function renderDetail(s) {
           h('div', { class: 'breakdown', style: 'margin-top: 8px;' },
             h('span', { class: 'lbl' }, 'success'), h('span', { class: 'val' }, String(verify.success)),
             h('span', { class: 'lbl' }, 'time on page'), h('span', { class: 'val' }, verify.time_on_page_ms != null ? `${verify.time_on_page_ms} ms` : '—'),
-            h('span', { class: 'lbl' }, 'cookie'), h('span', { class: 'val' }, verify.cookie_presence),
             h('span', { class: 'lbl' }, 'webdriver'), h('span', { class: 'val' }, verify.webdriver),
           ),
         )
       : h('div', { class: 'empty', style: 'margin-top: 14px;' }, 'No verify call yet for this challenge.'),
-  );
-}
-
-// Side-by-side full vs. minimal-mode shadow scores. Surfaces the
-// FriendlyCaptcha-style "what would I lose if I dropped fingerprinting"
-// answer per request. The puzzle row is always present; verify row only
-// when a /v1/verify call has happened for this challenge. Rows logged
-// before the comparison columns existed have empty tier strings — show
-// an explicit "no data" message rather than misleading 0s.
-function renderPrivacyComparison(s) {
-  const verify = s.verify;
-  const puzzleHasData = s.puzzle_tier_full !== '' && s.puzzle_tier_minimal !== '';
-  const verifyHasData = verify && verify.outcome_full !== '' && verify.outcome_minimal !== '';
-  if (!puzzleHasData && !verifyHasData) {
-    return h('div', { style: 'margin-top: 18px;' },
-      h('h3', {}, 'Privacy mode comparison'),
-      h('div', { class: 'empty', style: 'margin-top: 6px;' },
-        'No comparison data — this session was recorded before the privacy-mode comparison existed. Trigger a fresh request to see the diff.'),
-    );
-  }
-  const puzzleDiverged = puzzleHasData && s.puzzle_tier_full !== s.puzzle_tier_minimal;
-  const verifyDiverged = verifyHasData && verify.outcome_full !== verify.outcome_minimal;
-  const anyDiverged = puzzleDiverged || verifyDiverged;
-  const banner = anyDiverged
-    ? h('span', { class: 'pill warn', style: 'margin-left: 8px;' }, 'decision diverges')
-    : h('span', { class: 'pill good', style: 'margin-left: 8px;' }, 'decision matches');
-  return h('div', { style: 'margin-top: 18px;' },
-    h('h3', {}, 'Privacy mode comparison', banner),
-    h('div', { class: 'breakdown', style: 'margin-top: 6px;' },
-      ...(puzzleHasData ? [
-        h('span', { class: 'lbl' }, 'puzzle · full'),
-        h('span', { class: 'val' }, `${s.puzzle_tier_full} · score ${s.puzzle_score_full}`),
-        h('span', { class: 'lbl' }, 'puzzle · minimal'),
-        h('span', { class: 'val' },
-          `${s.puzzle_tier_minimal} · score ${s.puzzle_score_minimal}`,
-          puzzleDiverged ? h('span', { class: 'pill warn', style: 'margin-left: 6px;' }, 'diff') : null,
-        ),
-      ] : [
-        h('span', { class: 'lbl' }, 'puzzle'),
-        h('span', { class: 'val' }, h('span', { class: 'empty' }, 'no comparison data')),
-      ]),
-      ...(verify
-        ? (verifyHasData ? [
-            h('span', { class: 'lbl' }, 'verify · full'),
-            h('span', { class: 'val' }, `${verify.outcome_full} · score ${verify.score_full}`),
-            h('span', { class: 'lbl' }, 'verify · minimal'),
-            h('span', { class: 'val' },
-              `${verify.outcome_minimal} · score ${verify.score_minimal}`,
-              verifyDiverged ? h('span', { class: 'pill warn', style: 'margin-left: 6px;' }, 'diff') : null,
-            ),
-          ] : [
-            h('span', { class: 'lbl' }, 'verify'),
-            h('span', { class: 'val' }, h('span', { class: 'empty' }, 'no comparison data')),
-          ])
-        : []),
-    ),
   );
 }
 

@@ -3,21 +3,19 @@
 //! Runs as a second pass at `/v1/verify` time, after the puzzle was issued
 //! and (presumably) solved. The signals available here weren't observable
 //! at puzzle issuance: how long the widget was mounted before the user
-//! submitted, whether the trust cookie is still valid at submit time, and
-//! whether the honeypot was tripped.
+//! submitted, whether the honeypot was tripped, and the behavioral telemetry
+//! the widget collected.
 //!
 //! The decision is three-state: `Pass`, `ShadowFail`, `Block`.
 //! `ShadowFail` returns `success: true` to the caller but emits a structured
 //! warn log so an operator can review the request offline.
 
 use super::behavior::{BehaviorPresence, score_behavior};
-use super::signals::{CookiePresence, score_cookie_age};
 
 #[derive(Debug, Clone, Copy)]
 pub struct VerifyContext {
     pub honeypot_tripped: bool,
     pub time_on_page_ms: Option<u64>,
-    pub cookie: CookiePresence,
     pub behavior: BehaviorPresence,
 }
 
@@ -25,7 +23,6 @@ pub struct VerifyContext {
 pub struct VerifyBreakdown {
     pub honeypot: u32,
     pub time_on_page: u32,
-    pub cookie_age: u32,
     pub behavior: u32,
 }
 
@@ -94,41 +91,16 @@ impl VerifyScorer {
     }
 
     pub fn score(&self, ctx: &VerifyContext) -> VerifyScore {
-        self.score_with(ctx, super::score::ScoreMode::Full)
-    }
-
-    pub fn score_minimal(&self, ctx: &VerifyContext) -> VerifyScore {
-        self.score_with(ctx, super::score::ScoreMode::Minimal)
-    }
-
-    fn score_with(&self, ctx: &VerifyContext, mode: super::score::ScoreMode) -> VerifyScore {
-        // Honeypot and time-on-page survive in minimal mode: neither
-        // identifies the user. Cookie age leans on a persistent identifier
-        // and behavior is a fingerprint, so both are dropped.
-        let breakdown = match mode {
-            super::score::ScoreMode::Full => VerifyBreakdown {
-                honeypot: if ctx.honeypot_tripped {
-                    HONEYPOT_TRIPPED_SCORE
-                } else {
-                    0
-                },
-                time_on_page: score_time_on_page(ctx.time_on_page_ms),
-                cookie_age: score_cookie_age(ctx.cookie),
-                behavior: score_behavior(ctx.behavior),
+        let breakdown = VerifyBreakdown {
+            honeypot: if ctx.honeypot_tripped {
+                HONEYPOT_TRIPPED_SCORE
+            } else {
+                0
             },
-            super::score::ScoreMode::Minimal => VerifyBreakdown {
-                honeypot: if ctx.honeypot_tripped {
-                    HONEYPOT_TRIPPED_SCORE
-                } else {
-                    0
-                },
-                time_on_page: score_time_on_page(ctx.time_on_page_ms),
-                cookie_age: 0,
-                behavior: 0,
-            },
+            time_on_page: score_time_on_page(ctx.time_on_page_ms),
+            behavior: score_behavior(ctx.behavior),
         };
-        let total =
-            breakdown.honeypot + breakdown.time_on_page + breakdown.cookie_age + breakdown.behavior;
+        let total = breakdown.honeypot + breakdown.time_on_page + breakdown.behavior;
         let decision = if total >= self.thresholds.block_min {
             VerifyDecision::Block
         } else if total >= self.thresholds.shadow_min {
@@ -156,7 +128,6 @@ mod tests {
         VerifyContext {
             honeypot_tripped: false,
             time_on_page_ms: Some(10_000),
-            cookie: CookiePresence::Disabled,
             behavior: BehaviorPresence::Absent,
         }
     }
@@ -171,45 +142,23 @@ mod tests {
     }
 
     #[test]
-    fn very_fast_submit_blocks() {
+    fn very_fast_submit_shadows() {
         let mut c = ctx();
         c.time_on_page_ms = Some(100);
         let s = scorer().score(&c);
-        // 50 (very short) + 0 (cookie disabled) = 50, in shadow band but not block
+        // 50 (very short) → shadow band but not block
         assert_eq!(s.total, 50);
         assert_eq!(s.decision, VerifyDecision::ShadowFail);
     }
 
     #[test]
-    fn very_fast_plus_missing_cookie_blocks() {
-        let mut c = ctx();
-        c.time_on_page_ms = Some(100);
-        c.cookie = CookiePresence::Missing;
-        let s = scorer().score(&c);
-        // 50 + 5 = 55, still ShadowFail; tweak threshold to verify Block math:
-        assert_eq!(s.total, 55);
-        assert_eq!(s.decision, VerifyDecision::ShadowFail);
-    }
-
-    #[test]
-    fn time_short_band_lands_in_shadow() {
+    fn time_short_band_passes() {
         let mut c = ctx();
         c.time_on_page_ms = Some(1_500);
         let s = scorer().score(&c);
         // 25 (short) → < shadow_min(30) → Pass
         assert_eq!(s.total, 25);
         assert_eq!(s.decision, VerifyDecision::Pass);
-    }
-
-    #[test]
-    fn time_short_plus_missing_cookie_shadows() {
-        let mut c = ctx();
-        c.time_on_page_ms = Some(1_500);
-        c.cookie = CookiePresence::Missing;
-        let s = scorer().score(&c);
-        // 25 + 5 = 30 → ShadowFail
-        assert_eq!(s.total, 30);
-        assert_eq!(s.decision, VerifyDecision::ShadowFail);
     }
 
     #[test]
@@ -251,29 +200,6 @@ mod tests {
         let s = scorer().score(&c);
         assert_eq!(s.breakdown.time_on_page, 0);
         assert_eq!(s.decision, VerifyDecision::Pass);
-    }
-
-    #[test]
-    fn minimal_mode_keeps_honeypot_and_time() {
-        // Honeypot still kicks the score above the block threshold even when
-        // cookie/behavior are zeroed.
-        let mut c = ctx();
-        c.honeypot_tripped = true;
-        let s = scorer().score_minimal(&c);
-        assert_eq!(s.breakdown.honeypot, HONEYPOT_TRIPPED_SCORE);
-        assert_eq!(s.decision, VerifyDecision::Block);
-    }
-
-    #[test]
-    fn minimal_mode_zeros_cookie_and_behavior() {
-        let mut c = ctx();
-        c.cookie = CookiePresence::Missing;
-        c.behavior = BehaviorPresence::Present(super::super::behavior::BehaviorReport::default());
-        let full = scorer().score(&c);
-        let minimal = scorer().score_minimal(&c);
-        assert_eq!(minimal.breakdown.cookie_age, 0);
-        assert_eq!(minimal.breakdown.behavior, 0);
-        assert!(full.total > minimal.total);
     }
 
     #[test]

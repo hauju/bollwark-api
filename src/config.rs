@@ -2,15 +2,7 @@ use std::env;
 use std::net::SocketAddr;
 
 use crate::puzzle::types::{Algorithm, Argon2idParams};
-
-/// Operator-facing `SameSite` setting. Mirrors `risk::cookie::CookieSameSite`
-/// but lives in config so the cookie module doesn't depend on env parsing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CookieSameSiteCfg {
-    #[default]
-    Lax,
-    None,
-}
+use crate::risk::LoadLadder;
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -23,6 +15,12 @@ pub struct AppConfig {
     pub default_difficulty: u32,
     pub min_difficulty: u32,
     pub max_difficulty: u32,
+    /// Aggregate site-load difficulty floor. When the per-site request count in
+    /// the rate window crosses a configured threshold, the PoW difficulty is
+    /// floored (raised for every visitor, not just high-risk ones). Empty by
+    /// default — the floor is 0 until `LOAD_LADDER` is set. Never blocks; it
+    /// only raises difficulty, composed with the per-request tier via `max()`.
+    pub load_ladder: LoadLadder,
     pub challenge_ttl_secs: u64,
     pub cleanup_interval_secs: u64,
     pub tier_checkbox_min: u32,
@@ -30,18 +28,6 @@ pub struct AppConfig {
     pub tier_block_min: u32,
     /// Path to a CIDR reputation file. If unset, the IP reputation signal contributes 0.
     pub ip_reputation_file: Option<String>,
-    /// HMAC secret for the trust cookie. If unset, the cookie signal is disabled and
-    /// no cookie is issued. Must be at least 16 bytes when set.
-    pub cookie_signing_secret: Option<String>,
-    /// Set the `Secure` attribute on issued cookies. Defaults to false (local dev / HTTP).
-    pub cookie_secure: bool,
-    /// `SameSite` attribute on the issued trust cookie. `Lax` (default) means
-    /// the cookie is omitted on cross-origin embeds; `None` makes it flow on
-    /// every cross-site request and is required when the captcha widget is
-    /// hosted on a different origin from the embedding form. Browsers refuse
-    /// `SameSite=None` without `Secure`, so the service refuses to start in
-    /// that combination.
-    pub cookie_samesite: CookieSameSiteCfg,
     /// Verify-time score at/above which the request is shadow-failed (success
     /// returned, log emitted). Default 30.
     pub verify_shadow_min: u32,
@@ -88,13 +74,14 @@ pub struct AppConfig {
     pub info_privacy_url: Option<String>,
     /// Optional override URL for the bundled `/static/terms.html` page.
     pub info_terms_url: Option<String>,
-    /// When true, the live decision uses the full fingerprinting signal set
-    /// (header anomaly, IP reputation, cookie age, TLS fingerprint, behavior).
-    /// **Default false** — the baseline posture is privacy-friendly: rate +
-    /// honeypot + time-on-page + PoW only. Operators must opt into the
-    /// fingerprinting signals because doing so changes their GDPR /
-    /// ePrivacy posture (cookies, fingerprinting disclosures, DPIA).
-    pub full_fingerprint_mode: bool,
+    /// Anonymize the client IP before it is written to the decision log
+    /// (dashboard / `ADMIN_DB_PATH`): IPv4 is truncated to /24, IPv6 to /48.
+    /// **Default true** — the durable log keeps only a network prefix, never
+    /// a per-visitor address, which is what keeps the dashboard defensible
+    /// under GDPR data-minimization. Live scoring always uses the full IP, so
+    /// detection is unaffected. Set `ANONYMIZE_LOG_IP=false` to log full IPs
+    /// (e.g. for abuse forensics where the operator is the data controller).
+    pub anonymize_log_ip: bool,
 }
 
 impl AppConfig {
@@ -117,6 +104,7 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(28),
+            load_ladder: parse_load_ladder(),
             challenge_ttl_secs: env::var("CHALLENGE_TTL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -138,12 +126,6 @@ impl AppConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(85),
             ip_reputation_file: env::var("IP_REPUTATION_FILE").ok(),
-            cookie_signing_secret: env::var("COOKIE_SIGNING_SECRET").ok(),
-            cookie_secure: env::var("COOKIE_SECURE")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(false),
-            cookie_samesite: parse_samesite(env::var("COOKIE_SAMESITE").ok().as_deref()),
             verify_shadow_min: env::var("VERIFY_SHADOW_MIN")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -165,7 +147,12 @@ impl AppConfig {
             info_about_url: parse_info_url("INFO_ABOUT_URL"),
             info_privacy_url: parse_info_url("INFO_PRIVACY_URL"),
             info_terms_url: parse_info_url("INFO_TERMS_URL"),
-            full_fingerprint_mode: parse_truthy(env::var("FULL_FINGERPRINT_MODE").ok().as_deref()),
+            // Privacy default: on unless explicitly disabled. Any unset value
+            // anonymizes; only a recognized truthy/falsey value flips it.
+            anonymize_log_ip: env::var("ANONYMIZE_LOG_IP")
+                .ok()
+                .map(|v| parse_truthy(Some(&v)))
+                .unwrap_or(true),
         }
     }
 }
@@ -191,22 +178,28 @@ fn parse_info_url(name: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
+/// Parse `LOAD_LADDER` (e.g. `"200:20,500:22,1000:24"`) into an aggregate
+/// site-load difficulty floor. Unset or empty disables the floor. A malformed
+/// spec panics at boot — silently dropping a misconfigured load ladder would
+/// leave a site running without the flood protection its operator configured,
+/// the same fail-loud stance as `parse_info_url`.
+fn parse_load_ladder() -> LoadLadder {
+    match env::var("LOAD_LADDER") {
+        Ok(spec) => LoadLadder::parse(&spec).unwrap_or_else(|e| {
+            panic!(
+                "LOAD_LADDER is invalid: {e}. Expected comma-separated threshold:difficulty \
+                 pairs in leading zero bits, e.g. \"200:20,500:22,1000:24\"."
+            )
+        }),
+        Err(_) => LoadLadder::default(),
+    }
+}
+
 fn parse_truthy(v: Option<&str>) -> bool {
     matches!(
         v.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
         Some("1" | "true" | "yes" | "on")
     )
-}
-
-fn parse_samesite(v: Option<&str>) -> CookieSameSiteCfg {
-    match v.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
-        Some("none") => CookieSameSiteCfg::None,
-        Some("lax") | None => CookieSameSiteCfg::Lax,
-        Some(other) => {
-            eprintln!("COOKIE_SAMESITE={other:?} is unknown — defaulting to Lax");
-            CookieSameSiteCfg::Lax
-        }
-    }
 }
 
 impl Default for AppConfig {
@@ -217,15 +210,13 @@ impl Default for AppConfig {
             default_difficulty: 18,
             min_difficulty: 16,
             max_difficulty: 28,
+            load_ladder: LoadLadder::default(),
             challenge_ttl_secs: 300,
             cleanup_interval_secs: 60,
             tier_checkbox_min: 20,
             tier_hard_pow_min: 40,
             tier_block_min: 85,
             ip_reputation_file: None,
-            cookie_signing_secret: None,
-            cookie_secure: false,
-            cookie_samesite: CookieSameSiteCfg::Lax,
             verify_shadow_min: 30,
             verify_block_min: 60,
             tls_fingerprint_header: None,
@@ -239,7 +230,7 @@ impl Default for AppConfig {
             info_about_url: None,
             info_privacy_url: None,
             info_terms_url: None,
-            full_fingerprint_mode: false,
+            anonymize_log_ip: true,
         }
     }
 }

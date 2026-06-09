@@ -57,39 +57,6 @@ const UA_BOT_NEEDLES: &[&str] = &[
     "java/",
 ];
 
-// --- Cookie age signal ---
-//
-// Missing cookies aren't strongly suspicious on their own (most legit users
-// start with no cookie), but a cookie that was just issued and immediately
-// reused likely means a script that re-fetches per request. Old cookies are
-// a faint trust nudge.
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CookiePresence {
-    /// Cookie signing isn't configured. Signal contributes 0.
-    Disabled,
-    /// Cookie signing is on, but the request didn't carry a valid cookie.
-    Missing,
-    /// Cookie signing is on and the request's cookie verified. Age in seconds.
-    Present(u64),
-}
-
-pub const COOKIE_MISSING_SCORE: u32 = 5;
-pub const COOKIE_VERY_YOUNG_SCORE: u32 = 20; // < 60s
-pub const COOKIE_YOUNG_SCORE: u32 = 10; // < 5min
-pub const COOKIE_FRESH_SCORE: u32 = 5; // < 1h
-
-pub fn score_cookie_age(presence: CookiePresence) -> u32 {
-    match presence {
-        CookiePresence::Disabled => 0,
-        CookiePresence::Missing => COOKIE_MISSING_SCORE,
-        CookiePresence::Present(age) if age < 60 => COOKIE_VERY_YOUNG_SCORE,
-        CookiePresence::Present(age) if age < 300 => COOKIE_YOUNG_SCORE,
-        CookiePresence::Present(age) if age < 3600 => COOKIE_FRESH_SCORE,
-        CookiePresence::Present(_) => 0,
-    }
-}
-
 pub fn score_header_anomaly(headers: &HeaderMap) -> u32 {
     let mut score = 0;
 
@@ -233,42 +200,5 @@ mod tests {
             score_header_anomaly(&h),
             UA_MISSING_SCORE + ACCEPT_LANGUAGE_MISSING_SCORE + ACCEPT_ENCODING_MISSING_SCORE
         );
-    }
-
-    // --- Cookie age tests ---
-
-    #[test]
-    fn cookie_age_curve() {
-        assert_eq!(score_cookie_age(CookiePresence::Disabled), 0);
-        assert_eq!(
-            score_cookie_age(CookiePresence::Missing),
-            COOKIE_MISSING_SCORE
-        );
-        assert_eq!(
-            score_cookie_age(CookiePresence::Present(0)),
-            COOKIE_VERY_YOUNG_SCORE
-        );
-        assert_eq!(
-            score_cookie_age(CookiePresence::Present(59)),
-            COOKIE_VERY_YOUNG_SCORE
-        );
-        assert_eq!(
-            score_cookie_age(CookiePresence::Present(60)),
-            COOKIE_YOUNG_SCORE
-        );
-        assert_eq!(
-            score_cookie_age(CookiePresence::Present(299)),
-            COOKIE_YOUNG_SCORE
-        );
-        assert_eq!(
-            score_cookie_age(CookiePresence::Present(300)),
-            COOKIE_FRESH_SCORE
-        );
-        assert_eq!(
-            score_cookie_age(CookiePresence::Present(3599)),
-            COOKIE_FRESH_SCORE
-        );
-        assert_eq!(score_cookie_age(CookiePresence::Present(3600)), 0);
-        assert_eq!(score_cookie_age(CookiePresence::Present(86400 * 30)), 0);
     }
 }

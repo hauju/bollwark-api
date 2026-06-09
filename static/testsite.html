@@ -245,8 +245,8 @@
       <p class="muted">
         Live readout of the <code>tier</code> field from <code>GET /v1/puzzle</code>.
         Server logs show the per-signal breakdown (rate, header anomaly, IP reputation,
-        cookie age). Cookie + IP rep need <code>COOKIE_SIGNING_SECRET</code> /
-        <code>IP_REPUTATION_FILE</code> env vars set on the server. Honeypot fires at verify time.
+        TLS fingerprint). IP rep + TLS fingerprint need <code>IP_REPUTATION_FILE</code> /
+        <code>TLS_FINGERPRINT_HEADER</code> env vars set on the server. Honeypot fires at verify time.
       </p>
       <div class="risk-buttons">
         <button id="risk-fetch">Fetch one puzzle</button>

@@ -38,11 +38,6 @@
           <code>Accept-Language</code>, and <code>Accept-Encoding</code>
           your browser already sends with every request, used to detect
           obviously malformed clients.</li>
-        <li><strong>Trust cookie</strong> (optional, when enabled) — a
-          single signed cookie named <code>__captcha_trust</code> that
-          records the time of your last successful verification, so repeat
-          visitors aren't re-challenged unnecessarily. It contains no
-          personal data.</li>
         <li><strong>Behavioural counters</strong> — the number of times
           your mouse moved, you tapped the screen, scrolled, or you pressed
           a key while the page was open. These are <em>counts only</em> —
@@ -84,8 +79,8 @@
           font enumeration, or device-ID extraction.</li>
         <li>No cursor positions, click coordinates, or keystroke content.</li>
         <li>No third-party tracking or advertising identifiers.</li>
-        <li>No cross-site profiles. The cookie is scoped to the captcha
-          domain and contains a single timestamp.</li>
+        <li>No cookies or other browser storage of any kind, so no
+          cross-site profile can be built.</li>
       </ul>
 
       <h2>Retention</h2>
@@ -97,10 +92,10 @@
 
       <h2>Cookies</h2>
       <p>
-        The optional <code>__captcha_trust</code> cookie is set only when
-        the operator enables it and only after a successful verification.
-        It is signed (not encrypted), readable only by the captcha service,
-        and contains a timestamp — nothing else.
+        RustCaptcha sets <strong>no cookies</strong> and uses no other
+        browser storage. Everything it needs to verify you is computed
+        server-side from the request itself, so there is nothing stored on
+        your device to consent to.
       </p>
 
       <h2>Your rights</h2>

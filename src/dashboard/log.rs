@@ -38,15 +38,9 @@ CREATE TABLE IF NOT EXISTS puzzle_decisions (
     sig_rate              INTEGER NOT NULL,
     sig_header_anomaly    INTEGER NOT NULL,
     sig_ip_reputation     INTEGER NOT NULL,
-    sig_cookie_age        INTEGER NOT NULL,
     sig_tls_fingerprint   INTEGER NOT NULL,
-    cookie_presence TEXT    NOT NULL,
     tls_fingerprint TEXT    NOT NULL,
-    user_agent      TEXT,
-    score_full      INTEGER NOT NULL DEFAULT 0,
-    tier_full       TEXT    NOT NULL DEFAULT '',
-    score_minimal   INTEGER NOT NULL DEFAULT 0,
-    tier_minimal    TEXT    NOT NULL DEFAULT ''
+    user_agent      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_puzzle_ts ON puzzle_decisions(ts DESC);
 CREATE INDEX IF NOT EXISTS idx_puzzle_challenge ON puzzle_decisions(challenge_id);
@@ -60,32 +54,32 @@ CREATE TABLE IF NOT EXISTS verify_decisions (
     score           INTEGER NOT NULL,
     sig_honeypot       INTEGER NOT NULL,
     sig_time_on_page   INTEGER NOT NULL,
-    sig_cookie_age     INTEGER NOT NULL,
     sig_behavior       INTEGER NOT NULL,
     time_on_page_ms INTEGER,
-    cookie_presence TEXT    NOT NULL,
-    webdriver       TEXT    NOT NULL,
-    score_full      INTEGER NOT NULL DEFAULT 0,
-    outcome_full    TEXT    NOT NULL DEFAULT '',
-    score_minimal   INTEGER NOT NULL DEFAULT 0,
-    outcome_minimal TEXT    NOT NULL DEFAULT ''
+    webdriver       TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_verify_challenge ON verify_decisions(challenge_id);
 CREATE INDEX IF NOT EXISTS idx_verify_ts ON verify_decisions(ts DESC);
 ";
 
-// Idempotent additions for databases created before the comparison columns
-// existed. SQLite has no `ADD COLUMN IF NOT EXISTS`, so we run each ALTER
-// once and treat the "duplicate column name" error as a no-op.
+// Drop columns left over from the cookie-age signal and the full/minimal
+// shadow-scoring comparison, both removed when the service went cookie-free
+// and dropped FULL_FINGERPRINT_MODE. SQLite has no `DROP COLUMN IF EXISTS`,
+// so we run each once and treat the "no such column" error (fresh databases,
+// or a second run) as a no-op. DROP COLUMN requires SQLite 3.35+ (2021).
 const MIGRATIONS: &[&str] = &[
-    "ALTER TABLE puzzle_decisions ADD COLUMN score_full INTEGER NOT NULL DEFAULT 0",
-    "ALTER TABLE puzzle_decisions ADD COLUMN tier_full TEXT NOT NULL DEFAULT ''",
-    "ALTER TABLE puzzle_decisions ADD COLUMN score_minimal INTEGER NOT NULL DEFAULT 0",
-    "ALTER TABLE puzzle_decisions ADD COLUMN tier_minimal TEXT NOT NULL DEFAULT ''",
-    "ALTER TABLE verify_decisions ADD COLUMN score_full INTEGER NOT NULL DEFAULT 0",
-    "ALTER TABLE verify_decisions ADD COLUMN outcome_full TEXT NOT NULL DEFAULT ''",
-    "ALTER TABLE verify_decisions ADD COLUMN score_minimal INTEGER NOT NULL DEFAULT 0",
-    "ALTER TABLE verify_decisions ADD COLUMN outcome_minimal TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE puzzle_decisions DROP COLUMN sig_cookie_age",
+    "ALTER TABLE puzzle_decisions DROP COLUMN cookie_presence",
+    "ALTER TABLE puzzle_decisions DROP COLUMN score_full",
+    "ALTER TABLE puzzle_decisions DROP COLUMN tier_full",
+    "ALTER TABLE puzzle_decisions DROP COLUMN score_minimal",
+    "ALTER TABLE puzzle_decisions DROP COLUMN tier_minimal",
+    "ALTER TABLE verify_decisions DROP COLUMN sig_cookie_age",
+    "ALTER TABLE verify_decisions DROP COLUMN cookie_presence",
+    "ALTER TABLE verify_decisions DROP COLUMN score_full",
+    "ALTER TABLE verify_decisions DROP COLUMN outcome_full",
+    "ALTER TABLE verify_decisions DROP COLUMN score_minimal",
+    "ALTER TABLE verify_decisions DROP COLUMN outcome_minimal",
 ];
 
 enum Msg {
@@ -114,13 +108,12 @@ impl DecisionLog {
         let writer = Connection::open(&path_str)?;
         writer.execute_batch(SCHEMA)?;
         for stmt in MIGRATIONS {
-            // SQLite returns SQLITE_ERROR with message "duplicate column name"
-            // when the column already exists. Treat that as a no-op so reruns
-            // and fresh databases (which already have the column from SCHEMA)
-            // both work.
+            // SQLite reports "no such column" when the column is already gone —
+            // i.e. a fresh database (created from the current SCHEMA without it)
+            // or a second run of these migrations. Treat that as a no-op.
             if let Err(e) = writer.execute(stmt, []) {
                 let msg = e.to_string();
-                if !msg.contains("duplicate column") {
+                if !msg.contains("no such column") {
                     return Err(e);
                 }
             }
@@ -243,21 +236,17 @@ fn clear_all(conn: &Connection) -> rusqlite::Result<()> {
 fn insert_puzzle(conn: &Connection, r: &PuzzleRecord) -> rusqlite::Result<()> {
     let ts = chrono::Utc::now().to_rfc3339();
     let tier = format!("{:?}", r.tier);
-    let tier_full = format!("{:?}", r.tier_full);
-    let tier_minimal = format!("{:?}", r.tier_minimal);
     conn.execute(
         "INSERT INTO puzzle_decisions (
             ts, challenge_id, site_key, ip, ip_count, site_count,
             score, tier, difficulty, outcome,
-            sig_rate, sig_header_anomaly, sig_ip_reputation, sig_cookie_age, sig_tls_fingerprint,
-            cookie_presence, tls_fingerprint, user_agent,
-            score_full, tier_full, score_minimal, tier_minimal
+            sig_rate, sig_header_anomaly, sig_ip_reputation, sig_tls_fingerprint,
+            tls_fingerprint, user_agent
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6,
             ?7, ?8, ?9, ?10,
-            ?11, ?12, ?13, ?14, ?15,
-            ?16, ?17, ?18,
-            ?19, ?20, ?21, ?22
+            ?11, ?12, ?13, ?14,
+            ?15, ?16
          )",
         params![
             ts,
@@ -273,15 +262,9 @@ fn insert_puzzle(conn: &Connection, r: &PuzzleRecord) -> rusqlite::Result<()> {
             r.breakdown.rate,
             r.breakdown.header_anomaly,
             r.breakdown.ip_reputation,
-            r.breakdown.cookie_age,
             r.breakdown.tls_fingerprint,
-            r.cookie_presence,
             r.tls_fingerprint,
             r.user_agent,
-            r.score_full,
-            tier_full,
-            r.score_minimal,
-            tier_minimal,
         ],
     )?;
     Ok(())
@@ -292,14 +275,12 @@ fn insert_verify(conn: &Connection, r: &VerifyRecord) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO verify_decisions (
             ts, challenge_id, success, outcome, score,
-            sig_honeypot, sig_time_on_page, sig_cookie_age, sig_behavior,
-            time_on_page_ms, cookie_presence, webdriver,
-            score_full, outcome_full, score_minimal, outcome_minimal
+            sig_honeypot, sig_time_on_page, sig_behavior,
+            time_on_page_ms, webdriver
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5,
-            ?6, ?7, ?8, ?9,
-            ?10, ?11, ?12,
-            ?13, ?14, ?15, ?16
+            ?6, ?7, ?8,
+            ?9, ?10
          )",
         params![
             ts,
@@ -309,15 +290,9 @@ fn insert_verify(conn: &Connection, r: &VerifyRecord) -> rusqlite::Result<()> {
             r.score,
             r.breakdown.honeypot,
             r.breakdown.time_on_page,
-            r.breakdown.cookie_age,
             r.breakdown.behavior,
             r.time_on_page_ms.map(|v| v as i64),
-            r.cookie_presence,
             r.webdriver,
-            r.score_full,
-            r.outcome_full,
-            r.score_minimal,
-            r.outcome_minimal,
         ],
     )?;
     Ok(())

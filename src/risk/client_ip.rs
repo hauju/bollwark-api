@@ -10,7 +10,7 @@
 //! untrusted IP — that's the client. If all hops are trusted (single proxy
 //! prepending), we fall back to the leftmost.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use axum::http::HeaderMap;
 
@@ -50,6 +50,28 @@ pub fn client_ip(peer: IpAddr, headers: &HeaderMap, trusted: &TrustedProxies) ->
     }
     // All hops were trusted — return the leftmost (original client per RFC).
     hops[0]
+}
+
+/// Zero the host portion of an IP for at-rest storage, keeping only the
+/// network prefix: IPv4 → /24 (last octet cleared), IPv6 → /48 (final 80
+/// bits cleared). Enough to defeat single-host identification while still
+/// allowing coarse network-level grouping for abuse triage. Matches the
+/// Google Analytics / ALTCHA "truncate the final segment" convention.
+///
+/// This is applied only to the IP copy written to the decision log — live
+/// scoring still uses the full IP, so detection accuracy is unaffected.
+pub fn anonymize_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, c, _] = v4.octets();
+            IpAddr::V4(Ipv4Addr::new(a, b, c, 0))
+        }
+        IpAddr::V6(v6) => {
+            let mut octets = v6.octets();
+            octets[6..].fill(0);
+            IpAddr::V6(Ipv6Addr::from(octets))
+        }
+    }
 }
 
 fn strip_port(s: &str) -> &str {
@@ -159,5 +181,29 @@ mod tests {
         let trusted = TrustedProxies::parse("10.0.0.0/8").unwrap();
         let h = headers_with_xff("not-an-ip, also-bad");
         assert_eq!(client_ip(ip("10.0.0.1"), &h, &trusted), ip("10.0.0.1"));
+    }
+
+    #[test]
+    fn anonymize_ipv4_clears_last_octet() {
+        assert_eq!(anonymize_ip(ip("203.0.113.42")), ip("203.0.113.0"));
+        // Already-zeroed host stays put (idempotent).
+        assert_eq!(anonymize_ip(ip("203.0.113.0")), ip("203.0.113.0"));
+    }
+
+    #[test]
+    fn anonymize_ipv6_clears_to_48() {
+        // First 48 bits (three hextets) retained, everything after zeroed.
+        assert_eq!(
+            anonymize_ip(ip("2001:db8:abcd:1234:5678:9abc:def0:1")),
+            ip("2001:db8:abcd::")
+        );
+    }
+
+    #[test]
+    fn anonymize_is_idempotent() {
+        for s in ["198.51.100.7", "2001:db8:abcd:1234::ff"] {
+            let once = anonymize_ip(ip(s));
+            assert_eq!(anonymize_ip(once), once);
+        }
     }
 }

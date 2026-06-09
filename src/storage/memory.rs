@@ -95,7 +95,7 @@ impl InMemoryStore {
     pub fn list_sites(&self) -> Result<Vec<Site>, CaptchaError> {
         let map = self.sites_by_key.read().map_err(lock_err)?;
         let mut out: Vec<Site> = map.values().cloned().collect();
-        out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        out.sort_by_key(|s| s.created_at);
         Ok(out)
     }
 }

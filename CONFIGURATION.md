@@ -17,6 +17,7 @@ A `.env` file in the working directory is loaded automatically at startup (via `
 | `DEFAULT_DIFFICULTY` | `18` | Base PoW difficulty (leading zero bits). ~250–500ms on a modern CPU; ~3–5s on low-end mobile in a Web Worker. For Argon2id, drop to `4`–`6`. |
 | `MIN_DIFFICULTY` | `16` | Lower clamp on adaptive difficulty |
 | `MAX_DIFFICULTY` | `28` | Upper clamp on adaptive difficulty |
+| `LOAD_LADDER` | _unset_ | Aggregate site-load difficulty floor. Comma-separated `threshold:difficulty` rungs, e.g. `200:20,500:22,1000:24` (thresholds are requests per `RATE_WINDOW_SECS` window; difficulty in leading zero bits). When the per-site request count crosses a rung, the floor is raised for every visitor. Composes with the per-request tier via `max()`, clamped to `MAX_DIFFICULTY`. Never blocks — only raises difficulty. Empty/unset = no floor. Malformed = boot panics. |
 | `CHALLENGE_TTL_SECS` | `300` | How long an issued puzzle is valid |
 | `CLEANUP_INTERVAL_SECS` | `60` | How often expired challenges are swept |
 | `TIER_CHECKBOX_MIN` | `20` | Score at/above which tier becomes `checkbox` |
@@ -25,18 +26,15 @@ A `.env` file in the working directory is loaded automatically at startup (via `
 | `VERIFY_SHADOW_MIN` | `30` | Verify-time score for shadow-fail (success returned, log emitted) |
 | `VERIFY_BLOCK_MIN` | `60` | Verify-time score for hard rejection |
 | `IP_REPUTATION_FILE` | _unset_ | Path to CIDR reputation list (signal off if unset) |
-| `COOKIE_SIGNING_SECRET` | _unset_ | HMAC secret for trust cookies (≥16 bytes; signal off if unset) |
-| `COOKIE_SECURE` | `false` | Set the `Secure` attribute on issued cookies |
-| `COOKIE_SAMESITE` | `Lax` | `Lax` or `None`. Use `None` for cross-origin embeds; requires `COOKIE_SECURE=true` (boot panics otherwise). |
 | `TLS_FINGERPRINT_HEADER` | _unset_ | Header to read TLS fingerprint from (signal off if unset) |
 | `TLS_FINGERPRINT_FILE` | _unset_ | Path to known-bad fingerprint blocklist |
 | `TRUSTED_PROXIES` | _unset_ | CIDR allowlist of peers whose `TLS_FINGERPRINT_HEADER` we honor |
 | `ADMIN_DB_PATH` | _unset_ | Path to the SQLite database for the validation dashboard. Enables decision logging + admin endpoints. |
 | `ADMIN_TOKEN` | _unset_ | Bearer token for `/v1/admin/*` and `POST /v1/sites`. Without it, `POST /v1/sites` returns 404 (no anonymous provisioning). Required when `ADMIN_DB_PATH` is set. |
 | `SITE_DB_PATH` | _unset_ | Path to a SQLite file for persistent site registrations. Without it, sites live only in memory and are lost on restart. |
-| `CORS_ALLOWED_ORIGINS` | _unset_ | Comma- or whitespace-separated allowlist of origins permitted to call `GET /v1/puzzle` and fetch static widget assets from a browser. Empty/unset = any origin, no credentials. Set this for cross-origin trust cookies. Other API endpoints never have CORS enabled. |
+| `CORS_ALLOWED_ORIGINS` | _unset_ | Comma- or whitespace-separated allowlist of origins permitted to call `GET /v1/puzzle` and fetch static widget assets from a browser. Empty/unset = any origin, no credentials. Other API endpoints never have CORS enabled. |
 | `DEV_DISABLE_ADMIN_AUTH` | `false` | **Dev/test only.** When truthy (`1`/`true`/`yes`/`on`), `POST /v1/sites` skips the `ADMIN_TOKEN` bearer check. Refused in release builds. Admin dashboard endpoints (`/v1/admin/*`) are NOT bypassed. |
-| `FULL_FINGERPRINT_MODE` | `false` | **Opt-in for fingerprinting signals.** Default off — the baseline live decision uses rate + honeypot + time-on-page + PoW only. Set to `1` to also score header anomaly, IP reputation, cookie age, TLS fingerprint, and behavior. Enabling this changes your GDPR / ePrivacy posture (cookie consent, fingerprinting disclosure, DPIA). |
+| `ANONYMIZE_LOG_IP` | `true` | Truncate the client IP (IPv4 → /24, IPv6 → /48) before writing it to the decision log. **On by default** so the dashboard stores no per-visitor address. Set to `false` to log full IPs (abuse forensics). Live scoring always uses the full IP regardless. |
 
 ---
 
@@ -81,6 +79,19 @@ Clamp the final difficulty. The risk tier can bump difficulty above `DEFAULT_DIF
 
 The result is clamped to `MAX_DIFFICULTY`. `MIN_DIFFICULTY` exists for the legacy `DifficultyCalculator` and currently has no effect on the risk pipeline (kept for backwards-compatible env API).
 
+### `LOAD_LADDER` (default _unset_)
+An **aggregate** site-load difficulty floor, separate from the per-request risk tier. Where the tier escalates an individual visitor based on who they are, the load floor raises difficulty for *everyone* when the whole site is hot — catching distributed floods where each IP looks individually benign but the site-wide request count is abnormal.
+
+Format is comma-separated `threshold:difficulty` rungs, e.g. `200:20,500:22,1000:24`. Thresholds are requests in the per-site rate window (60s — note mCaptcha, which inspired this, uses 30s); difficulty is leading zero bits. The floor for a request is the difficulty of the highest rung whose threshold the current per-site count meets, then composed with the tier difficulty:
+
+```
+final = min(MAX_DIFFICULTY, max(tier_difficulty, load_floor))
+```
+
+The floor **never blocks** — `Block` stays a per-request risk decision, so a legitimate traffic spike (launch, viral link) slows everyone fairly instead of rejecting real users. Unset/empty disables it; a malformed spec panics at boot rather than silently running without the configured protection.
+
+> **Note:** the per-site counter is a tumbling 60s window, so the floor sawtooths slightly at window boundaries (it can briefly drop to base under sustained load right after a reset). A leaky-bucket counter would smooth this; it's deliberately not implemented yet.
+
 ### `CHALLENGE_TTL_SECS` (default `300`)
 A challenge is valid for this many seconds after issuance. Verify with an expired challenge returns `410 Gone`.
 
@@ -109,16 +120,15 @@ Defaults: `20` / `40` / `85`.
 | Rate (per-IP + per-site, 60s window) | 45 | Always on |
 | Header anomaly (UA / Accept-Language / Accept-Encoding) | 50 | Always on |
 | IP reputation | 40 | `IP_REPUTATION_FILE` |
-| Cookie age | 20 | `COOKIE_SIGNING_SECRET` |
 | TLS fingerprint | 35 | `TLS_FINGERPRINT_HEADER` + `TRUSTED_PROXIES` |
 
-Tuning the per-signal score weights requires a code change (see `src/risk/signals.rs` and the per-signal modules); only the **tier thresholds** are env-tunable.
+Every signal self-gates on its own input: header anomaly always computes, IP reputation contributes 0 without `IP_REPUTATION_FILE`, and TLS fingerprint contributes 0 unless a trusted proxy supplied the header. There is no global on/off switch — the service is cookie-free and runs these signals under legitimate interest with data minimization. Tuning the per-signal score weights requires a code change (see `src/risk/signals.rs` and the per-signal modules); only the **tier thresholds** are env-tunable.
 
 ---
 
 ## Verify-time scoring
 
-After a PoW solution is verified, a second scoring pass runs against verify-time-only signals (time-on-page, cookie age at verify, honeypot). The result is one of three decisions:
+After a PoW solution is verified, a second scoring pass runs against verify-time-only signals (time-on-page, honeypot, behavioral telemetry). The result is one of three decisions:
 
 | Score range | Decision | Response | Side effect |
 |---|---|---|---|
@@ -139,10 +149,9 @@ At/above this, the request is hard-rejected (`success: false`).
 | Honeypot field non-empty | +100 (always blocks) |
 | Time-on-page < 500ms | +50 |
 | Time-on-page < 2000ms | +25 |
-| Cookie missing (when feature on) | +5 |
-| Cookie present, age < 60s | +20 |
-| Cookie present, age < 5min | +10 |
-| Cookie present, age < 1h | +5 |
+| Behavior: flatline (zero events) | +30 |
+| Behavior: click without pointer movement | +15 |
+| Behavior: sub-50ms first interaction | +20 |
 
 ---
 
@@ -187,26 +196,9 @@ Lookup is first-match-wins on the order in the file. Unknown categories on other
 
 ---
 
-## Cookie age signal
+## Cookie-free operation
 
-### `COOKIE_SIGNING_SECRET`
-HMAC-SHA256 secret for the `__captcha_trust` cookie. Unset → cookies are not issued, signal contributes 0. Must be **at least 16 bytes** when set; shorter values are silently ignored at boot with a WARN log.
-
-The cookie is opaque and stateless — the server doesn't track issued cookies anywhere; the HMAC self-validates.
-
-**Cookie format:** `__captcha_trust=<hex(timestamp)>.<hex(hmac)>`
-- `Max-Age`: 30 days
-- `HttpOnly`, `SameSite=Lax`
-- `Secure` only when `COOKIE_SECURE=true`
-
-### `COOKIE_SECURE` (default `false`)
-Set the `Secure` attribute on issued cookies. Set to `true` in production behind TLS. Leave `false` for local HTTP dev.
-
-### `COOKIE_SAMESITE` (default `Lax`)
-- `Lax` — cookie only flows on top-level same-origin navigation. Embedded widgets on a different origin from the captcha service won't see it; the cookie signal silently degrades to "missing" (+5) for those requests.
-- `None` — cookie flows on every cross-site request. Required for cross-origin embeds. Browsers refuse `SameSite=None` without `Secure`, so the service **panics at boot** if `COOKIE_SAMESITE=None` is combined with `COOKIE_SECURE=false`.
-
-For cross-origin embeds you also need to set `CORS_ALLOWED_ORIGINS` to the embedder's origin (a wildcard origin can't be combined with credentials).
+The service sets **no cookies** and reads none. There is no client-side storage of any kind: the widget submits an opaque token in the form body, and every risk signal is derived server-side from the request itself (rate counters, request headers, optional IP reputation / TLS fingerprint) or from behavioral telemetry the widget collects for that one submission. This is what lets the service run without a consent banner — there is no ePrivacy Article 5(3) "storage or access on the user's device" to consent to.
 
 ---
 
@@ -269,10 +261,10 @@ Challenges and rate-window counters intentionally stay in-memory: they're cheap 
 ### `CORS_ALLOWED_ORIGINS`
 The browser-embedded widget reaches `GET /v1/puzzle` and static assets (`/static/captcha-worker.js`, vendor files) cross-origin. Those are the only surfaces with CORS. `/v1/verify`, `/v1/sites`, and `/v1/admin/*` have **no** CORS layer — same-origin policy in browsers blocks cross-origin reads of those endpoints.
 
-- Unset: any origin allowed, no credentials. The widget can fetch puzzles, but cross-origin trust cookies won't work.
-- Set: comma- or whitespace-separated allowlist (`https://a.example,https://b.example`). Origins outside the list don't get CORS headers and the browser blocks the response. Listed origins may send credentials to `GET /v1/puzzle`, which is required for cross-origin trust cookies.
+- Unset: any origin allowed, no credentials. The widget can fetch puzzles from any embedding origin.
+- Set: comma- or whitespace-separated allowlist (`https://a.example,https://b.example`). Origins outside the list don't get CORS headers and the browser blocks the response.
 
-Cookies don't flow cross-origin in the default `SameSite=Lax` configuration regardless of CORS — the cookie signal degrades to "missing" for embedders on a different origin from the captcha service. To enable the cookie signal cross-origin, set `CORS_ALLOWED_ORIGINS`, `COOKIE_SAMESITE=None`, and `COOKIE_SECURE=true`.
+Since the service is cookie-free, there are no cross-origin credential concerns — the widget never sends or receives cookies, so a wildcard origin is safe for the puzzle endpoint.
 
 ---
 
@@ -320,6 +312,11 @@ The bearer token for `/v1/admin/*` is the same `ADMIN_TOKEN` used for `/v1/sites
 
 Each session row includes the puzzle score, tier, signal breakdown, verify result (when present), and a derived `bot_probability` (max of puzzle and verify scores, capped at 100). Decision writes go through an unbounded channel to a dedicated writer thread, so the hot path is never blocked on disk.
 
+### `ANONYMIZE_LOG_IP` (default `true`)
+Controls the IP value persisted in each decision-log row. On by default: the IP is truncated to its network prefix (IPv4 → /24, e.g. `203.0.113.42` → `203.0.113.0`; IPv6 → /48) before it is written, so the durable log — and the dashboard reading from it — never holds a per-visitor address. This is the data-minimization control that keeps the dashboard defensible under GDPR.
+
+Live scoring (rate window, IP reputation, XFF resolution) always operates on the **full** IP, so anonymizing the logged copy does not weaken detection. Set `ANONYMIZE_LOG_IP=false` to store full IPs where the operator is the data controller and needs them for abuse forensics. Note: the full IP still appears transiently in the structured `puzzle_decision` tracing event (`ip=…`); this flag governs the durable decision log only, not your log pipeline.
+
 ---
 
 ## Info-page links (`INFO_*_URL`)
@@ -339,43 +336,21 @@ The bundled `static/{about,privacy,terms}.html` are written to be safe defaults 
 
 ---
 
-## Scoring mode (`FULL_FINGERPRINT_MODE`)
+## Privacy posture
 
-The default posture is a FriendlyCaptcha-style "no fingerprint, no cookie" baseline. Operators must **opt in** to the fingerprinting signal set with `FULL_FINGERPRINT_MODE=1` — and that opt-in is what changes their GDPR / ePrivacy posture (cookie consent, fingerprinting disclosure, DPIA).
+The service is **cookie-free** and runs every signal under **legitimate interest** with data minimization — there is no global on/off switch and no consent-triggering client storage. Each signal self-gates on whether its input is configured:
 
-| Signal | Default (privacy baseline) | `FULL_FINGERPRINT_MODE=1` |
+| Signal | Always on? | Privacy notes |
 |---|---|---|
-| Rate (per-IP, 60 s window) | scored — transient, no profile retained | scored |
-| Honeypot | scored — no PII | scored |
-| Time-on-page | scored — transient | scored |
-| Header anomaly (UA / Accept-Language / Accept-Encoding) | **0** — not scored | scored — browser fingerprinting |
-| IP reputation (`IP_REPUTATION_FILE`) | **0** — not scored | scored — IP-based profiling |
-| Cookie age (`__captcha_trust`) | **0** — not scored | scored — persistent identifier |
-| TLS fingerprint (`TLS_FINGERPRINT_HEADER`) | **0** — not scored | scored — device fingerprint |
-| Behavior (mouse / touch / `webdriver`) | **0** — not scored | scored — behavioral fingerprint |
+| Rate (per-IP + per-site, 60 s window) | Yes | Transient counter, no per-IP profile retained |
+| Header anomaly (UA / Accept-Language / Accept-Encoding) | Yes | Scored transiently from headers the browser already sends; no stable identifier persisted |
+| Honeypot | Yes | No PII |
+| Time-on-page | Yes | Derived server-side, transient |
+| Behavior (mouse / touch / `webdriver`) | Yes | Ephemeral, submitted for one verification, not linked to an identity |
+| IP reputation | Only with `IP_REPUTATION_FILE` | Transient CIDR lookup; the full IP is never persisted (the decision log truncates it — see `ANONYMIZE_LOG_IP`) |
+| TLS fingerprint | Only with `TLS_FINGERPRINT_HEADER` + `TRUSTED_PROXIES` | The one device-fingerprint signal; opt-in via its own env vars |
 
-The cookie itself is still issued when `COOKIE_SIGNING_SECRET` is set (handlers don't gate cookie I/O on the mode), but it doesn't influence the live decision in baseline mode. Set `COOKIE_SIGNING_SECRET=` to also stop issuing it.
-
-### Production posture (real-product testing under existing legal text)
-
-The opposite-mode (shadow) score is **only computed when the dashboard is enabled**. Concretely, in the default baseline with `ADMIN_DB_PATH` unset, the handler never invokes `score_header_anomaly` / `score_ip_reputation` / `score_cookie_age` / `score_tls_fingerprint` / `score_behavior` for any request. Only the baseline signals are processed.
-
-This is the clean compliance story for testing on a real product without rewriting your privacy notice:
-
-- Leave `FULL_FINGERPRINT_MODE` unset (baseline).
-- Leave `ADMIN_DB_PATH`, `COOKIE_SIGNING_SECRET`, `TLS_FINGERPRINT_HEADER`, and `IP_REPUTATION_FILE` unset.
-- The widget never receives a `Set-Cookie`, the server doesn't read fingerprint headers, and no full-mode score is ever computed in memory.
-
-### Comparison harness (dev/staging)
-
-Set `ADMIN_DB_PATH` in dev/staging to enable the dashboard. Both scores are then computed per request: the live one (driven by `FULL_FINGERPRINT_MODE`) and the opposite mode as a shadow score for comparison. The admin UI surfaces:
-
-- A **per-session** "Privacy mode comparison" panel showing each mode's tier and score, with a `diff` pill when the decision diverges.
-- An aggregate **minimal vs. full** rollup on the Stats tab counting puzzle/verify decisions where the modes would have ruled differently.
-
-This answers "what do I lose if I run in baseline mode in production?" — high divergence (≳5–10 % of sessions) means the fingerprinting signals were doing real detection work; low divergence means PoW + honeypot + rate + time-on-page already covers your traffic and you can stay on the privacy baseline without losing detection.
-
-`FULL_FINGERPRINT_MODE` is otherwise a **decision-mode toggle**, not a data-collection toggle: when the dashboard *is* on, the widget keeps sending behavioral telemetry and the handler keeps reading the cookie / TLS-fingerprint header so the comparison data remains real.
+What keeps this defensible: no cookies or other terminal-device storage (so no ePrivacy Art. 5(3) consent), short-lived transient processing for security (legitimate interest, Art. 6(1)(f)), and IP truncation before anything durable is written. As always, the final compliance determination — including a DPIA if you enable IP reputation or TLS fingerprinting — rests with you as the data controller.
 
 ---
 
@@ -399,9 +374,7 @@ TIER_CHECKBOX_MIN=15
 TIER_HARD_POW_MIN=35
 TIER_BLOCK_MIN=80
 
-# Behavioral checks on
-COOKIE_SIGNING_SECRET=$(openssl rand -hex 32)
-COOKIE_SECURE=true
+# Verify-time thresholds tuned a bit tighter
 VERIFY_SHADOW_MIN=25
 VERIFY_BLOCK_MIN=55
 
@@ -427,5 +400,3 @@ For local development, the bare minimum (just the testsite + scoring scaffold):
 ```bash
 DEFAULT_DIFFICULTY=8 cargo run
 ```
-
-Add `COOKIE_SIGNING_SECRET=<16+chars>` to exercise the cookie path in the testsite.

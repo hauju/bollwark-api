@@ -5,14 +5,8 @@ use crate::risk::verify::VerifyBreakdown;
 use crate::risk::{EscalationTier, SignalBreakdown};
 
 /// Per-decision record emitted from the puzzle handler. Mirrors the fields
-/// in the existing `puzzle_decision` tracing event so the dashboard table
-/// matches what an operator already sees in the JSONL stream.
-///
-/// `score`/`tier`/`breakdown` reflect the *live* decision — i.e. the score
-/// in whichever mode the operator selected. `score_full`/`tier_full` and
-/// `score_minimal`/`tier_minimal` always carry both scores so the dashboard
-/// can show side-by-side what the decision would have been under either
-/// mode.
+/// in the `puzzle_decision` tracing event so the dashboard table matches what
+/// an operator already sees in the JSONL stream.
 #[derive(Debug, Clone)]
 pub struct PuzzleRecord {
     pub challenge_id: Option<Uuid>,
@@ -25,13 +19,8 @@ pub struct PuzzleRecord {
     pub difficulty: u32,
     pub outcome: &'static str,
     pub breakdown: SignalBreakdown,
-    pub cookie_presence: String,
     pub tls_fingerprint: String,
     pub user_agent: Option<String>,
-    pub score_full: u32,
-    pub tier_full: EscalationTier,
-    pub score_minimal: u32,
-    pub tier_minimal: EscalationTier,
 }
 
 #[derive(Debug, Clone)]
@@ -42,12 +31,7 @@ pub struct VerifyRecord {
     pub score: u32,
     pub breakdown: VerifyBreakdown,
     pub time_on_page_ms: Option<u64>,
-    pub cookie_presence: String,
     pub webdriver: &'static str,
-    pub score_full: u32,
-    pub outcome_full: &'static str,
-    pub score_minimal: u32,
-    pub outcome_minimal: &'static str,
 }
 
 /// Wire format returned by the admin API. One row per puzzle decision; verify
@@ -66,19 +50,12 @@ pub struct Session {
     pub difficulty: u32,
     pub ip_count: u32,
     pub site_count: u32,
-    pub cookie_presence: String,
     pub tls_fingerprint: String,
     pub puzzle_breakdown: PuzzleBreakdownDto,
     pub verify: Option<VerifySection>,
     /// Combined bot-likelihood score, 0–100. Max of puzzle and verify scores
     /// (clamped). When verify hasn't happened yet, it's just the puzzle score.
     pub bot_probability: u32,
-    /// Full-mode and minimal-mode shadow scores recorded alongside the live
-    /// decision so the dashboard can show what each mode would have ruled.
-    pub puzzle_score_full: u32,
-    pub puzzle_tier_full: String,
-    pub puzzle_score_minimal: u32,
-    pub puzzle_tier_minimal: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -86,7 +63,6 @@ pub struct PuzzleBreakdownDto {
     pub rate: u32,
     pub header_anomaly: u32,
     pub ip_reputation: u32,
-    pub cookie_age: u32,
     pub tls_fingerprint: u32,
 }
 
@@ -97,22 +73,14 @@ pub struct VerifySection {
     pub success: bool,
     pub score: u32,
     pub time_on_page_ms: Option<u64>,
-    pub cookie_presence: String,
     pub webdriver: String,
     pub breakdown: VerifyBreakdownDto,
-    /// Full-mode and minimal-mode shadow scores so the dashboard can show
-    /// the verify-time decision diff at a glance.
-    pub score_full: u32,
-    pub outcome_full: String,
-    pub score_minimal: u32,
-    pub outcome_minimal: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct VerifyBreakdownDto {
     pub honeypot: u32,
     pub time_on_page: u32,
-    pub cookie_age: u32,
     pub behavior: u32,
 }
 
@@ -130,20 +98,6 @@ pub struct Stats {
     pub verify_signals: VerifySignalSums,
     pub outcomes: OutcomeCounts,
     pub tiers: TierCounts,
-    /// Privacy-mode divergence: how often the live decision and the
-    /// minimal-mode shadow score would have produced a different tier
-    /// (puzzle) or outcome (verify). Operators look at these to quantify
-    /// what they'd lose by adopting a FriendlyCaptcha-style minimal
-    /// signal set in production.
-    pub privacy_compare: PrivacyCompare,
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct PrivacyCompare {
-    pub puzzle_diverged: u64,
-    pub verify_diverged: u64,
-    pub puzzle_total: u64,
-    pub verify_total: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -151,7 +105,6 @@ pub struct PuzzleSignalSums {
     pub rate: u64,
     pub header_anomaly: u64,
     pub ip_reputation: u64,
-    pub cookie_age: u64,
     pub tls_fingerprint: u64,
 }
 
@@ -159,7 +112,6 @@ pub struct PuzzleSignalSums {
 pub struct VerifySignalSums {
     pub honeypot: u64,
     pub time_on_page: u64,
-    pub cookie_age: u64,
     pub behavior: u64,
 }
 
