@@ -41,6 +41,7 @@ All runtime config is via environment variables; every setting has a default. **
 - Reverse-proxy aware client IP: `TRUSTED_PROXIES` (the same CIDR list the TLS fingerprint signal uses) also gates `X-Forwarded-For` walking. The handler resolves the client IP via `risk::client_ip`; per-IP signals score the resolved IP, the TLS fingerprint signal still keys off the immediate peer.
 - Validation dashboard: `ADMIN_DB_PATH` enables SQLite-backed decision logging + the admin endpoints; `ADMIN_TOKEN` is the bearer token (shared with provisioning) and is required when `ADMIN_DB_PATH` is set. Browser UI is `static/admin.html`.
 - `ANONYMIZE_LOG_IP` (default `true`) — truncate the client IP (IPv4 /24, IPv6 /48) before it's written to the decision log, via `risk::anonymize_ip` applied in the puzzle handler. Live scoring always uses the full IP; only the logged copy is truncated. Governs the durable decision log only, not the `puzzle_decision` tracing event.
+- `LOG_RETENTION_HOURS` (default `72`, `0` disables) — retention window for the decision log. A background sweeper (spawned in `main.rs`, only when `ADMIN_DB_PATH` is set) prunes rows older than the window so the durable log obeys GDPR storage-limitation instead of growing unbounded. Cadence is 1/24 of the window, clamped to `[60s, 1h]`; the first sweep runs at boot, so stale rows from a prior run are cleaned immediately. Implemented as `DecisionLog::prune` (routed through the writer thread, like `clear`).
 
 ## Architecture
 

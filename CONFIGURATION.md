@@ -35,6 +35,7 @@ A `.env` file in the working directory is loaded automatically at startup (via `
 | `CORS_ALLOWED_ORIGINS` | _unset_ | Comma- or whitespace-separated allowlist of origins permitted to call `GET /v1/puzzle` and fetch static widget assets from a browser. Empty/unset = any origin, no credentials. Other API endpoints never have CORS enabled. |
 | `DEV_DISABLE_ADMIN_AUTH` | `false` | **Dev/test only.** When truthy (`1`/`true`/`yes`/`on`), `POST /v1/sites` skips the `ADMIN_TOKEN` bearer check. Refused in release builds. Admin dashboard endpoints (`/v1/admin/*`) are NOT bypassed. |
 | `ANONYMIZE_LOG_IP` | `true` | Truncate the client IP (IPv4 → /24, IPv6 → /48) before writing it to the decision log. **On by default** so the dashboard stores no per-visitor address. Set to `false` to log full IPs (abuse forensics). Live scoring always uses the full IP regardless. |
+| `LOG_RETENTION_HOURS` | `72` | Retention window for the decision log. A background sweeper prunes rows older than this (only runs when `ADMIN_DB_PATH` is set). **On by default** (ALTCHA's window) so the durable log obeys GDPR storage-limitation. Set to `0` to disable pruning and keep rows forever. |
 
 ---
 
@@ -316,6 +317,11 @@ Each session row includes the puzzle score, tier, signal breakdown, verify resul
 Controls the IP value persisted in each decision-log row. On by default: the IP is truncated to its network prefix (IPv4 → /24, e.g. `203.0.113.42` → `203.0.113.0`; IPv6 → /48) before it is written, so the durable log — and the dashboard reading from it — never holds a per-visitor address. This is the data-minimization control that keeps the dashboard defensible under GDPR.
 
 Live scoring (rate window, IP reputation, XFF resolution) always operates on the **full** IP, so anonymizing the logged copy does not weaken detection. Set `ANONYMIZE_LOG_IP=false` to store full IPs where the operator is the data controller and needs them for abuse forensics. Note: the full IP still appears transiently in the structured `puzzle_decision` tracing event (`ip=…`); this flag governs the durable decision log only, not your log pipeline.
+
+### `LOG_RETENTION_HOURS` (default `72`)
+Caps how long decision-log rows live. A background sweeper (spawned at startup, only when `ADMIN_DB_PATH` is set) deletes any puzzle/verify row older than the window. The default `72` matches ALTCHA's retention; together with `ANONYMIZE_LOG_IP` it is what makes the durable log defensible under GDPR **storage limitation** (Art. 5(1)(e)) — without it the table grows forever and the only way to bound it is the operator-initiated "Clear all".
+
+The sweeper runs at **1/24 of the window**, clamped to `[60s, 1h]` — so a 72 h window sweeps hourly, and rows never outlive the window by more than ~4%. The first sweep fires at boot, so stale rows left by a previous run (e.g. before this was configured) are pruned immediately on the next start. Set `LOG_RETENTION_HOURS=0` to disable pruning entirely and keep every row (e.g. when you are the data controller and need a longer forensic trail — pair with a longer-retention upsell rather than treating it as the baseline). Pruning is index-backed (`idx_puzzle_ts` / `idx_verify_ts`) and serialised with inserts through the same writer thread, so it never races a concurrent write.
 
 ---
 

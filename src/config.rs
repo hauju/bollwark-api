@@ -82,6 +82,14 @@ pub struct AppConfig {
     /// detection is unaffected. Set `ANONYMIZE_LOG_IP=false` to log full IPs
     /// (e.g. for abuse forensics where the operator is the data controller).
     pub anonymize_log_ip: bool,
+    /// Retention window for the decision log, in hours. Rows older than this
+    /// are pruned by a periodic sweeper (only runs when `ADMIN_DB_PATH` is
+    /// set). **Default 72** — the same short window ALTCHA uses; together
+    /// with `anonymize_log_ip` it keeps the dashboard's durable log
+    /// defensible under GDPR storage-limitation. Set `LOG_RETENTION_HOURS=0`
+    /// to disable pruning and keep rows forever (e.g. when the operator is
+    /// the data controller and needs a longer forensic trail).
+    pub log_retention_hours: u64,
 }
 
 impl AppConfig {
@@ -153,6 +161,10 @@ impl AppConfig {
                 .ok()
                 .map(|v| parse_truthy(Some(&v)))
                 .unwrap_or(true),
+            log_retention_hours: env::var("LOG_RETENTION_HOURS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(72),
         }
     }
 }
@@ -231,6 +243,7 @@ impl Default for AppConfig {
             info_privacy_url: None,
             info_terms_url: None,
             anonymize_log_ip: true,
+            log_retention_hours: 72,
         }
     }
 }

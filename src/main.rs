@@ -202,6 +202,40 @@ async fn main() {
         None => (None, None),
     };
 
+    // Decision-log retention sweeper. Only runs when the dashboard log exists
+    // and a retention window is configured (`LOG_RETENTION_HOURS`, default 72,
+    // 0 disables). Prunes rows older than the window so the durable log obeys
+    // GDPR storage-limitation instead of growing forever. Sweep cadence is
+    // 1/24 of the window — rows never outlive it by more than ~4% — clamped to
+    // [60s, 1h]. The interval fires immediately, so stale rows from a prior
+    // run are cleaned at boot.
+    if let Some(log) = &decision_log {
+        let retention_hours = config.log_retention_hours;
+        if retention_hours == 0 {
+            tracing::info!(
+                "LOG_RETENTION_HOURS=0 — decision-log pruning disabled (rows kept forever)"
+            );
+        } else {
+            let sweep_secs = (retention_hours * 3600 / 24).clamp(60, 3600);
+            tracing::info!(
+                "Decision-log retention: pruning rows older than {retention_hours}h every {sweep_secs}s"
+            );
+            let prune_log = log.clone();
+            tokio::spawn(async move {
+                let mut interval =
+                    tokio::time::interval(std::time::Duration::from_secs(sweep_secs));
+                loop {
+                    interval.tick().await;
+                    match prune_log.prune(retention_hours).await {
+                        Ok(0) => {}
+                        Ok(n) => tracing::info!("decision-log retention: pruned {n} rows"),
+                        Err(e) => tracing::error!("decision-log retention sweep failed: {e}"),
+                    }
+                }
+            });
+        }
+    }
+
     // ADMIN_TOKEN gates `POST /v1/sites` whether or not the dashboard is
     // enabled. Without it, `/v1/sites` returns 404 — no anonymous
     // provisioning. Empty strings are rejected so a misconfigured

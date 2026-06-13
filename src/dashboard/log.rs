@@ -89,6 +89,13 @@ enum Msg {
     /// serialised with any in-flight inserts. The caller awaits the ack
     /// to know the operation finished before issuing a follow-up read.
     Clear(oneshot::Sender<rusqlite::Result<()>>),
+    /// Delete rows whose `ts` is older than the RFC3339 cutoff. Same
+    /// rationale as `Clear` for going through the writer thread; the ack
+    /// carries the number of rows removed so the sweeper can log it.
+    Prune {
+        cutoff: String,
+        ack: oneshot::Sender<rusqlite::Result<usize>>,
+    },
 }
 
 #[derive(Clone)]
@@ -144,6 +151,13 @@ impl DecisionLog {
                             let result = clear_all(&writer);
                             if let Err(e) = &result {
                                 tracing::warn!(error = %e, "decision-log: clear failed");
+                            }
+                            let _ = ack.send(result);
+                        }
+                        Msg::Prune { cutoff, ack } => {
+                            let result = prune_before(&writer, &cutoff);
+                            if let Err(e) = &result {
+                                tracing::warn!(error = %e, "decision-log: prune failed");
                             }
                             let _ = ack.send(result);
                         }
@@ -216,6 +230,26 @@ impl DecisionLog {
         }
         rx.await.unwrap_or(Err(rusqlite::Error::InvalidQuery))
     }
+
+    /// Delete rows older than `retention_hours`. Returns the number of rows
+    /// removed across both tables. Like `clear`, this awaits an ack from the
+    /// writer thread so the delete is serialised with in-flight inserts.
+    /// Called by the periodic retention sweeper in `main.rs`.
+    pub async fn prune(&self, retention_hours: u64) -> rusqlite::Result<usize> {
+        let cutoff = (chrono::Utc::now()
+            - chrono::Duration::hours(i64::try_from(retention_hours).unwrap_or(i64::MAX)))
+        .to_rfc3339();
+        let (tx, rx) = oneshot::channel();
+        if self
+            .sender
+            .send(Msg::Prune { cutoff, ack: tx })
+            .await
+            .is_err()
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        rx.await.unwrap_or(Err(rusqlite::Error::InvalidQuery))
+    }
 }
 
 fn clear_all(conn: &Connection) -> rusqlite::Result<()> {
@@ -231,6 +265,24 @@ fn clear_all(conn: &Connection) -> rusqlite::Result<()> {
     );
     tx.commit()?;
     Ok(())
+}
+
+/// Delete rows older than `cutoff` from both tables. `cutoff` is an RFC3339
+/// UTC string in the same format the inserts write (`to_rfc3339()`), so a
+/// plain string `<` comparison is both correct — fixed-width fields with a
+/// trailing `+00:00` sort lexicographically in chronological order — and
+/// index-friendly via `idx_puzzle_ts` / `idx_verify_ts`, unlike a
+/// `strftime('%s', ts)` comparison which would scan every row.
+fn prune_before(conn: &Connection, cutoff: &str) -> rusqlite::Result<usize> {
+    let tx = conn.unchecked_transaction()?;
+    // Verify rows first: a verify always shares its puzzle's window, so
+    // pruning by each table's own `ts` keeps the join consistent — a puzzle
+    // row only survives if it's newer than the cutoff, and the queries drive
+    // the join from the puzzle side anyway.
+    let verifies = tx.execute("DELETE FROM verify_decisions WHERE ts < ?1", [cutoff])?;
+    let puzzles = tx.execute("DELETE FROM puzzle_decisions WHERE ts < ?1", [cutoff])?;
+    tx.commit()?;
+    Ok(verifies + puzzles)
 }
 
 fn insert_puzzle(conn: &Connection, r: &PuzzleRecord) -> rusqlite::Result<()> {
@@ -296,4 +348,61 @@ fn insert_verify(conn: &Connection, r: &VerifyRecord) -> rusqlite::Result<()> {
         ],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `prune_before` removes rows older than the cutoff from both tables and
+    /// leaves newer rows untouched. Uses fixed RFC3339 timestamps so the
+    /// lexicographic comparison the function relies on is exercised directly.
+    #[test]
+    fn prune_before_drops_only_old_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+
+        // Two puzzle rows (one old, one fresh), each with a verify row whose
+        // ts tracks its puzzle. Cutoff sits between the two days.
+        conn.execute_batch(
+            "INSERT INTO puzzle_decisions
+               (ts, challenge_id, site_key, ip, ip_count, site_count, score, tier, difficulty,
+                outcome, sig_rate, sig_header_anomaly, sig_ip_reputation,
+                sig_tls_fingerprint, tls_fingerprint, user_agent)
+             VALUES
+               ('2026-01-01T00:00:00+00:00','old','s','1.2.3.4',1,1,10,'Checkbox',12,'issued',
+                10,0,0,0,'Skipped',NULL),
+               ('2026-01-05T00:00:00+00:00','new','s','1.2.3.4',1,1,10,'Checkbox',12,'issued',
+                10,0,0,0,'Skipped',NULL);
+             INSERT INTO verify_decisions
+               (ts, challenge_id, success, outcome, score, sig_honeypot, sig_time_on_page,
+                sig_behavior, time_on_page_ms, webdriver)
+             VALUES
+               ('2026-01-01T00:00:02+00:00','old',1,'pass',0,0,0,0,5000,'false'),
+               ('2026-01-05T00:00:02+00:00','new',1,'pass',0,0,0,0,5000,'false');",
+        )
+        .unwrap();
+
+        let removed = prune_before(&conn, "2026-01-03T00:00:00+00:00").unwrap();
+        assert_eq!(removed, 2, "one puzzle + one verify from the old day");
+
+        let puzzles: i64 = conn
+            .query_row("SELECT COUNT(*) FROM puzzle_decisions", [], |r| r.get(0))
+            .unwrap();
+        let verifies: i64 = conn
+            .query_row("SELECT COUNT(*) FROM verify_decisions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(puzzles, 1);
+        assert_eq!(verifies, 1);
+
+        let survivor: String = conn
+            .query_row("SELECT challenge_id FROM puzzle_decisions", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(survivor, "new");
+
+        // A cutoff before everything is a no-op.
+        assert_eq!(prune_before(&conn, "2025-01-01T00:00:00+00:00").unwrap(), 0);
+    }
 }
