@@ -19,6 +19,10 @@ pub struct PuzzleRecord {
     pub difficulty: u32,
     pub outcome: &'static str,
     pub breakdown: SignalBreakdown,
+    /// Canonical IP-reputation category (`tor`/`datacenter`/`vpn`/
+    /// `residential`), or `None` when no reputation list matched the IP.
+    /// Stored alongside the numeric `breakdown.ip_reputation`.
+    pub ip_reputation_category: Option<&'static str>,
     pub tls_fingerprint: String,
     pub user_agent: Option<String>,
 }
@@ -148,6 +152,10 @@ pub struct Analytics {
     /// Browser-family counts parsed from the logged User-Agent, sorted
     /// descending.
     pub browsers: Vec<BrowserCount>,
+    /// IP-reputation network-type counts (datacenter/tor/vpn/residential),
+    /// sorted descending. Only sessions whose IP matched the reputation list
+    /// appear here, so the panel is empty when no `IP_REPUTATION_FILE` is set.
+    pub network_types: Vec<NetworkTypeCount>,
     /// Per-signal fire counts: number of sessions in the window where the
     /// signal contributed a non-zero score.
     pub signal_fires: SignalFires,
@@ -173,6 +181,12 @@ pub struct TimeBucket {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BrowserCount {
+    pub name: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NetworkTypeCount {
     pub name: String,
     pub count: u64,
 }

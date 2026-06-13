@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::http::HeaderMap;
 
-use super::reputation::{ReputationStore, score_ip_reputation};
+use super::reputation::{IpCategory, ReputationStore, score_ip_reputation};
 use super::signals::{score_header_anomaly, score_rate};
 use super::tier::{EscalationTier, TierThresholds};
 use super::tls_fingerprint::{FingerprintBlocklist, TlsFingerprint, score_tls_fingerprint};
@@ -29,6 +29,10 @@ pub struct RiskScore {
     pub total: u32,
     pub breakdown: SignalBreakdown,
     pub tier: EscalationTier,
+    /// Network category matched for the request's IP, if any. Carried
+    /// alongside the numeric `breakdown.ip_reputation` so the decision log
+    /// can record *which* category fired, not just the points it added.
+    pub ip_category: Option<IpCategory>,
 }
 
 pub struct RiskScorer {
@@ -56,10 +60,11 @@ impl RiskScorer {
     /// trusted proxy supplied the header. So the privacy-invasive signals only
     /// fire when the operator has explicitly enabled their inputs.
     pub fn score(&self, ctx: &SignalContext<'_>) -> RiskScore {
+        let ip_category = self.reputation.lookup(ctx.ip);
         let breakdown = SignalBreakdown {
             rate: score_rate(ctx.ip_count, ctx.site_count),
             header_anomaly: score_header_anomaly(ctx.headers),
-            ip_reputation: score_ip_reputation(self.reputation.lookup(ctx.ip)),
+            ip_reputation: score_ip_reputation(ip_category),
             tls_fingerprint: score_tls_fingerprint(ctx.tls_fingerprint, &self.tls_blocklist),
         };
         let total = breakdown.rate
@@ -71,6 +76,7 @@ impl RiskScorer {
             total,
             breakdown,
             tier,
+            ip_category,
         }
     }
 }

@@ -24,6 +24,18 @@ impl IpCategory {
             _ => None,
         }
     }
+
+    /// Canonical lowercase name, stable across config aliases (`dc`/`hosting`
+    /// both normalise to `datacenter`). Used as the at-rest label in the
+    /// decision log so the dashboard can break traffic down by network type.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Datacenter => "datacenter",
+            Self::Tor => "tor",
+            Self::Vpn => "vpn",
+            Self::Residential => "residential",
+        }
+    }
 }
 
 /// File-backed CIDR list. One entry per line: `<cidr> <category>` (whitespace-separated).

@@ -839,6 +839,15 @@ const SIGNAL_LABELS = {
   behavior: 'behavior',
 };
 
+// Fixed palette per IP-reputation network type, falls back to grey for any
+// category the server adds later that the UI doesn't know about yet.
+const NETWORK_COLORS = {
+  datacenter:  '#f0883e',
+  tor:         '#f85149',
+  vpn:         '#d29922',
+  residential: '#56d364',
+};
+
 function renderContribution(breakdown, keys, total) {
   const entries = keys.map(k => ({ key: k, value: breakdown[k] || 0, color: SIGNAL_COLORS[k], label: SIGNAL_LABELS[k] }));
   const stacked = total > 0
@@ -1026,6 +1035,8 @@ function renderAnalytics(a) {
     h('div', { class: 'chart-grid' },
       panel('Bot probability', histogramChart(a.bot_histogram)),
       panel('Browsers', hbarList(a.browsers.map(b => ({ label: b.name, value: b.count, color: '#58a6ff' })))),
+      panel('Network type', hbarList((a.network_types || []).map(n =>
+        ({ label: n.name, value: n.count, color: NETWORK_COLORS[n.name] || '#8b949e' })))),
       panel('Signal fire rate', hbarList(
         [...PUZZLE_KEYS, ...VERIFY_KEYS].map(k =>
           ({ label: SIGNAL_LABELS[k], value: a.signal_fires[k], color: SIGNAL_COLORS[k] })))),

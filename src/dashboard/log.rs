@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS puzzle_decisions (
     sig_header_anomaly    INTEGER NOT NULL,
     sig_ip_reputation     INTEGER NOT NULL,
     sig_tls_fingerprint   INTEGER NOT NULL,
+    ip_reputation_category TEXT,
     tls_fingerprint TEXT    NOT NULL,
     user_agent      TEXT
 );
@@ -62,11 +63,20 @@ CREATE INDEX IF NOT EXISTS idx_verify_challenge ON verify_decisions(challenge_id
 CREATE INDEX IF NOT EXISTS idx_verify_ts ON verify_decisions(ts DESC);
 ";
 
-// Drop columns left over from the cookie-age signal and the full/minimal
+// In-place schema migrations for databases created by an older binary.
+//
+// DROPs: columns left over from the cookie-age signal and the full/minimal
 // shadow-scoring comparison, both removed when the service went cookie-free
-// and dropped FULL_FINGERPRINT_MODE. SQLite has no `DROP COLUMN IF EXISTS`,
-// so we run each once and treat the "no such column" error (fresh databases,
-// or a second run) as a no-op. DROP COLUMN requires SQLite 3.35+ (2021).
+// and dropped FULL_FINGERPRINT_MODE.
+//
+// ADDs: columns added to SCHEMA after the table first shipped. A fresh
+// database already has them (created from the current SCHEMA), so the ADD is
+// a no-op there; an upgraded database picks them up here.
+//
+// SQLite has no `... IF [NOT] EXISTS` for columns, so we run each once and
+// treat the benign "no such column" (DROP, already gone) and "duplicate
+// column name" (ADD, already present) errors as no-ops. DROP COLUMN requires
+// SQLite 3.35+ (2021).
 const MIGRATIONS: &[&str] = &[
     "ALTER TABLE puzzle_decisions DROP COLUMN sig_cookie_age",
     "ALTER TABLE puzzle_decisions DROP COLUMN cookie_presence",
@@ -80,6 +90,7 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE verify_decisions DROP COLUMN outcome_full",
     "ALTER TABLE verify_decisions DROP COLUMN score_minimal",
     "ALTER TABLE verify_decisions DROP COLUMN outcome_minimal",
+    "ALTER TABLE puzzle_decisions ADD COLUMN ip_reputation_category TEXT",
 ];
 
 enum Msg {
@@ -120,7 +131,7 @@ impl DecisionLog {
             // or a second run of these migrations. Treat that as a no-op.
             if let Err(e) = writer.execute(stmt, []) {
                 let msg = e.to_string();
-                if !msg.contains("no such column") {
+                if !msg.contains("no such column") && !msg.contains("duplicate column name") {
                     return Err(e);
                 }
             }
@@ -293,12 +304,12 @@ fn insert_puzzle(conn: &Connection, r: &PuzzleRecord) -> rusqlite::Result<()> {
             ts, challenge_id, site_key, ip, ip_count, site_count,
             score, tier, difficulty, outcome,
             sig_rate, sig_header_anomaly, sig_ip_reputation, sig_tls_fingerprint,
-            tls_fingerprint, user_agent
+            ip_reputation_category, tls_fingerprint, user_agent
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6,
             ?7, ?8, ?9, ?10,
             ?11, ?12, ?13, ?14,
-            ?15, ?16
+            ?15, ?16, ?17
          )",
         params![
             ts,
@@ -315,6 +326,7 @@ fn insert_puzzle(conn: &Connection, r: &PuzzleRecord) -> rusqlite::Result<()> {
             r.breakdown.header_anomaly,
             r.breakdown.ip_reputation,
             r.breakdown.tls_fingerprint,
+            r.ip_reputation_category,
             r.tls_fingerprint,
             r.user_agent,
         ],

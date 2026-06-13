@@ -101,10 +101,15 @@ pub async fn get_puzzle(
         sig_rate = score.breakdown.rate,
         sig_header_anomaly = score.breakdown.header_anomaly,
         sig_ip_reputation = score.breakdown.ip_reputation,
+        ip_reputation_category = score.ip_category.map(|c| c.as_str()).unwrap_or("none"),
         sig_tls_fingerprint = score.breakdown.tls_fingerprint,
         tls_fingerprint = ?tls_fingerprint,
         "Puzzle decision"
     );
+
+    // Canonical network-type label for the decision log (None → NULL column).
+    // Lets the dashboard break traffic down by datacenter/tor/vpn/residential.
+    let ip_reputation_category = score.ip_category.map(|c| c.as_str());
 
     // Snapshot the User-Agent for the dashboard before we hit any branch
     // that returns. The header may be missing — that's fine, it still scores.
@@ -136,6 +141,7 @@ pub async fn get_puzzle(
                 difficulty: 0,
                 outcome: "rejected",
                 breakdown: score.breakdown,
+                ip_reputation_category,
                 tls_fingerprint: format!("{tls_fingerprint:?}"),
                 user_agent: ua,
             });
@@ -168,6 +174,7 @@ pub async fn get_puzzle(
             difficulty: challenge.difficulty,
             outcome: "issued",
             breakdown: score.breakdown,
+            ip_reputation_category,
             tls_fingerprint: format!("{tls_fingerprint:?}"),
             user_agent: ua,
         });

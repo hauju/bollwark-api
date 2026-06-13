@@ -9,9 +9,9 @@ use std::path::PathBuf;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row};
 
 use super::types::{
-    Analytics, BrowserCount, OutcomeCounts, PuzzleBreakdownDto, PuzzleSignalSums, Session,
-    SignalFires, SiteActivity, Stats, TierCounts, TimeBucket, VerifyBreakdownDto, VerifySection,
-    VerifySignalSums,
+    Analytics, BrowserCount, NetworkTypeCount, OutcomeCounts, PuzzleBreakdownDto, PuzzleSignalSums,
+    Session, SignalFires, SiteActivity, Stats, TierCounts, TimeBucket, VerifyBreakdownDto,
+    VerifySection, VerifySignalSums,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -497,12 +497,34 @@ fn analytics_blocking(
         .collect();
     browsers.sort_by(|a, b| b.count.cmp(&a.count).then(a.name.cmp(&b.name)));
 
+    // 4. Network types. The category is already a canonical label, so SQL can
+    // group and order directly. NULL rows (no reputation match) are excluded —
+    // the panel shows the network-type mix of *matched* traffic only.
+    let mut network_types = Vec::new();
+    let mut stmt = conn.prepare(&format!(
+        "SELECT p.ip_reputation_category, COUNT(*)
+         FROM puzzle_decisions p
+         WHERE {FILTER} AND p.ip_reputation_category IS NOT NULL
+         GROUP BY p.ip_reputation_category
+         ORDER BY COUNT(*) DESC, p.ip_reputation_category ASC"
+    ))?;
+    let rows = stmt.query_map(rusqlite::params![since_epoch, site_key], |r| {
+        Ok(NetworkTypeCount {
+            name: r.get::<_, String>(0)?,
+            count: r.get::<_, i64>(1)? as u64,
+        })
+    })?;
+    for row in rows {
+        network_types.push(row?);
+    }
+
     Ok(Analytics {
         window_hours: hours,
         bucket_secs: bucket_secs as u32,
         buckets,
         bot_histogram,
         browsers,
+        network_types,
         signal_fires,
     })
 }
@@ -617,16 +639,16 @@ mod tests {
             "INSERT INTO puzzle_decisions
                (ts, challenge_id, site_key, ip, ip_count, site_count, score, tier, difficulty,
                 outcome, sig_rate, sig_header_anomaly, sig_ip_reputation,
-                sig_tls_fingerprint, tls_fingerprint, user_agent)
+                sig_tls_fingerprint, ip_reputation_category, tls_fingerprint, user_agent)
              VALUES
                ('{ts_in}','c1','s1','1.2.3.0',1,1,10,'InvisiblePass',18,'issued',
-                10,0,0,0,'Skipped','Mozilla/5.0 Chrome/120.0 Safari/537.36'),
+                10,0,0,0,NULL,'Skipped','Mozilla/5.0 Chrome/120.0 Safari/537.36'),
                ('{ts_in2}','c2','s1','1.2.3.0',2,2,95,'Block',0,'rejected',
-                30,35,30,0,'Skipped','curl/8.4.0'),
+                30,35,30,0,'datacenter','Skipped','curl/8.4.0'),
                ('{ts_in2}','c3','s2','5.6.7.0',1,1,5,'InvisiblePass',18,'issued',
-                0,5,0,0,'Skipped',NULL),
+                0,5,0,0,NULL,'Skipped',NULL),
                ('{ts_out}','c4','s1','1.2.3.0',1,1,50,'HardPow',24,'issued',
-                50,0,0,0,'Skipped','Mozilla/5.0 Firefox/121.0');
+                50,0,0,0,'tor','Skipped','Mozilla/5.0 Firefox/121.0');
              INSERT INTO verify_decisions
                (ts, challenge_id, success, outcome, score, sig_honeypot, sig_time_on_page,
                 sig_behavior, time_on_page_ms, webdriver)
@@ -684,10 +706,18 @@ mod tests {
         assert_eq!(a.signal_fires.ip_reputation, 1);
         assert_eq!(a.signal_fires.honeypot, 0);
 
+        // Network types: only the in-window datacenter row (c2) counts; c1/c3
+        // have no category and c4's 'tor' is outside the window.
+        assert_eq!(a.network_types.len(), 1);
+        assert_eq!(a.network_types[0].name, "datacenter");
+        assert_eq!(a.network_types[0].count, 1);
+
         // Site filter narrows to s2's single clean request.
         let s2 = analytics_blocking(&conn, 24, now_epoch, Some("s2")).unwrap();
         assert_eq!(s2.buckets.iter().map(|b| b.puzzles).sum::<u64>(), 1);
         assert_eq!(s2.bot_histogram[0], 1);
         assert_eq!(s2.bot_histogram.iter().sum::<u64>(), 1);
+        // s2 has no reputation-matched traffic.
+        assert!(s2.network_types.is_empty());
     }
 }
