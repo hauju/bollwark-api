@@ -156,6 +156,10 @@ pub struct Analytics {
     /// sorted descending. Only sessions whose IP matched the reputation list
     /// appear here, so the panel is empty when no `IP_REPUTATION_FILE` is set.
     pub network_types: Vec<NetworkTypeCount>,
+    /// ISO country-code counts from the offline GeoIP lookup stamped at
+    /// log-write time, sorted descending. Empty when `GEOIP_DB_PATH` is unset
+    /// (every row's `country` column is NULL).
+    pub countries: Vec<CountryCount>,
     /// Per-signal fire counts: number of sessions in the window where the
     /// signal contributed a non-zero score.
     pub signal_fires: SignalFires,
@@ -187,6 +191,12 @@ pub struct BrowserCount {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct NetworkTypeCount {
+    pub name: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CountryCount {
     pub name: String,
     pub count: u64,
 }

@@ -14,6 +14,7 @@ use rusqlite::{Connection, params};
 use tokio::sync::mpsc::{Sender, channel, error::TrySendError};
 use tokio::sync::oneshot;
 
+use super::geo::GeoIp;
 use super::types::{PuzzleRecord, VerifyRecord};
 
 /// Bounded channel capacity. At ~200 bytes per record this is ~1.6 MB of
@@ -41,7 +42,8 @@ CREATE TABLE IF NOT EXISTS puzzle_decisions (
     sig_tls_fingerprint   INTEGER NOT NULL,
     ip_reputation_category TEXT,
     tls_fingerprint TEXT    NOT NULL,
-    user_agent      TEXT
+    user_agent      TEXT,
+    country         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_puzzle_ts ON puzzle_decisions(ts DESC);
 CREATE INDEX IF NOT EXISTS idx_puzzle_challenge ON puzzle_decisions(challenge_id);
@@ -91,6 +93,7 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE verify_decisions DROP COLUMN score_minimal",
     "ALTER TABLE verify_decisions DROP COLUMN outcome_minimal",
     "ALTER TABLE puzzle_decisions ADD COLUMN ip_reputation_category TEXT",
+    "ALTER TABLE puzzle_decisions ADD COLUMN country TEXT",
 ];
 
 enum Msg {
@@ -119,7 +122,11 @@ pub struct DecisionLog {
 }
 
 impl DecisionLog {
-    pub fn open(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
+    /// Open (or create) the decision-log database. `geoip` is an optional
+    /// MaxMind country reader: when `Some`, the writer thread stamps each
+    /// puzzle row with the visitor's ISO country code (looked up offline on the
+    /// logged IP). `None` leaves the `country` column NULL.
+    pub fn open(path: impl AsRef<Path>, geoip: Option<GeoIp>) -> rusqlite::Result<Self> {
         let path_str = path.as_ref().to_string_lossy().into_owned();
 
         // Writer connection. Run schema, enable WAL so readers don't block.
@@ -149,7 +156,7 @@ impl DecisionLog {
                 while let Some(msg) = rx.blocking_recv() {
                     match msg {
                         Msg::Puzzle(rec) => {
-                            if let Err(e) = insert_puzzle(&writer, &rec) {
+                            if let Err(e) = insert_puzzle(&writer, &rec, geoip.as_ref()) {
                                 tracing::warn!(error = %e, "decision-log: insert failed");
                             }
                         }
@@ -296,20 +303,33 @@ fn prune_before(conn: &Connection, cutoff: &str) -> rusqlite::Result<usize> {
     Ok(verifies + puzzles)
 }
 
-fn insert_puzzle(conn: &Connection, r: &PuzzleRecord) -> rusqlite::Result<()> {
+fn insert_puzzle(
+    conn: &Connection,
+    r: &PuzzleRecord,
+    geoip: Option<&GeoIp>,
+) -> rusqlite::Result<()> {
     let ts = chrono::Utc::now().to_rfc3339();
     let tier = format!("{:?}", r.tier);
+    // Offline country lookup at write time. `r.ip` is the logged IP — already
+    // truncated to /24 (or /48) when ANONYMIZE_LOG_IP is on, which still
+    // resolves country-level. NULL when geo is disabled or the address isn't
+    // in the database.
+    let country = geoip.and_then(|g| {
+        r.ip.parse::<std::net::IpAddr>()
+            .ok()
+            .and_then(|ip| g.country(ip))
+    });
     conn.execute(
         "INSERT INTO puzzle_decisions (
             ts, challenge_id, site_key, ip, ip_count, site_count,
             score, tier, difficulty, outcome,
             sig_rate, sig_header_anomaly, sig_ip_reputation, sig_tls_fingerprint,
-            ip_reputation_category, tls_fingerprint, user_agent
+            ip_reputation_category, tls_fingerprint, user_agent, country
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6,
             ?7, ?8, ?9, ?10,
             ?11, ?12, ?13, ?14,
-            ?15, ?16, ?17
+            ?15, ?16, ?17, ?18
          )",
         params![
             ts,
@@ -329,6 +349,7 @@ fn insert_puzzle(conn: &Connection, r: &PuzzleRecord) -> rusqlite::Result<()> {
             r.ip_reputation_category,
             r.tls_fingerprint,
             r.user_agent,
+            country,
         ],
     )?;
     Ok(())

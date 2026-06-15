@@ -8,7 +8,7 @@ use rust_captcha::api::state::{
     AppState, info_urls_from_config, tier_thresholds_from_config, verify_thresholds_from_config,
 };
 use rust_captcha::config::AppConfig;
-use rust_captcha::dashboard::{DecisionLog, Sessions, routes::AdminState};
+use rust_captcha::dashboard::{DecisionLog, GeoIp, Sessions, routes::AdminState};
 use rust_captcha::puzzle::challenge::PuzzleEngine;
 use rust_captcha::puzzle::difficulty::DifficultyCalculator;
 use rust_captcha::puzzle::types::PuzzleConfig;
@@ -177,7 +177,10 @@ async fn main() {
     // that would expose the admin endpoints anonymously.
     let admin_state = match (&config.admin_db_path, &config.admin_token) {
         (Some(path), Some(token)) if !token.is_empty() => {
-            let log = DecisionLog::open(path)
+            // Geo enrichment is tied to the decision log existing — load it
+            // here so we don't open the GeoIP db when there's nothing to stamp.
+            let geoip = open_geoip(config.geoip_db_path.as_deref());
+            let log = DecisionLog::open(path, geoip)
                 .unwrap_or_else(|e| panic!("failed to open ADMIN_DB_PATH={path}: {e}"));
             tracing::info!("Validation dashboard enabled (db={path})");
             let sessions = Sessions::new(log.db_path().to_string());
@@ -316,6 +319,24 @@ async fn main() {
     .unwrap();
 
     tracing::info!("Shutdown complete");
+}
+
+/// Load the optional GeoLite2/GeoIP2 *Country* database for decision-log geo
+/// enrichment. `None` (no `GEOIP_DB_PATH`, or an unreadable file) leaves the
+/// `country` column NULL — geo is best-effort and never blocks boot, the same
+/// stance as the IP reputation / TLS blocklist file loaders.
+fn open_geoip(path: Option<&str>) -> Option<GeoIp> {
+    let path = path?;
+    match GeoIp::open(path) {
+        Ok(g) => {
+            tracing::info!("Geo enrichment enabled (GeoIP db={path})");
+            Some(g)
+        }
+        Err(e) => {
+            tracing::warn!("GEOIP_DB_PATH={path}: {e} — geo enrichment disabled");
+            None
+        }
+    }
 }
 
 /// Wait for SIGINT (Ctrl-C) or SIGTERM (orchestrator stop). Either signal

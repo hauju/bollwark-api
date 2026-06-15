@@ -500,7 +500,7 @@ function renderApp(token) {
     const cur = siteSelect.value;
     siteSelect.replaceChildren(
       h('option', { value: '' }, 'all sites'),
-      ...sites.map(s => h('option', { value: s.site_key }, s.name)),
+      ...sites.map(s => h('option', { value: s.site_key }, `${s.name} · ${s.site_key.slice(0, 8)}`)),
     );
     siteSelect.value = cur;
   };
@@ -1037,6 +1037,8 @@ function renderAnalytics(a) {
       panel('Browsers', hbarList(a.browsers.map(b => ({ label: b.name, value: b.count, color: '#58a6ff' })))),
       panel('Network type', hbarList((a.network_types || []).map(n =>
         ({ label: n.name, value: n.count, color: NETWORK_COLORS[n.name] || '#8b949e' })))),
+      panel('Countries', hbarList((a.countries || []).map(c =>
+        ({ label: c.name, value: c.count, color: '#3fb950' })))),
       panel('Signal fire rate', hbarList(
         [...PUZZLE_KEYS, ...VERIFY_KEYS].map(k =>
           ({ label: SIGNAL_LABELS[k], value: a.signal_fires[k], color: SIGNAL_COLORS[k] })))),

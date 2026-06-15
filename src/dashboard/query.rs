@@ -9,9 +9,9 @@ use std::path::PathBuf;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row};
 
 use super::types::{
-    Analytics, BrowserCount, NetworkTypeCount, OutcomeCounts, PuzzleBreakdownDto, PuzzleSignalSums,
-    Session, SignalFires, SiteActivity, Stats, TierCounts, TimeBucket, VerifyBreakdownDto,
-    VerifySection, VerifySignalSums,
+    Analytics, BrowserCount, CountryCount, NetworkTypeCount, OutcomeCounts, PuzzleBreakdownDto,
+    PuzzleSignalSums, Session, SignalFires, SiteActivity, Stats, TierCounts, TimeBucket,
+    VerifyBreakdownDto, VerifySection, VerifySignalSums,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -355,12 +355,21 @@ fn analytics_blocking(
     // Align the window start down to a bucket boundary so the first bucket
     // isn't a partial sliver.
     let since_epoch = (now_epoch - i64::from(hours) * 3600) / bucket_secs * bucket_secs;
+    // RFC3339 form of the window start, used for the WHERE filter. `p.ts` is
+    // fixed-layout UTC with a trailing `+00:00` (written by `to_rfc3339()`),
+    // so a lexicographic `p.ts >= ?` comparison sorts chronologically *and*
+    // uses `idx_puzzle_ts` — the same trick `DecisionLog::prune` relies on.
+    // The integer `since_epoch` is still used for bucket alignment and the
+    // dense fill loop below.
+    let since_rfc = chrono::DateTime::from_timestamp(since_epoch, 0)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_default();
 
-    // All three queries share the same window + site filter. `ts` is RFC3339
-    // UTC, which SQLite's strftime parses directly. This is a window scan
-    // (no index on the computed epoch) — fine at operator-driven volume,
-    // same as the stats aggregation.
-    const FILTER: &str = "CAST(strftime('%s', p.ts) AS INTEGER) >= ?1
+    // All queries share the same window + site filter. The `p.ts >= ?1` range
+    // is index-friendly via `idx_puzzle_ts`; the per-row `strftime` that
+    // remains below is only the bucket projection, computed on the rows the
+    // filter already narrowed.
+    const FILTER: &str = "p.ts >= ?1
          AND (?2 IS NULL OR p.site_key = ?2)";
 
     // 1. Time-bucketed counts.
@@ -386,7 +395,7 @@ fn analytics_blocking(
          WHERE {FILTER}
          GROUP BY bucket"
     ))?;
-    let rows = stmt.query_map(rusqlite::params![since_epoch, site_key, bucket_secs], |r| {
+    let rows = stmt.query_map(rusqlite::params![&since_rfc, site_key, bucket_secs], |r| {
         let epoch: i64 = r.get(0)?;
         Ok((
             epoch,
@@ -436,7 +445,7 @@ fn analytics_blocking(
          WHERE {FILTER}
          GROUP BY bin"
     ))?;
-    let rows = stmt.query_map(rusqlite::params![since_epoch, site_key], |r| {
+    let rows = stmt.query_map(rusqlite::params![&since_rfc, site_key], |r| {
         Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
     })?;
     for row in rows {
@@ -458,7 +467,7 @@ fn analytics_blocking(
              LEFT JOIN verify_decisions v ON v.challenge_id = p.challenge_id
              WHERE {FILTER}"
         ),
-        rusqlite::params![since_epoch, site_key],
+        rusqlite::params![&since_rfc, site_key],
         |r| {
             Ok(SignalFires {
                 rate: opt_i64(r, 0)? as u64,
@@ -481,7 +490,7 @@ fn analytics_blocking(
          WHERE {FILTER}
          GROUP BY p.user_agent"
     ))?;
-    let rows = stmt.query_map(rusqlite::params![since_epoch, site_key], |r| {
+    let rows = stmt.query_map(rusqlite::params![&since_rfc, site_key], |r| {
         Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?))
     })?;
     for row in rows {
@@ -508,7 +517,7 @@ fn analytics_blocking(
          GROUP BY p.ip_reputation_category
          ORDER BY COUNT(*) DESC, p.ip_reputation_category ASC"
     ))?;
-    let rows = stmt.query_map(rusqlite::params![since_epoch, site_key], |r| {
+    let rows = stmt.query_map(rusqlite::params![&since_rfc, site_key], |r| {
         Ok(NetworkTypeCount {
             name: r.get::<_, String>(0)?,
             count: r.get::<_, i64>(1)? as u64,
@@ -518,6 +527,27 @@ fn analytics_blocking(
         network_types.push(row?);
     }
 
+    // 5. Country distribution. The `country` column is stamped at log-write
+    // time by the offline GeoIP lookup; NULL rows (geo disabled or no match)
+    // are excluded, so the panel is empty when `GEOIP_DB_PATH` is unset.
+    let mut countries = Vec::new();
+    let mut stmt = conn.prepare(&format!(
+        "SELECT p.country, COUNT(*)
+         FROM puzzle_decisions p
+         WHERE {FILTER} AND p.country IS NOT NULL
+         GROUP BY p.country
+         ORDER BY COUNT(*) DESC, p.country ASC"
+    ))?;
+    let rows = stmt.query_map(rusqlite::params![&since_rfc, site_key], |r| {
+        Ok(CountryCount {
+            name: r.get::<_, String>(0)?,
+            count: r.get::<_, i64>(1)? as u64,
+        })
+    })?;
+    for row in rows {
+        countries.push(row?);
+    }
+
     Ok(Analytics {
         window_hours: hours,
         bucket_secs: bucket_secs as u32,
@@ -525,6 +555,7 @@ fn analytics_blocking(
         bot_histogram,
         browsers,
         network_types,
+        countries,
         signal_fires,
     })
 }
@@ -639,16 +670,16 @@ mod tests {
             "INSERT INTO puzzle_decisions
                (ts, challenge_id, site_key, ip, ip_count, site_count, score, tier, difficulty,
                 outcome, sig_rate, sig_header_anomaly, sig_ip_reputation,
-                sig_tls_fingerprint, ip_reputation_category, tls_fingerprint, user_agent)
+                sig_tls_fingerprint, ip_reputation_category, tls_fingerprint, user_agent, country)
              VALUES
                ('{ts_in}','c1','s1','1.2.3.0',1,1,10,'InvisiblePass',18,'issued',
-                10,0,0,0,NULL,'Skipped','Mozilla/5.0 Chrome/120.0 Safari/537.36'),
+                10,0,0,0,NULL,'Skipped','Mozilla/5.0 Chrome/120.0 Safari/537.36','US'),
                ('{ts_in2}','c2','s1','1.2.3.0',2,2,95,'Block',0,'rejected',
-                30,35,30,0,'datacenter','Skipped','curl/8.4.0'),
+                30,35,30,0,'datacenter','Skipped','curl/8.4.0','US'),
                ('{ts_in2}','c3','s2','5.6.7.0',1,1,5,'InvisiblePass',18,'issued',
-                0,5,0,0,NULL,'Skipped',NULL),
+                0,5,0,0,NULL,'Skipped',NULL,'DE'),
                ('{ts_out}','c4','s1','1.2.3.0',1,1,50,'HardPow',24,'issued',
-                50,0,0,0,'tor','Skipped','Mozilla/5.0 Firefox/121.0');
+                50,0,0,0,'tor','Skipped','Mozilla/5.0 Firefox/121.0','FR');
              INSERT INTO verify_decisions
                (ts, challenge_id, success, outcome, score, sig_honeypot, sig_time_on_page,
                 sig_behavior, time_on_page_ms, webdriver)
@@ -712,6 +743,14 @@ mod tests {
         assert_eq!(a.network_types[0].name, "datacenter");
         assert_eq!(a.network_types[0].count, 1);
 
+        // Countries: in-window US (c1, c2) and DE (c3), sorted by count desc;
+        // c4's FR is outside the window.
+        assert_eq!(a.countries.len(), 2);
+        assert_eq!(a.countries[0].name, "US");
+        assert_eq!(a.countries[0].count, 2);
+        assert_eq!(a.countries[1].name, "DE");
+        assert_eq!(a.countries[1].count, 1);
+
         // Site filter narrows to s2's single clean request.
         let s2 = analytics_blocking(&conn, 24, now_epoch, Some("s2")).unwrap();
         assert_eq!(s2.buckets.iter().map(|b| b.puzzles).sum::<u64>(), 1);
@@ -719,5 +758,9 @@ mod tests {
         assert_eq!(s2.bot_histogram.iter().sum::<u64>(), 1);
         // s2 has no reputation-matched traffic.
         assert!(s2.network_types.is_empty());
+        // s2's only request is the DE one.
+        assert_eq!(s2.countries.len(), 1);
+        assert_eq!(s2.countries[0].name, "DE");
+        assert_eq!(s2.countries[0].count, 1);
     }
 }

@@ -8,10 +8,12 @@
 //! safe to run concurrently with the writer because the database is in WAL
 //! mode.
 
+pub mod geo;
 pub mod log;
 pub mod query;
 pub mod routes;
 pub mod types;
 
+pub use geo::GeoIp;
 pub use log::DecisionLog;
 pub use query::Sessions;

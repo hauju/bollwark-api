@@ -22,6 +22,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 ipnet = "2"
 hmac = "0.12"
 rusqlite = { version = "0.32", features = ["bundled"] }
+maxminddb = "0.28"
 dotenvy = "0.15"
 arc-swap = "1"
 notify-debouncer-full = "0.7"

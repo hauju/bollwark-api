@@ -36,6 +36,7 @@ A `.env` file in the working directory is loaded automatically at startup (via `
 | `DEV_DISABLE_ADMIN_AUTH` | `false` | **Dev/test only.** When truthy (`1`/`true`/`yes`/`on`), `POST /v1/sites` skips the `ADMIN_TOKEN` bearer check. Refused in release builds. Admin dashboard endpoints (`/v1/admin/*`) are NOT bypassed. |
 | `ANONYMIZE_LOG_IP` | `true` | Truncate the client IP (IPv4 → /24, IPv6 → /48) before writing it to the decision log. **On by default** so the dashboard stores no per-visitor address. Set to `false` to log full IPs (abuse forensics). Live scoring always uses the full IP regardless. |
 | `LOG_RETENTION_HOURS` | `72` | Retention window for the decision log. A background sweeper prunes rows older than this (only runs when `ADMIN_DB_PATH` is set). **On by default** (ALTCHA's window) so the durable log obeys GDPR storage-limitation. Set to `0` to disable pruning and keep rows forever. |
+| `GEOIP_DB_PATH` | _unset_ | Path to a MaxMind GeoLite2/GeoIP2 **Country** `.mmdb`. When set (and `ADMIN_DB_PATH` is enabled), the decision-log writer stamps each row with the visitor's ISO country code, looked up offline on the already-anonymized IP. Off if unset (the `country` column stays NULL and the dashboard's Countries panel is empty). |
 
 ---
 
@@ -323,6 +324,13 @@ Caps how long decision-log rows live. A background sweeper (spawned at startup, 
 
 The sweeper runs at **1/24 of the window**, clamped to `[60s, 1h]` — so a 72 h window sweeps hourly, and rows never outlive the window by more than ~4%. The first sweep fires at boot, so stale rows left by a previous run (e.g. before this was configured) are pruned immediately on the next start. Set `LOG_RETENTION_HOURS=0` to disable pruning entirely and keep every row (e.g. when you are the data controller and need a longer forensic trail — pair with a longer-retention upsell rather than treating it as the baseline). Pruning is index-backed (`idx_puzzle_ts` / `idx_verify_ts`) and serialised with inserts through the same writer thread, so it never races a concurrent write.
 
+### `GEOIP_DB_PATH` (default _unset_)
+Path to a MaxMind **GeoLite2-Country** (or GeoIP2-Country) `.mmdb` file. When set — and `ADMIN_DB_PATH` is enabled — the decision-log writer thread stamps each puzzle row with the visitor's ISO 3166-1 alpha-2 country code, and the dashboard's Analytics tab gains a **Countries** breakdown. Unset (the default) leaves the `country` column NULL and the panel empty.
+
+The lookup is **offline** — the `.mmdb` is mmap'd at boot, every lookup is an in-memory tree walk, and nothing ever leaves the box. It runs **at log-write time on the already-anonymized IP** (the same /24- or /48-truncated value `ANONYMIZE_LOG_IP` stores), which still resolves country-level, so geo enrichment adds no per-visitor data beyond what the log already held — it stays GDPR-clean. The reader lives on the writer thread, so there is zero cost on the request hot path.
+
+You must **provision the database yourself** (it is not bundled — MaxMind's license requires you to download it under your own account). Point `GEOIP_DB_PATH` at the file; a missing or corrupt file logs a `WARN` and disables enrichment (the column stays NULL) rather than blocking boot. The country code is denormalized into the row at write time, so rotating the `.mmdb` only affects rows logged afterward.
+
 ---
 
 ## Info-page links (`INFO_*_URL`)
@@ -355,6 +363,7 @@ The service is **cookie-free** and runs every signal under **legitimate interest
 | Behavior (mouse / touch / `webdriver`) | Yes | Ephemeral, submitted for one verification, not linked to an identity |
 | IP reputation | Only with `IP_REPUTATION_FILE` | Transient CIDR lookup; the full IP is never persisted (the decision log truncates it — see `ANONYMIZE_LOG_IP`) |
 | TLS fingerprint | Only with `TLS_FINGERPRINT_HEADER` + `TRUSTED_PROXIES` | The one device-fingerprint signal; opt-in via its own env vars |
+| Geo country (dashboard only) | Only with `GEOIP_DB_PATH` | Not a scoring signal — observability only. Offline lookup on the already-truncated logged IP; resolves country-level, stores only a 2-letter code |
 
 What keeps this defensible: no cookies or other terminal-device storage (so no ePrivacy Art. 5(3) consent), short-lived transient processing for security (legitimate interest, Art. 6(1)(f)), and IP truncation before anything durable is written. As always, the final compliance determination — including a DPIA if you enable IP reputation or TLS fingerprinting — rests with you as the data controller.
 

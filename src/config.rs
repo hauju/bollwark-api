@@ -90,6 +90,13 @@ pub struct AppConfig {
     /// to disable pruning and keep rows forever (e.g. when the operator is
     /// the data controller and needs a longer forensic trail).
     pub log_retention_hours: u64,
+    /// Path to a MaxMind GeoLite2/GeoIP2 *Country* database (`.mmdb`). When set
+    /// (and `ADMIN_DB_PATH` is enabled), the decision-log writer stamps each
+    /// puzzle row with the visitor's ISO country code, looked up offline on the
+    /// already-anonymized IP, so the dashboard can show a country breakdown.
+    /// Unset → the `country` column stays NULL and the Countries panel is empty.
+    /// Nothing leaves the box; a /24-truncated IP still resolves country-level.
+    pub geoip_db_path: Option<String>,
 }
 
 impl AppConfig {
@@ -165,6 +172,7 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(72),
+            geoip_db_path: env::var("GEOIP_DB_PATH").ok(),
         }
     }
 }
@@ -244,6 +252,7 @@ impl Default for AppConfig {
             info_terms_url: None,
             anonymize_log_ip: true,
             log_retention_hours: 72,
+            geoip_db_path: None,
         }
     }
 }
