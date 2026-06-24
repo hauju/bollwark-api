@@ -2,8 +2,8 @@
 
 Self-hostable proof-of-work CAPTCHA service in Rust. Clients solve a SHA-256 (or Argon2id) puzzle to prove they aren't bots; the server brackets each solve with two scoring passes that adapt difficulty — or short-circuit — based on per-request risk signals.
 
-- **Two-pass risk scoring.** A puzzle-time pass picks an escalation tier (invisible / checkbox / hard PoW / 429 block) and issues a proof-of-work puzzle at a tier-adjusted difficulty. A verify-time pass re-scores after submit using time-on-page, cookie age, honeypot, and behavioural telemetry, returning `pass` / `shadow_fail` / `block`.
-- **Pluggable signals.** Rate, header anomaly, IP reputation (CIDR list), cookie age (HMAC-signed `__captcha_trust`), and TLS fingerprint (read from a trusted reverse-proxy header). The fingerprinting signals are opt-in via `FULL_FINGERPRINT_MODE=1`; the default posture is rate + honeypot + time-on-page + PoW only.
+- **Two-pass risk scoring.** A puzzle-time pass picks an escalation tier (invisible / checkbox / hard PoW / 429 block) and issues a proof-of-work puzzle at a tier-adjusted difficulty. A verify-time pass re-scores after submit using time-on-page, honeypot, and behavioural telemetry, returning `pass` / `shadow_fail` / `block`.
+- **Pluggable signals.** Rate, header anomaly, honeypot, time-on-page, and behavioural telemetry are always on; IP reputation (CIDR list) and TLS fingerprint (read from a trusted reverse-proxy header) self-gate on their own config. The service is cookie-free — there's no global scoring toggle and no consent-triggering client storage; every signal runs under legitimate interest with data minimization.
 - **Drop-in browser widget.** `static/captcha-widget.js` mounts on a `<div data-sitekey="…">`, runs the PoW in a Web Worker, and posts a token into your form. SHA-256 uses `crypto.subtle`; Argon2id uses a vendored hash-wasm build.
 - **Validation dashboard.** Optional SQLite-backed decision log with a vanilla-JS admin UI for inspecting puzzle/verify sessions.
 
@@ -57,13 +57,13 @@ For a full application walkthrough, see **[INTEGRATION.md](./INTEGRATION.md)**.
 
 When `captcha-widget.js` is served from a different origin than your app, the widget automatically uses the script origin as the CAPTCHA API origin and loads the PoW worker through a same-page Blob wrapper. If you self-host or bundle the script somewhere else, set `data-server-url="https://your-captcha-host"` on the widget element.
 
-For cross-origin embeds with trust cookies, configure:
+For cross-origin embeds, allowlist your app origin on the puzzle endpoint:
 
 ```bash
 CORS_ALLOWED_ORIGINS="https://your-app.example"
-COOKIE_SAMESITE=None
-COOKIE_SECURE=true
 ```
+
+The service is cookie-free, so cross-origin embeds need no `SameSite` or credentials handling.
 
 The widget evaluates its risk tier once on mount (matching Turnstile / hCaptcha behaviour), solves the PoW off-thread, and writes the resulting token into a hidden `<input name="captcha-token">` on submit. Your backend then calls `POST /v1/verify` with the site secret to confirm.
 
@@ -74,7 +74,7 @@ The widget evaluates its risk tier once on mount (matching Turnstile / hCaptcha 
 | Endpoint | Auth | Purpose |
 |---|---|---|
 | `POST /v1/sites` | Bearer (`ADMIN_TOKEN`) | Register a site. Returns `{ site_key, secret_key }`. Returns 404 when `ADMIN_TOKEN` is unset. |
-| `GET /v1/puzzle?site_key=<uuid>` | None | Score the request and issue a PoW puzzle (`algorithm`/`prefix`/`difficulty`) for any non-block tier, or `429` for `block`. May set the `__captcha_trust` cookie. |
+| `GET /v1/puzzle?site_key=<uuid>` | None | Score the request and issue a PoW puzzle (`algorithm`/`prefix`/`difficulty`) for any non-block tier, or `429` for `block`. Cookie-free — never sets a cookie. |
 | `POST /v1/verify` | Bearer (site secret) | Verify a solution. Body: either the opaque `token` from the widget, or explicit `challenge_id` plus `nonce`, with optional `honeypot`, `behavior`. Dwell time is derived server-side, not accepted from the client. |
 | `GET /healthz` | None | Liveness probe. Always returns `200 ok`. |
 | `GET /v1/admin/sessions[/:id]` | Bearer (`ADMIN_TOKEN`) | Decision log read API. Mounted only when `ADMIN_DB_PATH` is set. |
@@ -87,15 +87,14 @@ Static assets (`captcha-widget.js`, `captcha-widget.css`, `captcha-worker.js`, `
 
 ## Configuration
 
-Everything is env-var driven and every setting has a default — `cargo run` works out of the box with rate + honeypot + time-on-page + PoW only (the minimal-privacy baseline). See **[CONFIGURATION.md](./CONFIGURATION.md)** for the full reference, score weights, and file formats. The most load-bearing knobs:
+Everything is env-var driven and every setting has a default — `cargo run` works out of the box with the always-on signals (rate, header anomaly, honeypot, time-on-page, behaviour) plus PoW; the service is cookie-free and IP reputation / TLS fingerprint self-gate on their own config. See **[CONFIGURATION.md](./CONFIGURATION.md)** for the full reference, score weights, and file formats. The most load-bearing knobs:
 
 - `LISTEN_ADDR` (default `0.0.0.0:3000`), `RUST_LOG` (default `info`)
 - `PUZZLE_ALGORITHM` — `sha256` (default) or `argon2id`. With Argon2id, drop `DEFAULT_DIFFICULTY` to `4`–`6` and tune `ARGON2_M_COST` / `ARGON2_T_COST` / `ARGON2_P_COST`.
 - `DEFAULT_DIFFICULTY` / `MIN_DIFFICULTY` / `MAX_DIFFICULTY` — PoW difficulty in leading zero bits (`18` / `16` / `28`).
 - `TIER_CHECKBOX_MIN` / `TIER_HARD_POW_MIN` / `TIER_BLOCK_MIN` — puzzle-time score → tier thresholds.
 - `VERIFY_SHADOW_MIN` / `VERIFY_BLOCK_MIN` — verify-time score thresholds.
-- `FULL_FINGERPRINT_MODE=1` — opt in to header anomaly, IP reputation, cookie age, TLS fingerprint, and behaviour signals. Off by default; enabling this changes your GDPR / ePrivacy posture (cookie consent, fingerprinting disclosure, DPIA).
-- Optional signal inputs (off until configured): `IP_REPUTATION_FILE`, `COOKIE_SIGNING_SECRET` (+ `COOKIE_SECURE`), `TLS_FINGERPRINT_HEADER` (+ `TLS_FINGERPRINT_FILE`, `TRUSTED_PROXIES`).
+- Optional signal inputs (off until configured): `IP_REPUTATION_FILE`, `TLS_FINGERPRINT_HEADER` (+ `TLS_FINGERPRINT_FILE`, `TRUSTED_PROXIES`).
 - Validation dashboard: `ADMIN_DB_PATH` + `ADMIN_TOKEN`.
 
 ## Docker
@@ -119,7 +118,7 @@ The image exposes port `3000`, serves static widget assets from `/static`, and k
 src/
   api/         Axum router, handlers orchestrating both scoring passes
   puzzle/      PoW engine — SHA-256 and Argon2id, shared leading-zero check
-  risk/        Signals (rate, headers, reputation, cookie, TLS fingerprint),
+  risk/        Signals (rate, headers, reputation, TLS fingerprint),
                puzzle-time RiskScorer, verify-time VerifyScorer, behaviour
   storage/     Store trait + in-memory implementation (Redis/Mongo planned)
   dashboard/   SQLite decision log + /v1/admin/* read API
@@ -154,6 +153,3 @@ A `justfile` wraps these (`just build`, `just test`, `just lint`, `just ci`).
 - **Playwright e2e** — `cd e2e && bun install && bunx playwright install chromium && bun run test`. Auto-spawns `cargo run`; set `CAPTCHA_REUSE_SERVER=1` to reuse a server you started yourself (so you can capture its JSONL).
 
 Requires Rust 1.85+ (edition 2024).
-
-
-docker inspect f0d2c73f9056 --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{$v.Gateway}}{{"\n"}}{{end}}'

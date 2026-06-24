@@ -375,7 +375,7 @@ A production-leaning configuration:
 
 ```bash
 LISTEN_ADDR=0.0.0.0:3000
-DEFAULT_DIFFICULTY=20
+DEFAULT_DIFFICULTY=18
 
 # Provisioning + persistence (do not deploy without these)
 ADMIN_TOKEN=$(openssl rand -hex 32)

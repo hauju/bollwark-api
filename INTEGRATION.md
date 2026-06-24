@@ -233,15 +233,7 @@ CORS_ALLOWED_ORIGINS="https://app.example.com"
 
 This allows the browser widget to fetch puzzles and static worker assets.
 
-To enable the trust-cookie risk signal cross-origin, also set:
-
-```bash
-COOKIE_SIGNING_SECRET=<long-random-secret>
-COOKIE_SAMESITE=None
-COOKIE_SECURE=true
-```
-
-`COOKIE_SAMESITE=None` requires HTTPS. The service refuses to start with `COOKIE_SAMESITE=None` and `COOKIE_SECURE=false`.
+The service is cookie-free, so cross-origin embeds need no `SameSite` or credentials handling.
 
 ## 8. Production Checklist
 
@@ -252,8 +244,7 @@ Before using this in a real application:
 - Store `secret_key` only in backend secrets/config.
 - Put the service behind HTTPS.
 - Set `CORS_ALLOWED_ORIGINS` to your app origin.
-- Set `COOKIE_SIGNING_SECRET`, `COOKIE_SAMESITE=None`, and `COOKIE_SECURE=true` if you want cross-origin trust cookies.
-- Decide whether to opt in to `FULL_FINGERPRINT_MODE=1`. The default is a minimal-privacy baseline (rate + honeypot + time-on-page + PoW). Enabling fingerprinting (header anomaly, IP reputation, cookie age, TLS fingerprint, behaviour) gives stronger scoring but changes your GDPR / ePrivacy posture — update your cookie consent, fingerprinting disclosure, and DPIA accordingly.
+- Decide whether to enable IP reputation (`IP_REPUTATION_FILE`) and TLS fingerprinting (`TLS_FINGERPRINT_HEADER` + `TRUSTED_PROXIES`). Both self-gate on their own config and stay off until set; enabling either gives stronger scoring but adds a fingerprinting signal, so update your DPIA accordingly. The service is otherwise cookie-free and runs every signal under legitimate interest with data minimization.
 - Configure `TRUSTED_PROXIES` if you rely on `X-Forwarded-For` or TLS fingerprint headers.
 - Keep `/v1/verify`, `/v1/sites`, and `/v1/admin/*` server-to-server only.
 - Monitor `puzzle_decision` and `verify_decision` logs before tightening thresholds.
