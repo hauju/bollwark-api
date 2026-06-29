@@ -441,7 +441,11 @@
 
     async _fetchPuzzle() {
       const url = `${this.serverUrl}/v1/puzzle?site_key=${this.siteKey}`;
-      const resp = await fetch(url, { credentials: "include" });
+      // Cookie-free service — no credentials to send. Omitting them keeps the
+      // request non-credentialed so the server's wildcard `Access-Control-
+      // Allow-Origin: *` (the default when CORS_ALLOWED_ORIGINS is unset) is
+      // valid; `credentials: "include"` would force browsers to reject `*`.
+      const resp = await fetch(url, { credentials: "omit" });
       if (!resp.ok) {
         const body = await resp.text();
         // 429 carries a structured BlockedResponse JSON with `info_urls`
