@@ -56,9 +56,9 @@ pub struct AppConfig {
     pub site_db_path: Option<String>,
     /// Comma- or whitespace-separated allowlist of origins permitted to
     /// call `GET /v1/puzzle` from a browser. When unset, any origin is
-    /// allowed (no credentials). When set, only listed origins receive
-    /// CORS headers — others get a same-origin response that browsers
-    /// will block. Other endpoints never have CORS enabled.
+    /// allowed. When set, only listed origins receive CORS headers —
+    /// others get a same-origin response that browsers will block.
+    /// Other endpoints never have CORS enabled.
     pub cors_allowed_origins: Option<String>,
     /// **Dev/test only.** When true, `POST /v1/sites` skips the
     /// `ADMIN_TOKEN` bearer check so local-dev pages and Playwright e2e

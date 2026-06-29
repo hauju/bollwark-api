@@ -1,14 +1,71 @@
 .rc-captcha {
+  /* Themeable palette. Light is the default; the dark overrides below kick
+     in for `data-rc-theme="dark"` (forced) or `="auto"` on a dark OS. State
+     accents (green/red/blue) are left literal — they read on both themes. */
+  --rc-bg: #f9f9f9;
+  --rc-border: #d3d3d3;
+  --rc-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  --rc-checkbox-bg: #fff;
+  --rc-checkbox-border: #c1c1c1;
+  --rc-accent: #4a90d9;
+  --rc-label: #333;
+  --rc-brand-name: #666;
+  --rc-brand-links: #b3b3b3;
+  --rc-brand-link: #999;
+  --rc-details-border: #eee;
+  --rc-details: #888;
+  --rc-detail-label: #999;
+  --rc-detail-value: #555;
+  --rc-status: #888;
+
   display: inline-block;
-  border: 1px solid #d3d3d3;
+  border: 1px solid var(--rc-border);
   border-radius: 4px;
-  background: #f9f9f9;
+  background: var(--rc-bg);
   padding: 14px 16px;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   font-size: 14px;
   min-width: 300px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--rc-shadow);
   user-select: none;
+}
+
+/* Dark palette. Keep these two blocks in sync: one forces dark, the other
+   applies it when `data-rc-theme="auto"` meets a dark OS preference. */
+.rc-captcha[data-rc-theme="dark"] {
+  --rc-bg: #1f1f1f;
+  --rc-border: #3a3a3a;
+  --rc-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --rc-checkbox-bg: #2a2a2a;
+  --rc-checkbox-border: #555;
+  --rc-label: #e5e5e5;
+  --rc-brand-name: #b0b0b0;
+  --rc-brand-links: #777;
+  --rc-brand-link: #9a9a9a;
+  --rc-details-border: #333;
+  --rc-details: #999;
+  --rc-detail-label: #8a8a8a;
+  --rc-detail-value: #c0c0c0;
+  --rc-status: #999;
+}
+
+@media (prefers-color-scheme: dark) {
+  .rc-captcha[data-rc-theme="auto"] {
+    --rc-bg: #1f1f1f;
+    --rc-border: #3a3a3a;
+    --rc-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+    --rc-checkbox-bg: #2a2a2a;
+    --rc-checkbox-border: #555;
+    --rc-label: #e5e5e5;
+    --rc-brand-name: #b0b0b0;
+    --rc-brand-links: #777;
+    --rc-brand-link: #9a9a9a;
+    --rc-details-border: #333;
+    --rc-details: #999;
+    --rc-detail-label: #8a8a8a;
+    --rc-detail-value: #c0c0c0;
+    --rc-status: #999;
+  }
 }
 
 .rc-captcha-row {
@@ -20,7 +77,7 @@
 .rc-captcha-checkbox {
   width: 26px;
   height: 26px;
-  border: 2px solid #c1c1c1;
+  border: 2px solid var(--rc-checkbox-border);
   border-radius: 3px;
   cursor: pointer;
   display: flex;
@@ -28,11 +85,11 @@
   justify-content: center;
   transition: all 0.2s;
   flex-shrink: 0;
-  background: #fff;
+  background: var(--rc-checkbox-bg);
 }
 
 .rc-captcha-checkbox:hover {
-  border-color: #4a90d9;
+  border-color: var(--rc-accent);
 }
 
 .rc-captcha-checkbox.verified {
@@ -60,7 +117,7 @@
 }
 
 .rc-captcha-checkbox.solving {
-  border-color: #4a90d9;
+  border-color: var(--rc-accent);
   animation: rc-spin 1s linear infinite;
   border-radius: 50%;
   border-top-color: transparent;
@@ -74,7 +131,7 @@
 
 .rc-captcha-label {
   font-size: 14px;
-  color: #333;
+  color: var(--rc-label);
 }
 
 .rc-captcha-brand {
@@ -90,36 +147,36 @@
 .rc-captcha-brand-name {
   font-size: 12px;
   font-weight: 600;
-  color: #666;
+  color: var(--rc-brand-name);
   text-decoration: none;
 }
 
 .rc-captcha-brand-name:hover {
-  color: #4a90d9;
+  color: var(--rc-accent);
 }
 
 .rc-captcha-brand-links {
   font-size: 10px;
-  color: #b3b3b3;
+  color: var(--rc-brand-links);
   margin-top: 1px;
 }
 
 .rc-captcha-brand-links a {
-  color: #999;
+  color: var(--rc-brand-link);
   text-decoration: none;
 }
 
 .rc-captcha-brand-links a:hover {
-  color: #4a90d9;
+  color: var(--rc-accent);
   text-decoration: underline;
 }
 
 .rc-captcha-details {
   margin-top: 10px;
   padding-top: 10px;
-  border-top: 1px solid #eee;
+  border-top: 1px solid var(--rc-details-border);
   font-size: 11px;
-  color: #888;
+  color: var(--rc-details);
   line-height: 1.6;
 }
 
@@ -133,12 +190,12 @@
 }
 
 .rc-captcha-details .detail-label {
-  color: #999;
+  color: var(--rc-detail-label);
 }
 
 .rc-captcha-details .detail-value {
   font-family: "SF Mono", Menlo, Monaco, monospace;
-  color: #555;
+  color: var(--rc-detail-value);
 }
 
 .rc-captcha-details .detail-value.human {
@@ -154,5 +211,5 @@
 .rc-captcha-status {
   margin-top: 6px;
   font-size: 12px;
-  color: #888;
+  color: var(--rc-status);
 }

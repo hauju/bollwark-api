@@ -60,6 +60,11 @@
    *         sees nothing happen. A console.warn fires once on block to
    *         flag missed wiring during development.
    *
+   * Theme (`data-theme` attribute / `theme` option):
+   *   "auto" (default) — follows the visitor's OS via prefers-color-scheme.
+   *   "light" / "dark" — force a fixed palette, e.g. so an embedder can
+   *     match a host whose theme differs from the OS setting.
+   *
    * Event: `rustcaptcha:puzzle` (CustomEvent on the container, bubbles)
    *   detail = { ok, tier, difficulty?, error? }
    *     ok=true  → puzzle issued (or invisible-pass solving in the bg).
@@ -74,6 +79,12 @@
       // "invisible" defers all visible UI until the tier requires it.
       // Mirrors hCaptcha size=invisible / reCAPTCHA v3 → v2 fallback.
       this.mode = options.mode === "invisible" ? "invisible" : "default";
+      // Theme: "auto" (default) follows the visitor's OS via
+      // prefers-color-scheme; "light"/"dark" force a fixed palette so an
+      // embedder can match a host whose theme differs from the OS.
+      this.theme = options.theme === "light" || options.theme === "dark"
+        ? options.theme
+        : "auto";
       this.onVerify = options.onVerify || null;
 
       this.state = "idle";
@@ -246,6 +257,7 @@
       this._uiRendered = true;
 
       this.container.classList.add("rc-captcha");
+      this.container.setAttribute("data-rc-theme", this.theme);
 
       this.row = document.createElement("div");
       this.row.className = "rc-captcha-row";
@@ -633,6 +645,7 @@
         serverUrl: el.dataset.serverUrl || "",
         debug: el.dataset.debug,
         mode: el.dataset.mode,
+        theme: el.dataset.theme,
       });
       el.dataset.rustcaptchaMounted = "1";
       window.RustCaptcha._instances.push(widget);

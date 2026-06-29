@@ -116,6 +116,17 @@ The widget has two modes selected via `data-mode`:
 
 The `rustcaptcha:puzzle` event fires in default mode too if you want to drive your own UI alongside the widget — it bubbles, so a listener on a parent element works.
 
+### Theme
+
+The widget's appearance follows `data-theme`:
+
+- **`data-theme="auto"`** (used when the attribute is omitted): follows the visitor's OS via `prefers-color-scheme` — light on a light OS, dark on a dark one.
+- **`data-theme="light"`** / **`data-theme="dark"`**: force a fixed palette. Use this to match a host whose theme is fixed regardless of the OS (e.g. an always-dark dashboard).
+
+```html
+<div data-sitekey="<SITE_KEY>" data-theme="dark"></div>
+```
+
 The widget writes a hidden form field named `captcha-token` whose value is a single **opaque token** (a hex string). It already carries everything `/v1/verify` needs — the challenge id, the PoW nonce, the honeypot, and behavioural telemetry. Your backend treats it as a black box: read the field and forward it verbatim. There is nothing to parse.
 
 ```
