@@ -1,4 +1,4 @@
-name: Rust Captcha
+name: Bollwark
 
 on:
   push:
@@ -9,7 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   REGISTRY: dcr.oxidt.com
-  IMAGE_NAME: rust-captcha
+  IMAGE_NAME: bollwark
 
 permissions:
   contents: read

@@ -1,4 +1,4 @@
-# RustCaptcha — Requirements
+# Bollwark — Requirements
 
 > **Historical / aspirational.** This document captures the original product brief and has drifted from the current implementation in several places (e.g. the hidden-input field is `captcha-token` not `captcha-solution`; the storage backends are in-memory + SQLite, not Redis/MongoDB; there is no published Rust SDK crate or OpenAPI spec; the risk pipeline, escalation tiers, visual-text challenges, Argon2id algorithm support, and dual scoring are not described here). Treat this as design context, not as the spec. The authoritative docs are **README.md**, **INTEGRATION.md**, and **CONFIGURATION.md**.
 

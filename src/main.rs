@@ -3,21 +3,21 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
-use rust_captcha::api;
-use rust_captcha::api::state::{
+use bollwark::api;
+use bollwark::api::state::{
     AppState, info_urls_from_config, tier_thresholds_from_config, verify_thresholds_from_config,
 };
-use rust_captcha::config::AppConfig;
-use rust_captcha::dashboard::{DecisionLog, GeoIp, Sessions, routes::AdminState};
-use rust_captcha::puzzle::challenge::PuzzleEngine;
-use rust_captcha::puzzle::difficulty::DifficultyCalculator;
-use rust_captcha::puzzle::types::PuzzleConfig;
-use rust_captcha::risk::{
+use bollwark::config::AppConfig;
+use bollwark::dashboard::{DecisionLog, GeoIp, Sessions, routes::AdminState};
+use bollwark::puzzle::challenge::PuzzleEngine;
+use bollwark::puzzle::difficulty::DifficultyCalculator;
+use bollwark::puzzle::types::PuzzleConfig;
+use bollwark::risk::{
     CidrListReputation, FingerprintBlocklist, ReputationStore, RiskScorer, TrustedProxies,
     VerifyScorer,
 };
-use rust_captcha::storage::Store;
-use rust_captcha::storage::memory::InMemoryStore;
+use bollwark::storage::Store;
+use bollwark::storage::memory::InMemoryStore;
 
 #[tokio::main]
 async fn main() {

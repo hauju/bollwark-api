@@ -5,7 +5,7 @@ RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
     ca-certificates pkg-config build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /usr/src/rust-captcha
+WORKDIR /usr/src/bollwark
 
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
@@ -25,7 +25,7 @@ ENV LISTEN_ADDR=0.0.0.0:3000
 
 WORKDIR /usr/local/app
 
-COPY --from=builder /usr/src/rust-captcha/target/release/rust-captcha /usr/local/bin/rust-captcha
+COPY --from=builder /usr/src/bollwark/target/release/bollwark /usr/local/bin/bollwark
 COPY static ./static
 
 EXPOSE 3000
@@ -33,4 +33,4 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD curl -fsS http://127.0.0.1:3000/healthz || exit 1
 
-ENTRYPOINT ["/usr/local/bin/rust-captcha"]
+ENTRYPOINT ["/usr/local/bin/bollwark"]

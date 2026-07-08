@@ -1,4 +1,4 @@
-# rust-captcha
+# Bollwark
 
 Self-hostable proof-of-work CAPTCHA service in Rust. Clients solve a SHA-256 (or Argon2id) puzzle to prove they aren't bots; the server brackets each solve with two scoring passes that adapt difficulty — or short-circuit — based on per-request risk signals.
 
@@ -102,15 +102,15 @@ Everything is env-var driven and every setting has a default — `cargo run` wor
 Build and run locally:
 
 ```bash
-docker build -t rust-captcha .
+docker build -t bollwark .
 docker run --rm -p 3000:3000 \
   -e ADMIN_TOKEN=<long-random-secret> \
   -e SITE_DB_PATH=/data/sites.db \
-  -v rust-captcha-data:/data \
-  rust-captcha
+  -v bollwark-data:/data \
+  bollwark
 ```
 
-The image exposes port `3000`, serves static widget assets from `/static`, and keeps runtime configuration env-var driven. CI publishes `dcr.oxidt.com/rust-captcha:latest` and `dcr.oxidt.com/rust-captcha:<commit-sha>` from `main`.
+The image exposes port `3000`, serves static widget assets from `/static`, and keeps runtime configuration env-var driven. CI publishes `dcr.oxidt.com/bollwark:latest` and `dcr.oxidt.com/bollwark:<commit-sha>` from `main`.
 
 ## Architecture
 

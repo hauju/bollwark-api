@@ -7,16 +7,16 @@
 # Usage:
 #   scripts/refresh-ip-reputation.sh [OUTPUT_PATH]
 #
-#   OUTPUT_PATH defaults to /etc/rust-captcha/ip_reputation.txt
+#   OUTPUT_PATH defaults to /etc/bollwark/ip_reputation.txt
 #
 # Bootstrap (first run also creates the file):
-#   sudo mkdir -p /etc/rust-captcha
+#   sudo mkdir -p /etc/bollwark
 #   sudo scripts/refresh-ip-reputation.sh
-#   IP_REPUTATION_FILE=/etc/rust-captcha/ip_reputation.txt FULL_FINGERPRINT_MODE=1 cargo run
+#   IP_REPUTATION_FILE=/etc/bollwark/ip_reputation.txt FULL_FINGERPRINT_MODE=1 cargo run
 #
 # Cron (hourly is fine — Tor exits churn slowly, cloud ranges shift weekly):
-#   0 * * * * /opt/rust-captcha/scripts/refresh-ip-reputation.sh \
-#               /etc/rust-captcha/ip_reputation.txt >> /var/log/rust-captcha/refresh.log 2>&1
+#   0 * * * * /opt/bollwark/scripts/refresh-ip-reputation.sh \
+#               /etc/bollwark/ip_reputation.txt >> /var/log/bollwark/refresh.log 2>&1
 #
 # Sources:
 #   - Tor exits:    https://check.torproject.org/torbulkexitlist
@@ -37,7 +37,7 @@
 #
 set -euo pipefail
 
-OUT="${1:-/etc/rust-captcha/ip_reputation.txt}"
+OUT="${1:-/etc/bollwark/ip_reputation.txt}"
 
 # Per-feed minimum entry counts. Below these we abort the publish — guards
 # against upstream returning an empty body or an error page.

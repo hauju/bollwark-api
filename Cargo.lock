@@ -178,6 +178,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "bollwark"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "argon2",
+ "axum",
+ "chrono",
+ "dotenvy",
+ "hex",
+ "hmac",
+ "ipnet",
+ "maxminddb",
+ "notify-debouncer-full",
+ "rand",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1374,35 +1403,6 @@ dependencies = [
  "hashlink",
  "libsqlite3-sys",
  "smallvec",
-]
-
-[[package]]
-name = "rust-captcha"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "argon2",
- "axum",
- "chrono",
- "dotenvy",
- "hex",
- "hmac",
- "ipnet",
- "maxminddb",
- "notify-debouncer-full",
- "rand",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
- "tokio",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]

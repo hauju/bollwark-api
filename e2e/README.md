@@ -20,7 +20,7 @@ already have one running and want to capture its JSON logs):
 # terminal A — match the env that playwright.config.ts sets for the auto-spawned
 # server. FULL_FINGERPRINT_MODE=1 in particular: the suite asserts on full-mode
 # tier behaviour, so a baseline-mode server will produce different decisions.
-LOG_FORMAT=json RUST_LOG=info,rust_captcha=debug \
+LOG_FORMAT=json RUST_LOG=info,bollwark=debug \
   FULL_FINGERPRINT_MODE=1 \
   DEFAULT_DIFFICULTY=12 MIN_DIFFICULTY=8 MAX_DIFFICULTY=16 \
   TIER_VISUAL_MIN=200 TIER_BLOCK_MIN=250 \
@@ -28,7 +28,7 @@ LOG_FORMAT=json RUST_LOG=info,rust_captcha=debug \
 
 # terminal B — argon2id.spec.ts needs an Argon2id server on :3001 (light
 # params + low difficulty so an in-browser solve stays sub-second).
-LOG_FORMAT=json RUST_LOG=info,rust_captcha=debug \
+LOG_FORMAT=json RUST_LOG=info,bollwark=debug \
   FULL_FINGERPRINT_MODE=1 PUZZLE_ALGORITHM=argon2id \
   ARGON2_M_COST=1024 ARGON2_T_COST=1 ARGON2_P_COST=1 \
   DEFAULT_DIFFICULTY=6 MIN_DIFFICULTY=4 MAX_DIFFICULTY=10 \

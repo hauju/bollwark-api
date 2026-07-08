@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>rust-captcha · validation dashboard</title>
+<title>Bollwark · validation dashboard</title>
 <style>
   :root {
     --bg: #0e1116;
@@ -313,7 +313,7 @@
 <div id="root"></div>
 
 <script>
-const TOKEN_KEY = 'rust_captcha_admin_token';
+const TOKEN_KEY = 'bollwark_admin_token';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const h = (tag, attrs = {}, ...kids) => {
@@ -714,7 +714,7 @@ function renderApp(token) {
 
   return h('div', {},
     h('header', {},
-      h('h1', {}, 'rust-captcha'),
+      h('h1', {}, 'Bollwark'),
       h('span', { class: 'muted' }, 'validation dashboard'),
       h('span', { class: 'tabs' }, sessionsTabBtn, analyticsTabBtn, sitesTabBtn),
       h('span', { class: 'grow' }),

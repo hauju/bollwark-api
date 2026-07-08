@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>RustCaptcha Widget — State Gallery</title>
+  <title>Bollwark Widget — State Gallery</title>
   <link rel="stylesheet" href="/static/captcha-widget.css">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -113,7 +113,7 @@
 </head>
 <body>
   <div class="page">
-    <h1>RustCaptcha Widget — State Gallery</h1>
+    <h1>Bollwark Widget — State Gallery</h1>
     <p class="lead">
       Visual reference for every tier / state combination the embeddable widget renders.
       The puzzle-time risk score determines the tier; the widget then either runs
@@ -150,7 +150,7 @@
               <div class="rc-captcha-checkbox"></div>
               <span class="rc-captcha-label">I'm not a robot</span>
               <span class="rc-captcha-brand">
-                <a class="rc-captcha-brand-name" href="#">RustCaptcha</a>
+                <a class="rc-captcha-brand-name" href="#">Bollwark</a>
                 <span class="rc-captcha-brand-links">
                   <a href="#">Privacy</a> · <a href="#">Terms</a>
                 </span>
@@ -179,7 +179,7 @@
               <div class="rc-captcha-checkbox solving"></div>
               <span class="rc-captcha-label">Solving challenge...</span>
               <span class="rc-captcha-brand">
-                <a class="rc-captcha-brand-name" href="#">RustCaptcha</a>
+                <a class="rc-captcha-brand-name" href="#">Bollwark</a>
                 <span class="rc-captcha-brand-links">
                   <a href="#">Privacy</a> · <a href="#">Terms</a>
                 </span>
@@ -207,7 +207,7 @@
               <div class="rc-captcha-checkbox verified"></div>
               <span class="rc-captcha-label">Verified</span>
               <span class="rc-captcha-brand">
-                <a class="rc-captcha-brand-name" href="#">RustCaptcha</a>
+                <a class="rc-captcha-brand-name" href="#">Bollwark</a>
                 <span class="rc-captcha-brand-links">
                   <a href="#">Privacy</a> · <a href="#">Terms</a>
                 </span>
@@ -232,7 +232,7 @@
               <div class="rc-captcha-checkbox failed"></div>
               <span class="rc-captcha-label">Verification failed</span>
               <span class="rc-captcha-brand">
-                <a class="rc-captcha-brand-name" href="#">RustCaptcha</a>
+                <a class="rc-captcha-brand-name" href="#">Bollwark</a>
                 <span class="rc-captcha-brand-links">
                   <a href="#">Privacy</a> · <a href="#">Terms</a>
                 </span>
@@ -259,7 +259,7 @@
               <div class="rc-captcha-checkbox" style="display:none;"></div>
               <span class="rc-captcha-label" style="display:none;">Blocked</span>
               <span class="rc-captcha-brand">
-                <a class="rc-captcha-brand-name" href="#">RustCaptcha</a>
+                <a class="rc-captcha-brand-name" href="#">Bollwark</a>
                 <span class="rc-captcha-brand-links">
                   <a href="#">Privacy</a> · <a href="#">Terms</a>
                 </span>
@@ -286,7 +286,7 @@
               <div class="rc-captcha-checkbox verified"></div>
               <span class="rc-captcha-label">Verified</span>
               <span class="rc-captcha-brand">
-                <a class="rc-captcha-brand-name" href="#">RustCaptcha</a>
+                <a class="rc-captcha-brand-name" href="#">Bollwark</a>
                 <span class="rc-captcha-brand-links">
                   <a href="#">Privacy</a> · <a href="#">Terms</a>
                 </span>
@@ -309,7 +309,7 @@
     <p class="card-desc" style="margin-bottom:14px;">
       No chrome renders for low-risk visitors. The widget only materialises a UI when the
       tier requires user interaction. On block-tier the widget renders nothing — embedders
-      must listen for <code>rustcaptcha:puzzle</code> (<code>detail.ok=false</code>) to
+      must listen for <code>bollwark:puzzle</code> (<code>detail.ok=false</code>) to
       surface a failure message.
     </p>
 
@@ -342,7 +342,7 @@
               <div class="rc-captcha-checkbox"></div>
               <span class="rc-captcha-label">I'm not a robot</span>
               <span class="rc-captcha-brand">
-                <a class="rc-captcha-brand-name" href="#">RustCaptcha</a>
+                <a class="rc-captcha-brand-name" href="#">Bollwark</a>
                 <span class="rc-captcha-brand-links">
                   <a href="#">Privacy</a> · <a href="#">Terms</a>
                 </span>
@@ -362,7 +362,7 @@
         <p class="card-desc">
           The widget renders nothing on 429. A one-shot <code>console.warn</code> fires to
           flag the missed wiring during development; embedders are expected to handle the
-          <code>rustcaptcha:puzzle</code> event.
+          <code>bollwark:puzzle</code> event.
         </p>
         <div class="stage empty">(no UI rendered — embedder handles via event)</div>
       </div>

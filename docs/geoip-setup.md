@@ -74,7 +74,7 @@ geoipupdate -v        # downloads/refreshes into DatabaseDirectory
 Point `GEOIP_DB_PATH` at the file, alongside the dashboard vars:
 
 ```bash
-ADMIN_DB_PATH=/var/lib/rustcaptcha/admin.db
+ADMIN_DB_PATH=/var/lib/bollwark/admin.db
 ADMIN_TOKEN=<openssl rand -hex 32>
 GEOIP_DB_PATH=/var/lib/geoip/GeoLite2-Country.mmdb
 ```
@@ -138,7 +138,7 @@ Example weekly cron (update, then restart):
 
 ```cron
 # Sundays 03:00 — refresh GeoLite2 and restart the captcha service
-0 3 * * 0  geoipupdate && systemctl restart rustcaptcha
+0 3 * * 0  geoipupdate && systemctl restart bollwark
 ```
 
 ---
@@ -150,7 +150,7 @@ Mount the database read-only and pass the path:
 ```yaml
 services:
   captcha:
-    image: rustcaptcha
+    image: bollwark
     environment:
       ADMIN_DB_PATH: /data/admin.db
       ADMIN_TOKEN:   ${ADMIN_TOKEN}

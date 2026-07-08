@@ -51,9 +51,9 @@ Socket address the HTTP server binds to.
 ### `RUST_LOG`
 Standard `tracing-subscriber` env filter. Useful targets:
 
-- `rust_captcha=info` — high-level events
-- `rust_captcha::api::handlers=debug` — adds per-request scoring detail (Pass-tier verifies)
-- `rust_captcha=trace` — everything
+- `bollwark=info` — high-level events
+- `bollwark::api::handlers=debug` — adds per-request scoring detail (Pass-tier verifies)
+- `bollwark=trace` — everything
 
 ---
 
@@ -335,7 +335,7 @@ You must **provision the database yourself** (it is not bundled — MaxMind's li
 
 ## Info-page links (`INFO_*_URL`)
 
-The bundled widget shows a footer with **RustCaptcha** (→ `/static/about.html`) plus tiny `Privacy` / `Terms` links (→ `/static/privacy.html`, `/static/terms.html`). The footer is rendered eagerly at mount with these bundled defaults and stays visible across every tier — including `invisible_pass`, `checkbox`, and the 429 block path — so a user who's confused by the verification UI always has a one-click route to "why am I seeing this?".
+The bundled widget shows a footer with **Bollwark** (→ `/static/about.html`) plus tiny `Privacy` / `Terms` links (→ `/static/privacy.html`, `/static/terms.html`). The footer is rendered eagerly at mount with these bundled defaults and stays visible across every tier — including `invisible_pass`, `checkbox`, and the 429 block path — so a user who's confused by the verification UI always has a one-click route to "why am I seeing this?".
 
 Operators with their own About / Privacy / Terms pages can override per-field:
 
@@ -379,7 +379,7 @@ DEFAULT_DIFFICULTY=18
 
 # Provisioning + persistence (do not deploy without these)
 ADMIN_TOKEN=$(openssl rand -hex 32)
-SITE_DB_PATH=/var/lib/rust-captcha/sites.db
+SITE_DB_PATH=/var/lib/bollwark/sites.db
 
 # Restrict the puzzle endpoint to your known embedders
 CORS_ALLOWED_ORIGINS="https://app.example,https://admin.example"
@@ -394,20 +394,20 @@ VERIFY_SHADOW_MIN=25
 VERIFY_BLOCK_MIN=55
 
 # IP reputation from a maintained list
-IP_REPUTATION_FILE=/etc/rust-captcha/ip_reputation.txt
+IP_REPUTATION_FILE=/etc/bollwark/ip_reputation.txt
 
 # Reverse-proxy aware client IP + TLS fingerprint via Cloudflare.
 # TRUSTED_PROXIES gates BOTH the X-Forwarded-For walk AND the TLS
 # fingerprint header — direct clients can't spoof either without
 # being in this CIDR list.
 TLS_FINGERPRINT_HEADER=cf-ja4
-TLS_FINGERPRINT_FILE=/etc/rust-captcha/ja4_blocklist.txt
+TLS_FINGERPRINT_FILE=/etc/bollwark/ja4_blocklist.txt
 TRUSTED_PROXIES="173.245.48.0/20,103.21.244.0/22,..."  # CF ranges
 
 # Validation dashboard
-ADMIN_DB_PATH=/var/lib/rust-captcha/decisions.db
+ADMIN_DB_PATH=/var/lib/bollwark/decisions.db
 
-RUST_LOG=rust_captcha=info
+RUST_LOG=bollwark=info
 ```
 
 For local development, the bare minimum (just the testsite + scoring scaffold):

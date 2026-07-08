@@ -1,4 +1,4 @@
-// RustCaptcha Widget — SHA-256 proof-of-work with risk-tier-aware UI.
+// Bollwark Widget — SHA-256 proof-of-work with risk-tier-aware UI.
 
 (function () {
   "use strict";
@@ -39,7 +39,7 @@
   // ── CaptchaWidget Class ──
 
   /**
-   * RustCaptcha widget.
+   * Bollwark widget.
    *
    * Modes (`data-mode` attribute / `mode` option):
    *
@@ -55,7 +55,7 @@
    *       invisible_pass → silent PoW + onVerify; no UI ever rendered.
    *       checkbox / hard_pow → checkbox UI appears; user clicks.
    *       block → widget renders nothing. The embedder MUST listen for
-   *         the `rustcaptcha:puzzle` event (detail.ok=false) to surface
+   *         the `bollwark:puzzle` event (detail.ok=false) to surface
    *         a failure UX — otherwise the block is silent and the user
    *         sees nothing happen. A console.warn fires once on block to
    *         flag missed wiring during development.
@@ -65,7 +65,7 @@
    *   "light" / "dark" — force a fixed palette, e.g. so an embedder can
    *     match a host whose theme differs from the OS setting.
    *
-   * Event: `rustcaptcha:puzzle` (CustomEvent on the container, bubbles)
+   * Event: `bollwark:puzzle` (CustomEvent on the container, bubbles)
    *   detail = { ok, tier, difficulty?, error? }
    *     ok=true  → puzzle issued (or invisible-pass solving in the bg).
    *     ok=false → 429 (block) or fetch error; `tier="block"` for 429.
@@ -188,15 +188,15 @@
         });
 
         // Invisible mode hands block-tier UX to the embedder via the
-        // `rustcaptcha:puzzle` event — they decide whether to show an
+        // `bollwark:puzzle` event — they decide whether to show an
         // inline message, redirect, or do nothing. The console.warn is a
         // one-shot dev-time hint: if the embedder forgot to wire the
         // listener, the page would otherwise look like nothing happened.
         if (this.mode === "invisible") {
           console.warn(
-            "[RustCaptcha] invisible-mode " +
+            "[Bollwark] invisible-mode " +
               (blocked ? "block (HTTP 429)" : "fetch error") +
-              " — widget rendered no UI. Listen for the `rustcaptcha:puzzle` " +
+              " — widget rendered no UI. Listen for the `bollwark:puzzle` " +
               "event (detail.ok=false) on the container to surface a failure UX."
           );
           return;
@@ -212,7 +212,7 @@
 
     _dispatchPuzzleEvent(detail) {
       this.container.dispatchEvent(
-        new CustomEvent("rustcaptcha:puzzle", { detail, bubbles: true })
+        new CustomEvent("bollwark:puzzle", { detail, bubbles: true })
       );
     }
 
@@ -289,7 +289,7 @@
       // Brand corner: clickable name → about, with tiny Privacy / Terms
       // links stacked beneath. Mirrors the reCAPTCHA / hCaptcha pattern.
       // Sits at the right edge of the checkbox row (pushed over by
-      // `margin-left:auto`) so "RustCaptcha" rides the same line as the
+      // `margin-left:auto`) so "Bollwark" rides the same line as the
       // checkbox and the legal links hang just below it. `_renderBlocked`
       // hides only the checkbox + label, never the brand, so this stays
       // visible across every tier — invisible-pass, checkbox, and the 429
@@ -306,7 +306,7 @@
       brandLink.href = linkBase + "/static/about.html";
       brandLink.target = "_blank";
       brandLink.rel = "noopener noreferrer";
-      brandLink.textContent = "RustCaptcha";
+      brandLink.textContent = "Bollwark";
       this._brandLinks.about = brandLink;
       const brandLinks = document.createElement("span");
       brandLinks.className = "rc-captcha-brand-links";
@@ -442,7 +442,7 @@
           });
         }
       } catch (err) {
-        console.error("RustCaptcha error:", err);
+        console.error("Bollwark error:", err);
         this.state = "failed";
         if (this.statusEl) this.statusEl.textContent = "Error: " + err.message;
         this._updateUI();
@@ -625,7 +625,7 @@
 
   // ── Public API ──
 
-  window.RustCaptcha = {
+  window.Bollwark = {
     render(container, options) {
       return new CaptchaWidget(container, options);
     },
@@ -636,10 +636,10 @@
 
   // Scan the DOM for `[data-sitekey]` containers and mount a widget on each.
   // Idempotent: we tag mounted nodes so re-runs (after async script load in
-  // an SPA, or a subsequent `RustCaptcha.scan()`) don't double-mount.
+  // an SPA, or a subsequent `Bollwark.scan()`) don't double-mount.
   function autoInit() {
     document.querySelectorAll("[data-sitekey]").forEach((el) => {
-      if (el.dataset.rustcaptchaMounted === "1") return;
+      if (el.dataset.bollwarkMounted === "1") return;
       const widget = new CaptchaWidget(el, {
         sitekey: el.dataset.sitekey,
         serverUrl: el.dataset.serverUrl || "",
@@ -647,11 +647,11 @@
         mode: el.dataset.mode,
         theme: el.dataset.theme,
       });
-      el.dataset.rustcaptchaMounted = "1";
-      window.RustCaptcha._instances.push(widget);
+      el.dataset.bollwarkMounted = "1";
+      window.Bollwark._instances.push(widget);
     });
   }
-  window.RustCaptcha.scan = autoInit;
+  window.Bollwark.scan = autoInit;
 
   // SPA-friendly bootstrap: if `DOMContentLoaded` has already fired by the
   // time this script lands (typical when injected dynamically by a Dioxus

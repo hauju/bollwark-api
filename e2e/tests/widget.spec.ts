@@ -85,7 +85,7 @@ test("invisible mode: invisible_pass tier renders no visible UI but verifies", a
   // its public getResult().
   await page.waitForFunction(
     () => {
-      const inst = (window as any).RustCaptcha?._instances?.[0];
+      const inst = (window as any).Bollwark?._instances?.[0];
       return inst && inst.getResult().state === "verified";
     },
     undefined,

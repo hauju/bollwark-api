@@ -5,23 +5,21 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
-use rust_captcha::api;
-use rust_captcha::api::state::{
-    AppState, tier_thresholds_from_config, verify_thresholds_from_config,
-};
-use rust_captcha::api::types::{CreateSiteResponse, PuzzleResponse, VerifyResponse};
-use rust_captcha::config::AppConfig;
-use rust_captcha::puzzle::challenge::{
+use bollwark::api;
+use bollwark::api::state::{AppState, tier_thresholds_from_config, verify_thresholds_from_config};
+use bollwark::api::types::{CreateSiteResponse, PuzzleResponse, VerifyResponse};
+use bollwark::config::AppConfig;
+use bollwark::puzzle::challenge::{
     PuzzleEngine, compute_argon2id, has_leading_zero_bits, solve_argon2id_challenge,
     solve_challenge,
 };
-use rust_captcha::puzzle::difficulty::DifficultyCalculator;
-use rust_captcha::puzzle::types::{Algorithm, Argon2idParams, PuzzleConfig};
-use rust_captcha::risk::{
+use bollwark::puzzle::difficulty::DifficultyCalculator;
+use bollwark::puzzle::types::{Algorithm, Argon2idParams, PuzzleConfig};
+use bollwark::risk::{
     CidrListReputation, EscalationTier, FingerprintBlocklist, ReputationStore, RiskScorer,
     TrustedProxies, VerifyScorer,
 };
-use rust_captcha::storage::memory::InMemoryStore;
+use bollwark::storage::memory::InMemoryStore;
 
 fn test_app() -> axum::Router {
     test_app_with(|_| {})
@@ -49,7 +47,7 @@ fn test_app_with_store(
 /// time-on-page signal sees a realistic elapsed time instead of the ~0ms gap
 /// between issuing and verifying in a test.
 async fn backdate_challenge(store: &InMemoryStore, id: uuid::Uuid, secs: i64) {
-    use rust_captcha::storage::Store;
+    use bollwark::storage::Store;
     let mut challenge = store.get_challenge(&id).await.unwrap().unwrap();
     challenge.created_at -= chrono::Duration::seconds(secs);
     store.store_challenge(&challenge).await.unwrap();
@@ -90,7 +88,7 @@ impl TestAppBuilder {
         };
         let load_ladder = self
             .load_ladder
-            .map(|spec| rust_captcha::risk::LoadLadder::parse(spec).unwrap())
+            .map(|spec| bollwark::risk::LoadLadder::parse(spec).unwrap())
             .unwrap_or_default();
         let config = AppConfig {
             puzzle_algorithm: algorithm,

@@ -630,7 +630,7 @@ mod tests {
     fn tempdir() -> std::path::PathBuf {
         let mut dir = std::env::temp_dir();
         dir.push(format!(
-            "rust-captcha-test-{}-{}",
+            "bollwark-test-{}-{}",
             std::process::id(),
             Uuid::new_v4()
         ));

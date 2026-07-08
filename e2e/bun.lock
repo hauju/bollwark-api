@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "rust-captcha-e2e",
+      "name": "bollwark-e2e",
       "devDependencies": {
         "@playwright/test": "^1.48.0",
       },

@@ -1,6 +1,6 @@
 # Integration Guide
 
-This guide shows the full flow for adding rust-captcha to a real application:
+This guide shows the full flow for adding bollwark to a real application:
 
 1. Run the CAPTCHA service.
 2. Register your application as a site.
@@ -27,7 +27,7 @@ For production, also set a stable bind address and run behind TLS:
 ```bash
 LISTEN_ADDR=127.0.0.1:3000
 ADMIN_TOKEN=<long-random-secret>
-SITE_DB_PATH=/var/lib/rust-captcha/sites.db
+SITE_DB_PATH=/var/lib/bollwark/sites.db
 ```
 
 ## 2. Register a Site
@@ -99,12 +99,12 @@ The widget has two modes selected via `data-mode`:
 - **`data-mode="invisible"`**: the widget renders no chrome at all for the `invisible_pass` tier — PoW runs in the background and the `captcha-token` field is injected silently when the visitor submits. If the server escalates the tier, the widget falls back to its visible UI on demand:
   - `invisible_pass` → no UI, silent PoW.
   - `checkbox` / `hard_pow` → checkbox appears, visitor clicks.
-  - `block` → **the widget renders nothing**. Your page must listen for the `rustcaptcha:puzzle` event to surface a failure UX (an inline message, a redirect, or anything else). Without a listener the block is silent and the visitor sees nothing happen. The widget logs a one-shot `console.warn` in this case to flag missed wiring during development.
+  - `block` → **the widget renders nothing**. Your page must listen for the `bollwark:puzzle` event to surface a failure UX (an inline message, a redirect, or anything else). Without a listener the block is silent and the visitor sees nothing happen. The widget logs a one-shot `console.warn` in this case to flag missed wiring during development.
 
 ```html
 <div id="captcha" data-sitekey="<SITE_KEY>" data-mode="invisible"></div>
 <script>
-  document.getElementById("captcha").addEventListener("rustcaptcha:puzzle", (e) => {
+  document.getElementById("captcha").addEventListener("bollwark:puzzle", (e) => {
     // e.detail = { ok, tier, difficulty?, error? }
     if (!e.detail.ok) {
       // tier === "block" for HTTP 429; null on network/fetch errors.
@@ -114,7 +114,7 @@ The widget has two modes selected via `data-mode`:
 </script>
 ```
 
-The `rustcaptcha:puzzle` event fires in default mode too if you want to drive your own UI alongside the widget — it bubbles, so a listener on a parent element works.
+The `bollwark:puzzle` event fires in default mode too if you want to drive your own UI alongside the widget — it bubbles, so a listener on a parent element works.
 
 ### Theme
 
@@ -180,7 +180,7 @@ app.post("/signup", express.urlencoded({ extended: false }), async (req, res) =>
   const verifyResp = await fetch("https://captcha.example.com/v1/verify", {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${process.env.RUST_CAPTCHA_SECRET_KEY}`,
+      "Authorization": `Bearer ${process.env.BOLLWARK_SECRET_KEY}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ token }),
@@ -220,7 +220,7 @@ async fn verify_captcha(token: &str) -> anyhow::Result<bool> {
     let client = reqwest::Client::new();
     let resp = client
         .post("https://captcha.example.com/v1/verify")
-        .bearer_auth(std::env::var("RUST_CAPTCHA_SECRET_KEY")?)
+        .bearer_auth(std::env::var("BOLLWARK_SECRET_KEY")?)
         .json(&serde_json::json!({ "token": token }))
         .send()
         .await?;
@@ -236,7 +236,7 @@ async fn verify_captcha(token: &str) -> anyhow::Result<bool> {
 
 ## 7. Cross-Origin Setup
 
-If your app runs at `https://app.example.com` and rust-captcha runs at `https://captcha.example.com`, set:
+If your app runs at `https://app.example.com` and bollwark runs at `https://captcha.example.com`, set:
 
 ```bash
 CORS_ALLOWED_ORIGINS="https://app.example.com"
@@ -263,7 +263,7 @@ Before using this in a real application:
 Optional dashboard:
 
 ```bash
-ADMIN_DB_PATH=/var/lib/rust-captcha/decisions.db
+ADMIN_DB_PATH=/var/lib/bollwark/decisions.db
 ADMIN_TOKEN=<same-admin-token>
 ```
 

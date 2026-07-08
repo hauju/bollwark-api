@@ -1,4 +1,4 @@
-// Synthetic load generator for rust-captcha.
+// Synthetic load generator for bollwark.
 //
 // Drives /v1/puzzle and /v1/verify with several scenarios that the Playwright
 // e2e (single real browser) won't easily produce — burst rate, missing headers,
@@ -9,7 +9,7 @@
 //     cargo run --release --example loadgen -- --base http://127.0.0.1:3000
 //
 // Flags (all optional):
-//     --base       URL of the running rust-captcha server (default 127.0.0.1:3000)
+//     --base       URL of the running bollwark server (default 127.0.0.1:3000)
 //     --requests   number of requests per scenario (default 200)
 //     --concurrency number of in-flight requests (default 16)
 //     --only       comma-separated subset: happy,no_ua,burst,full_solve
@@ -27,7 +27,7 @@ use serde::Deserialize;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use rust_captcha::puzzle::challenge::solve_challenge;
+use bollwark::puzzle::challenge::solve_challenge;
 
 #[derive(Debug, Clone)]
 struct Args {

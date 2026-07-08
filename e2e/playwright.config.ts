@@ -11,7 +11,7 @@ const reuseServer = process.env.CAPTCHA_REUSE_SERVER === "1";
 // Shared env for both dev servers. Argon2id overrides difficulty + algorithm.
 const sharedEnv: Record<string, string> = {
   LOG_FORMAT: "json",
-  RUST_LOG: "info,rust_captcha=debug",
+  RUST_LOG: "info,bollwark=debug",
   TIER_CHECKBOX_MIN: "8",
   TIER_HARD_POW_MIN: "15",
   TIER_VISUAL_MIN: "200",

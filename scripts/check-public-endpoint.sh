@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# External health + TLS-certificate monitor for the PUBLIC rust-captcha endpoint.
+# External health + TLS-certificate monitor for the PUBLIC bollwark endpoint.
 #
 # Runs from OUTSIDE the deployment (CI cron, or your laptop) so it sees what a
 # browser sees through Coolify's Traefik proxy — which the in-container
@@ -96,7 +96,7 @@ printf '   - %s\n' "${fails[@]}"
 # so one payload works for either. Best-effort; never masks the failure exit.
 if [[ -n "${MONITOR_WEBHOOK:-}" ]]; then
     lines=$(printf '• %s\\n' "${fails[@]}")
-    msg="🚨 rust-captcha monitor: ${URL} is unhealthy\\n${lines}"
+    msg="🚨 bollwark monitor: ${URL} is unhealthy\\n${lines}"
     payload=$(printf '{"text":"%s","content":"%s"}' "$msg" "$msg")
     if curl --silent --max-time 10 -H 'Content-Type: application/json' \
             -d "$payload" "$MONITOR_WEBHOOK" >/dev/null 2>&1; then

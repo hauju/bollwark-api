@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>RustCaptcha Test Site</title>
+  <title>Bollwark Test Site</title>
   <link rel="stylesheet" href="/static/captcha-widget.css">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -190,7 +190,7 @@
 </head>
 <body>
   <div class="container">
-    <h1>RustCaptcha Test Site</h1>
+    <h1>Bollwark Test Site</h1>
     <p class="subtitle">
       SHA-256 proof-of-work with risk-tier escalation
     </p>
@@ -344,12 +344,12 @@
     document.getElementById("risk-fetch").addEventListener("click", fetchOnePuzzle);
     document.getElementById("risk-spam").addEventListener("click", () => spamPuzzles(30));
     document.getElementById("risk-reset-widget").addEventListener("click", () => {
-      const w = window.RustCaptcha._instances[0];
+      const w = window.Bollwark._instances[0];
       if (w) w.reset();
     });
 
     // Mirror what tier the widget itself received from its eager puzzle fetch.
-    document.addEventListener("rustcaptcha:puzzle", (e) => {
+    document.addEventListener("bollwark:puzzle", (e) => {
       const d = e.detail || {};
       const tier = d.ok ? d.tier : (d.tier || "blocked-429");
       document.getElementById("rc-widget-tier").innerHTML = renderTier(tier);
@@ -359,7 +359,7 @@
     // POST /v1/sites is gated by ADMIN_TOKEN (404 when unset, 401 on bad
     // token). Reuse the same sessionStorage key the admin dashboard uses so
     // a single sign-in covers both pages in this tab.
-    const ADMIN_TOKEN_KEY = "rust_captcha_admin_token";
+    const ADMIN_TOKEN_KEY = "bollwark_admin_token";
     function getAdminToken({ forcePrompt = false } = {}) {
       let tk = forcePrompt ? null : sessionStorage.getItem(ADMIN_TOKEN_KEY);
       if (!tk) {
@@ -411,11 +411,11 @@
 
         // Re-init widget. Order matters: set siteKey before reset() so the
         // widget's eager puzzle fetch can run.
-        if (window.RustCaptcha._instances.length > 0) {
-          window.RustCaptcha._instances[0].siteKey = data.site_key;
-          window.RustCaptcha._instances[0].reset();
+        if (window.Bollwark._instances.length > 0) {
+          window.Bollwark._instances[0].siteKey = data.site_key;
+          window.Bollwark._instances[0].reset();
         } else {
-          window.RustCaptcha.render(widgetEl, {
+          window.Bollwark.render(widgetEl, {
             sitekey: data.site_key,
             debug: true,
           });
