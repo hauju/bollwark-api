@@ -127,6 +127,10 @@ pub struct PuzzleResponse {
     pub prefix: String,
     pub difficulty: u32,
     pub expires_at: String,
+    /// Challenge lifetime in seconds, measured from issuance. The widget
+    /// schedules its pre-expiry refresh from this rather than comparing
+    /// `expires_at` against the client clock, which may be skewed.
+    pub expires_in_secs: u64,
     pub tier: EscalationTier,
     /// Operator-overridden URLs for the about/privacy/terms pages, when
     /// `INFO_*_URL` env vars are set. Per-field optional — widget falls

@@ -60,7 +60,7 @@ Two scoring passes bracket every successful solve:
   - `signals.rs` — always-on scorers: `score_rate` (per-IP + per-site, 60s window) and `score_header_anomaly` (UA / Accept-Language / Accept-Encoding).
   - `reputation.rs` — `CidrListReputation` loaded from `IP_REPUTATION_FILE`; categories `tor`/`datacenter`/`vpn`/`residential`.
   - `tls_fingerprint.rs` — `TrustedProxies` CIDR allowlist + `FingerprintBlocklist`. Header is only honored when the immediate peer is in the trusted-proxies list.
-  - `client_ip.rs` — `client_ip` (reverse-proxy aware XFF resolution) + `anonymize_ip` (truncate to /24 or /48 for at-rest log storage).
+  - `client_ip.rs` — `client_ip` (reverse-proxy aware XFF resolution) + `anonymize_ip` (truncate to /24 or /48 for at-rest log storage) + `rate_key` (buckets IPv6 to /64 for the per-IP rate counter, so one host rotating through its delegated block shares a single counter; IPv4 and IPv4-mapped IPv6 count per-address).
   - `score.rs` — `RiskScorer` aggregates a `SignalContext` (ip, headers, counts, fingerprint) into a `RiskScore { total, breakdown, tier }` for puzzle-time. Single always-on path; each signal self-gates on its input.
   - `verify.rs` — `VerifyScorer` aggregates a `VerifyContext` into a `VerifyScore { total, breakdown, decision }`. Honeypot scores +100 (always blocks); time-on-page bands at <500ms (+50) and <2000ms (+25); behaviour reuses `score_behavior`.
   - `behavior.rs` — `BehaviorReport` (mouse moves, touches, interactions, first-interaction ms) collected by the widget and submitted in `/v1/verify`. Flatline (zero events) scores +30; click-without-pointer scores +15; sub-50ms first interaction adds +20. `BehaviorPresence::Absent` (legacy clients with no blob) scores 0.
@@ -72,7 +72,7 @@ Two scoring passes bracket every successful solve:
 - **`site/`** — Site registration types (`site_key` + `secret_key`).
 - **`error.rs`** — `CaptchaError` enum implementing `IntoResponse` for Axum error mapping.
 - **`config.rs`** — `AppConfig` loaded from environment variables with defaults.
-- **`static/`** — Bundled browser widget served by `tower-http`'s `ServeDir`. `captcha-widget.js` + `captcha-widget.css` are the embeddable widget; `captcha-worker.js` is the Web Worker that solves the PoW off the main thread (dispatches on the wire `algorithm` field — SHA-256 via `crypto.subtle`, Argon2id via the vendored `static/vendor/argon2.umd.min.js` from hash-wasm); `testsite.html` is a local harness.
+- **`static/`** — Bundled browser widget served by `tower-http`'s `ServeDir`. `captcha-widget.js` + `captcha-widget.css` are the embeddable widget; `captcha-worker.js` is the Web Worker that solves the PoW off the main thread (dispatches on the wire `algorithm` field — SHA-256 via `crypto.subtle`, Argon2id via the vendored `static/vendor/argon2.umd.min.js` from hash-wasm); `testsite.html` is a local harness. The widget auto-refreshes its challenge shortly before the TTL expires (scheduled from the puzzle response's `expires_in_secs`, not the client clock) and quietly re-solves if already verified, so a visitor who dwells on a form longer than `CHALLENGE_TTL_SECS` never submits an expired token; the tier rendered at mount stays locked, and refresh is deferred while the tab is hidden.
 
 ### API Endpoints
 

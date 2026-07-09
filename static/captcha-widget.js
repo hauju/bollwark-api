@@ -111,6 +111,19 @@
       this._behaviorListeners = [];
       this._installBehaviorListeners();
 
+      // Pre-expiry challenge refresh (see _schedulePuzzleRefresh). Deferred
+      // while the tab is hidden — background timers are throttled anyway —
+      // and fired as soon as the tab becomes visible again.
+      this._refreshTimer = null;
+      this._refreshPending = false;
+      this._onVisibilityChange = () => {
+        if (!document.hidden && this._refreshPending) {
+          this._refreshPending = false;
+          this._refreshPuzzle();
+        }
+      };
+      document.addEventListener("visibilitychange", this._onVisibilityChange);
+
       this._render();
       this._initFlow();
     }
@@ -161,6 +174,7 @@
         const puzzle = await this._fetchPuzzle();
         this.puzzle = puzzle;
         this.tier = puzzle.tier;
+        this._schedulePuzzleRefresh();
         this._dispatchPuzzleEvent({
           ok: true,
           tier: puzzle.tier,
@@ -477,6 +491,70 @@
       return resp.json();
     }
 
+    // ── Challenge refresh ──
+
+    // Challenges expire after the server's CHALLENGE_TTL_SECS (default
+    // 5 min), but the widget fetches one at mount — so without a refresh, a
+    // visitor who dwells on the form longer than the TTL submits a token
+    // pointing at an expired challenge and fails verification with no
+    // recovery. Re-fetch shortly before expiry; if the PoW was already
+    // solved, quietly re-solve so the injected token always references a
+    // live challenge. The tier rendered at mount stays locked — only the
+    // challenge data rotates.
+    _schedulePuzzleRefresh() {
+      this._clearPuzzleRefresh();
+      if (!this.puzzle) return;
+      // Prefer the server-stated lifetime: comparing `expires_at` against
+      // the client clock breaks silently when that clock is skewed.
+      let ttlMs =
+        typeof this.puzzle.expires_in_secs === "number"
+          ? this.puzzle.expires_in_secs * 1000
+          : Date.parse(this.puzzle.expires_at) - Date.now();
+      if (!isFinite(ttlMs) || ttlMs <= 0) ttlMs = 240000;
+      // 60s before expiry, but never below half the TTL (short-TTL servers)
+      // and never below a 5s floor (protects against a hot refresh loop).
+      const delay = Math.max(ttlMs - 60000, ttlMs / 2, 5000);
+      this._refreshTimer = setTimeout(() => this._refreshPuzzle(), delay);
+    }
+
+    _clearPuzzleRefresh() {
+      if (this._refreshTimer) {
+        clearTimeout(this._refreshTimer);
+        this._refreshTimer = null;
+      }
+    }
+
+    async _refreshPuzzle() {
+      this._refreshTimer = null;
+      if (this.state === "solving") {
+        // A user-triggered solve is in flight; check back once it settles.
+        this._refreshTimer = setTimeout(() => this._refreshPuzzle(), 5000);
+        return;
+      }
+      if (document.hidden) {
+        // Don't fetch or burn CPU re-solving in a background tab; the
+        // visibilitychange handler resumes this the moment it's visible.
+        this._refreshPending = true;
+        return;
+      }
+      try {
+        const puzzle = await this._fetchPuzzle();
+        this.puzzle = puzzle;
+        if (this.state === "verified") {
+          // The token in the form references the old, about-to-expire
+          // challenge. Re-solve in the background — state stays "verified",
+          // so there's no visible churn — and swap the token in place.
+          const solution = await this._solvePow(puzzle);
+          this._injectToken(puzzle.challenge_id, solution.nonce);
+        }
+        this._schedulePuzzleRefresh();
+      } catch (_) {
+        // Network blip or a block-tier 429: keep the current challenge
+        // (it may still be valid for a while) and retry.
+        this._refreshTimer = setTimeout(() => this._refreshPuzzle(), 60000);
+      }
+    }
+
     _solvePow(puzzle) {
       return new Promise((resolve, reject) => {
         this.solveStartTime = performance.now();
@@ -597,6 +675,8 @@
 
     reset() {
       this._destroyWorker();
+      this._clearPuzzleRefresh();
+      this._refreshPending = false;
       this._teardownBehaviorListeners();
       this.state = "idle";
       this.puzzle = null;

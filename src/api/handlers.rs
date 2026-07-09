@@ -11,7 +11,7 @@ use crate::dashboard::types::{PuzzleRecord, VerifyRecord};
 use crate::error::CaptchaError;
 use crate::risk::{
     BehaviorPresence, EscalationTier, SignalContext, TlsFingerprint, VerifyContext, VerifyDecision,
-    anonymize_ip, client_ip, difficulty_for,
+    anonymize_ip, client_ip, difficulty_for, rate_key,
 };
 use crate::site::types::Site;
 use crate::storage::Store;
@@ -37,8 +37,10 @@ pub async fn get_puzzle(
     let peer: IpAddr = addr.ip();
     let ip = client_ip(peer, &headers, &state.trusted_proxies);
 
-    // Get rate counters (feeds the rate signal)
-    let ip_count = state.store.increment_ip_count(&ip).await?;
+    // Get rate counters (feeds the rate signal). The counter key buckets
+    // IPv6 to /64 so one host rotating through its delegated block still
+    // shares a single counter; scoring and logging keep the full `ip`.
+    let ip_count = state.store.increment_ip_count(&rate_key(ip)).await?;
     let site_count = state.store.increment_site_count(&params.site_key).await?;
 
     // TLS fingerprint: only honor the header when the immediate peer is in
@@ -186,6 +188,7 @@ pub async fn get_puzzle(
         prefix: challenge.prefix.clone(),
         difficulty: challenge.difficulty,
         expires_at: challenge.expires_at.to_rfc3339(),
+        expires_in_secs: state.config.challenge_ttl_secs,
         tier: score.tier,
         info_urls: state.info_urls.clone(),
     };
@@ -241,7 +244,7 @@ pub async fn verify(
     }
 
     // Server-authoritative time-on-page: elapsed since the challenge was
-    // issued (≈ widget mount, since the widget fetches a puzzle on mount).
+    // issued (≈ widget mount, or the widget's most recent pre-expiry refresh).
     // Derived here rather than trusted from the client, so a bot can't claim
     // a longer dwell than actually elapsed to dodge the fast-submit penalty.
     let time_on_page_ms = (verify_at - challenge.created_at).num_milliseconds().max(0) as u64;

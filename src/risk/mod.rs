@@ -9,7 +9,7 @@ pub mod tls_fingerprint;
 pub mod verify;
 
 pub use behavior::{BehaviorPresence, BehaviorReport};
-pub use client_ip::{anonymize_ip, client_ip};
+pub use client_ip::{anonymize_ip, client_ip, rate_key};
 pub use load::LoadLadder;
 pub use reputation::{CidrListReputation, IpCategory, ReputationStore};
 pub use score::{RiskScore, RiskScorer, SignalBreakdown, SignalContext};

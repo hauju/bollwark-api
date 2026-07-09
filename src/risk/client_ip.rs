@@ -74,6 +74,27 @@ pub fn anonymize_ip(ip: IpAddr) -> IpAddr {
     }
 }
 
+/// Key an IP for per-IP rate counting. IPv4 counts per-address, but IPv6
+/// must not: a single host is routinely delegated a whole /64, so keying on
+/// the full /128 lets one attacker rotate through 2^64 addresses — each with
+/// a fresh counter the rate signal never sees — while also inserting one map
+/// entry per request. Bucketing to /64 makes the rotation share one counter.
+///
+/// IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`, seen on dual-stack
+/// listeners) are canonicalized to IPv4 first — their meaningful bits live in
+/// the low 32, which a /64 truncation would collapse into a single bucket
+/// shared by every IPv4 client.
+pub fn rate_key(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V4(v4) => IpAddr::V4(v4),
+        IpAddr::V6(v6) => {
+            let mut octets = v6.octets();
+            octets[8..].fill(0);
+            IpAddr::V6(Ipv6Addr::from(octets))
+        }
+    }
+}
+
 fn strip_port(s: &str) -> &str {
     // Bracketed IPv6: `[::1]:1234` → `::1`. We don't return the brackets,
     // since IpAddr::parse accepts the inner form.
@@ -197,6 +218,48 @@ mod tests {
             anonymize_ip(ip("2001:db8:abcd:1234:5678:9abc:def0:1")),
             ip("2001:db8:abcd::")
         );
+    }
+
+    #[test]
+    fn rate_key_ipv4_is_identity() {
+        assert_eq!(rate_key(ip("203.0.113.42")), ip("203.0.113.42"));
+    }
+
+    #[test]
+    fn rate_key_ipv6_buckets_to_64() {
+        // Two hosts in the same /64 share one rate key…
+        assert_eq!(
+            rate_key(ip("2001:db8:abcd:1234:5678:9abc:def0:1")),
+            ip("2001:db8:abcd:1234::")
+        );
+        assert_eq!(
+            rate_key(ip("2001:db8:abcd:1234:ffff:ffff:ffff:ffff")),
+            ip("2001:db8:abcd:1234::")
+        );
+        // …but different /64s do not.
+        assert_ne!(
+            rate_key(ip("2001:db8:abcd:1234::1")),
+            rate_key(ip("2001:db8:abcd:1235::1"))
+        );
+    }
+
+    #[test]
+    fn rate_key_ipv4_mapped_ipv6_counts_as_ipv4() {
+        // Dual-stack listeners hand us `::ffff:a.b.c.d`; the /64 truncation
+        // must not collapse all IPv4 clients into one bucket.
+        assert_eq!(rate_key(ip("::ffff:203.0.113.9")), ip("203.0.113.9"));
+        assert_ne!(
+            rate_key(ip("::ffff:203.0.113.9")),
+            rate_key(ip("::ffff:203.0.113.10"))
+        );
+    }
+
+    #[test]
+    fn rate_key_is_idempotent() {
+        for s in ["198.51.100.7", "2001:db8:abcd:1234::ff", "::ffff:1.2.3.4"] {
+            let once = rate_key(ip(s));
+            assert_eq!(rate_key(once), once);
+        }
     }
 
     #[test]
