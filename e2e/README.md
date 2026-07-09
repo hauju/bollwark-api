@@ -22,7 +22,7 @@ already have one running and want to capture its JSON logs):
 # tier behaviour, so a baseline-mode server will produce different decisions.
 LOG_FORMAT=json RUST_LOG=info,bollwark=debug \
   FULL_FINGERPRINT_MODE=1 \
-  DEFAULT_DIFFICULTY=12 MIN_DIFFICULTY=8 MAX_DIFFICULTY=16 \
+  DEFAULT_DIFFICULTY=12 MAX_DIFFICULTY=16 \
   TIER_VISUAL_MIN=200 TIER_BLOCK_MIN=250 \
   cargo run 2> e2e-run.jsonl
 
@@ -31,7 +31,7 @@ LOG_FORMAT=json RUST_LOG=info,bollwark=debug \
 LOG_FORMAT=json RUST_LOG=info,bollwark=debug \
   FULL_FINGERPRINT_MODE=1 PUZZLE_ALGORITHM=argon2id \
   ARGON2_M_COST=1024 ARGON2_T_COST=1 ARGON2_P_COST=1 \
-  DEFAULT_DIFFICULTY=6 MIN_DIFFICULTY=4 MAX_DIFFICULTY=10 \
+  DEFAULT_DIFFICULTY=6 MAX_DIFFICULTY=10 \
   TIER_VISUAL_MIN=200 TIER_BLOCK_MIN=250 \
   LISTEN_ADDR=127.0.0.1:3001 cargo run 2> e2e-argon2id.jsonl
 

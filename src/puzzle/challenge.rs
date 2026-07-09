@@ -172,8 +172,6 @@ mod tests {
         let config = PuzzleConfig {
             algorithm: Algorithm::Sha256,
             default_difficulty: 8,
-            min_difficulty: 4,
-            max_difficulty: 16,
             ttl_secs: 300,
         };
         let engine = PuzzleEngine::new(config);
@@ -188,8 +186,6 @@ mod tests {
         let config = PuzzleConfig {
             algorithm: Algorithm::Sha256,
             default_difficulty: 16,
-            min_difficulty: 4,
-            max_difficulty: 28,
             ttl_secs: 300,
         };
         let engine = PuzzleEngine::new(config);
@@ -204,8 +200,6 @@ mod tests {
         let config = PuzzleConfig {
             algorithm: Algorithm::Sha256,
             default_difficulty: 4,
-            min_difficulty: 4,
-            max_difficulty: 16,
             ttl_secs: 300,
         };
         let engine = PuzzleEngine::new(config);
@@ -232,8 +226,6 @@ mod tests {
         let config = PuzzleConfig {
             algorithm: Algorithm::Argon2id(argon_test_params()),
             default_difficulty: 4,
-            min_difficulty: 1,
-            max_difficulty: 8,
             ttl_secs: 300,
         };
         let engine = PuzzleEngine::new(config);
@@ -250,8 +242,6 @@ mod tests {
         let config = PuzzleConfig {
             algorithm: Algorithm::Argon2id(argon_test_params()),
             default_difficulty: 4,
-            min_difficulty: 1,
-            max_difficulty: 8,
             ttl_secs: 300,
         };
         let engine = PuzzleEngine::new(config);

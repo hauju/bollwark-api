@@ -10,7 +10,6 @@ use bollwark::api::state::{
 use bollwark::config::AppConfig;
 use bollwark::dashboard::{DecisionLog, GeoIp, Sessions, routes::AdminState};
 use bollwark::puzzle::challenge::PuzzleEngine;
-use bollwark::puzzle::difficulty::DifficultyCalculator;
 use bollwark::puzzle::types::PuzzleConfig;
 use bollwark::risk::{
     CidrListReputation, FingerprintBlocklist, ReputationStore, RiskScorer, TrustedProxies,
@@ -69,8 +68,6 @@ async fn main() {
     let puzzle_config = PuzzleConfig {
         algorithm: config.puzzle_algorithm,
         default_difficulty: config.default_difficulty,
-        min_difficulty: config.min_difficulty,
-        max_difficulty: config.max_difficulty,
         ttl_secs: config.challenge_ttl_secs,
     };
     tracing::info!(algorithm = ?config.puzzle_algorithm, "Puzzle engine initialised");
@@ -290,13 +287,15 @@ async fn main() {
     let state = Arc::new(AppState {
         store,
         engine: PuzzleEngine::new(puzzle_config),
-        difficulty: DifficultyCalculator::new(&config),
         risk: RiskScorer::new(
             tier_thresholds_from_config(&config),
             reputation,
             tls_blocklist,
         ),
-        verify_scorer: VerifyScorer::new(verify_thresholds_from_config(&config)),
+        verify_scorer: VerifyScorer::new(
+            verify_thresholds_from_config(&config),
+            config.verify_require_behavior,
+        ),
         tls_fingerprint_header: config.tls_fingerprint_header.clone(),
         trusted_proxies,
         decision_log,

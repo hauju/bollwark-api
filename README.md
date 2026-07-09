@@ -91,7 +91,7 @@ Everything is env-var driven and every setting has a default — `cargo run` wor
 
 - `LISTEN_ADDR` (default `0.0.0.0:3000`), `RUST_LOG` (default `info`)
 - `PUZZLE_ALGORITHM` — `sha256` (default) or `argon2id`. With Argon2id, drop `DEFAULT_DIFFICULTY` to `4`–`6` and tune `ARGON2_M_COST` / `ARGON2_T_COST` / `ARGON2_P_COST`.
-- `DEFAULT_DIFFICULTY` / `MIN_DIFFICULTY` / `MAX_DIFFICULTY` — PoW difficulty in leading zero bits (`18` / `16` / `28`).
+- `DEFAULT_DIFFICULTY` / `MAX_DIFFICULTY` — base PoW difficulty and upper clamp, in leading zero bits (`18` / `28`).
 - `TIER_CHECKBOX_MIN` / `TIER_HARD_POW_MIN` / `TIER_BLOCK_MIN` — puzzle-time score → tier thresholds.
 - `VERIFY_SHADOW_MIN` / `VERIFY_BLOCK_MIN` — verify-time score thresholds.
 - Optional signal inputs (off until configured): `IP_REPUTATION_FILE`, `TLS_FINGERPRINT_HEADER` (+ `TLS_FINGERPRINT_FILE`, `TRUSTED_PROXIES`).
@@ -149,7 +149,7 @@ A `justfile` wraps these (`just build`, `just test`, `just lint`, `just ci`).
 ### Validation harnesses
 
 - **Structured logs** — `LOG_FORMAT=json cargo run` emits JSONL on stderr. `event=puzzle_decision` and `event=verify_decision` carry the score, tier/decision, signal breakdown, and outcome. Pipe through `jq -c 'select(.event == "puzzle_decision")'` for clean parsing.
-- **Load generator** — `cargo run --release --example loadgen -- --base http://127.0.0.1:3000 --requests 200 --concurrency 16` drives four scenarios (`happy`, `no_ua`, `burst`, `full_solve`) and prints latency percentiles + tier distribution. For `full_solve`, run the server with `DEFAULT_DIFFICULTY=12 MIN_DIFFICULTY=8 MAX_DIFFICULTY=16`.
+- **Load generator** — `cargo run --release --example loadgen -- --base http://127.0.0.1:3000 --requests 200 --concurrency 16` drives four scenarios (`happy`, `no_ua`, `burst`, `full_solve`) and prints latency percentiles + tier distribution. For `full_solve`, run the server with `DEFAULT_DIFFICULTY=12 MAX_DIFFICULTY=16`.
 - **Playwright e2e** — `cd e2e && bun install && bunx playwright install chromium && bun run test`. Auto-spawns `cargo run`; set `CAPTCHA_REUSE_SERVER=1` to reuse a server you started yourself (so you can capture its JSONL).
 
 Requires Rust 1.85+ (edition 2024).

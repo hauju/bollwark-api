@@ -10,7 +10,7 @@
 //! `ShadowFail` returns `success: true` to the caller but emits a structured
 //! warn log so an operator can review the request offline.
 
-use super::behavior::{BehaviorPresence, score_behavior};
+use super::behavior::{BEHAVIOR_FLATLINE_SCORE, BehaviorPresence, score_behavior};
 
 #[derive(Debug, Clone, Copy)]
 pub struct VerifyContext {
@@ -86,11 +86,20 @@ pub fn score_time_on_page(ms: Option<u64>) -> u32 {
 
 pub struct VerifyScorer {
     thresholds: VerifyThresholds,
+    /// `VERIFY_REQUIRE_BEHAVIOR`: score a missing behavior blob like a
+    /// flatline instead of 0. For deployments where every legitimate client
+    /// is the bundled widget (which always sends the blob), an absent blob
+    /// is at least as suspicious as an empty one — without this, a bot
+    /// hitting the API directly opts out of the behavioral layer entirely.
+    require_behavior: bool,
 }
 
 impl VerifyScorer {
-    pub fn new(thresholds: VerifyThresholds) -> Self {
-        Self { thresholds }
+    pub fn new(thresholds: VerifyThresholds, require_behavior: bool) -> Self {
+        Self {
+            thresholds,
+            require_behavior,
+        }
     }
 
     pub fn score(&self, ctx: &VerifyContext) -> VerifyScore {
@@ -101,7 +110,10 @@ impl VerifyScorer {
                 0
             },
             time_on_page: score_time_on_page(ctx.time_on_page_ms),
-            behavior: score_behavior(ctx.behavior),
+            behavior: match ctx.behavior {
+                BehaviorPresence::Absent if self.require_behavior => BEHAVIOR_FLATLINE_SCORE,
+                b => score_behavior(b),
+            },
         };
         let total = breakdown.honeypot + breakdown.time_on_page + breakdown.behavior;
         let decision = if total >= self.thresholds.block_min {
@@ -124,7 +136,11 @@ mod tests {
     use super::*;
 
     fn scorer() -> VerifyScorer {
-        VerifyScorer::new(VerifyThresholds::default())
+        VerifyScorer::new(VerifyThresholds::default(), false)
+    }
+
+    fn strict_scorer() -> VerifyScorer {
+        VerifyScorer::new(VerifyThresholds::default(), true)
     }
 
     fn ctx() -> VerifyContext {
@@ -192,6 +208,42 @@ mod tests {
             ..Default::default()
         });
         let s = scorer().score(&c);
+        assert_eq!(s.breakdown.behavior, 0);
+        assert_eq!(s.decision, VerifyDecision::Pass);
+    }
+
+    #[test]
+    fn require_behavior_scores_absent_as_flatline() {
+        // ctx() has no behavior blob — with the flag, absence lands in the
+        // shadow band on its own, same as a flatline blob would.
+        let s = strict_scorer().score(&ctx());
+        assert_eq!(
+            s.breakdown.behavior,
+            super::super::behavior::BEHAVIOR_FLATLINE_SCORE
+        );
+        assert_eq!(s.decision, VerifyDecision::ShadowFail);
+    }
+
+    #[test]
+    fn require_behavior_leaves_present_blobs_untouched() {
+        let mut c = ctx();
+        c.behavior = BehaviorPresence::Present(super::super::behavior::BehaviorReport {
+            mouse_moves: 20,
+            touches: 0,
+            interactions: 2,
+            first_interaction_ms: Some(800),
+            ..Default::default()
+        });
+        let s = strict_scorer().score(&c);
+        assert_eq!(s.breakdown.behavior, 0);
+        assert_eq!(s.decision, VerifyDecision::Pass);
+    }
+
+    #[test]
+    fn absent_behavior_is_neutral_by_default() {
+        // Default posture (flag off): legacy/server-to-server callers with
+        // no blob contribute 0 — the pre-existing rollout guarantee.
+        let s = scorer().score(&ctx());
         assert_eq!(s.breakdown.behavior, 0);
         assert_eq!(s.decision, VerifyDecision::Pass);
     }

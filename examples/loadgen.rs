@@ -16,7 +16,7 @@
 //
 // The server picks the PoW difficulty per request based on tier. To make
 // full_solve finish in reasonable time, run the server with low difficulty:
-//     DEFAULT_DIFFICULTY=12 MIN_DIFFICULTY=8 MAX_DIFFICULTY=16 cargo run
+//     DEFAULT_DIFFICULTY=12 MAX_DIFFICULTY=16 cargo run
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

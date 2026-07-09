@@ -52,7 +52,6 @@ export default defineConfig({
             LISTEN_ADDR: "127.0.0.1:3000",
             // Lower difficulty so the widget solves PoW within the page lifetime.
             DEFAULT_DIFFICULTY: "12",
-            MIN_DIFFICULTY: "8",
             MAX_DIFFICULTY: "16",
             // Verify-time thresholds left at default (shadow_min=30, block_min=60)
             // so the browser-harness-simulator bot signature (webdriver=30 +
@@ -80,7 +79,6 @@ export default defineConfig({
             ARGON2_T_COST: "1",
             ARGON2_P_COST: "1",
             DEFAULT_DIFFICULTY: "6",
-            MIN_DIFFICULTY: "4",
             MAX_DIFFICULTY: "10",
           },
           url: `${argon2idURL}/static/testsite.html`,

@@ -15,16 +15,17 @@ A `.env` file in the working directory is loaded automatically at startup (via `
 | `ARGON2_T_COST` | `2` | Argon2id iteration count |
 | `ARGON2_P_COST` | `1` | Argon2id lanes / parallelism |
 | `DEFAULT_DIFFICULTY` | `18` | Base PoW difficulty (leading zero bits). ~250–500ms on a modern CPU; ~3–5s on low-end mobile in a Web Worker. For Argon2id, drop to `4`–`6`. |
-| `MIN_DIFFICULTY` | `16` | Lower clamp on adaptive difficulty |
-| `MAX_DIFFICULTY` | `28` | Upper clamp on adaptive difficulty |
+| `MAX_DIFFICULTY` | `28` | Upper clamp on the final difficulty (tier bump + `LOAD_LADDER` floor) |
 | `LOAD_LADDER` | _unset_ | Aggregate site-load difficulty floor. Comma-separated `threshold:difficulty` rungs, e.g. `200:20,500:22,1000:24` (thresholds are requests per `RATE_WINDOW_SECS` window; difficulty in leading zero bits). When the per-site request count crosses a rung, the floor is raised for every visitor. Composes with the per-request tier via `max()`, clamped to `MAX_DIFFICULTY`. Never blocks — only raises difficulty. Empty/unset = no floor. Malformed = boot panics. |
 | `CHALLENGE_TTL_SECS` | `300` | How long an issued puzzle is valid |
 | `CLEANUP_INTERVAL_SECS` | `60` | How often expired challenges are swept |
 | `TIER_CHECKBOX_MIN` | `20` | Score at/above which tier becomes `checkbox` |
 | `TIER_HARD_POW_MIN` | `40` | …becomes `hard_pow` (covers the whole 40–`TIER_BLOCK_MIN` band) |
 | `TIER_BLOCK_MIN` | `85` | …becomes `block` (returns 429) |
+| `IP_HARD_LIMIT` | `500` | Hard per-IP issuance cap: once an IP (IPv6: its /64 bucket) exceeds this many puzzle requests in the 60s rate window, further requests get `block` (429) regardless of score. `0` disables. Set `0` (or higher) when load-testing from a single IP. |
 | `VERIFY_SHADOW_MIN` | `30` | Verify-time score for shadow-fail (success returned, log emitted) |
 | `VERIFY_BLOCK_MIN` | `60` | Verify-time score for hard rejection |
+| `VERIFY_REQUIRE_BEHAVIOR` | `false` | When truthy, a verify request with no `behavior` blob scores +30 (like a flatline) instead of 0. Enable when every legitimate client is the bundled widget. |
 | `IP_REPUTATION_FILE` | _unset_ | Path to CIDR reputation list (signal off if unset) |
 | `TLS_FINGERPRINT_HEADER` | _unset_ | Header to read TLS fingerprint from (signal off if unset) |
 | `TLS_FINGERPRINT_FILE` | _unset_ | Path to known-bad fingerprint blocklist |
@@ -73,13 +74,13 @@ Base difficulty for `invisible_pass` tier. Each additional bit doubles expected 
 
 The default `18` trades a bit of bot resistance for materially better mobile UX. Bump to `20` if you have telemetry showing your audience is desktop-heavy.
 
-### `MIN_DIFFICULTY` (default `16`) / `MAX_DIFFICULTY` (default `28`)
-Clamp the final difficulty. The risk tier can bump difficulty above `DEFAULT_DIFFICULTY`:
+### `MAX_DIFFICULTY` (default `28`)
+Upper clamp on the final difficulty. The risk tier can bump difficulty above `DEFAULT_DIFFICULTY`:
 - `invisible_pass` → `DEFAULT_DIFFICULTY`
 - `checkbox` → `DEFAULT_DIFFICULTY + 2`
 - `hard_pow` → `DEFAULT_DIFFICULTY + 4`
 
-The result is clamped to `MAX_DIFFICULTY`. `MIN_DIFFICULTY` exists for the legacy `DifficultyCalculator` and currently has no effect on the risk pipeline (kept for backwards-compatible env API).
+The result (after composing with the `LOAD_LADDER` floor) is clamped to `MAX_DIFFICULTY`. There is no lower clamp — the former `MIN_DIFFICULTY` knob belonged to a superseded difficulty calculator and never affected the risk pipeline; it has been removed and is ignored if set.
 
 ### `LOAD_LADDER` (default _unset_)
 An **aggregate** site-load difficulty floor, separate from the per-request risk tier. Where the tier escalates an individual visitor based on who they are, the load floor raises difficulty for *everyone* when the whole site is hot — catching distributed floods where each IP looks individually benign but the site-wide request count is abnormal.
@@ -115,11 +116,15 @@ The puzzle-time scorer adds up contributions from each enabled signal and maps t
 
 Defaults: `20` / `40` / `85`.
 
+### `IP_HARD_LIMIT` (default `500`)
+
+A hard per-IP issuance cap that sits *outside* the scoring pipeline. The rate signal maxes out at +45, so a flood with clean browser headers can never reach `TIER_BLOCK_MIN` on its own — without this cap, a single host could request puzzles at line rate indefinitely (each request stores a challenge in memory and writes a decision-log row). Once an IP (IPv6: its /64 bucket) exceeds the cap within the 60s rate window, further requests are served the `block` tier (429) regardless of score; the window resets like any other rate counter. The default `500`/min is far above organic per-visitor traffic (the widget fetches one puzzle per page load), including large CGNAT egresses. Set `0` to disable — do this (or raise it) when driving load tests such as `examples/loadgen.rs` from a single IP.
+
 ### Puzzle-time signals
 
 | Signal | Max contribution | Enabled by |
 |---|---|---|
-| Rate (per-IP + per-site, 60s window) | 45 | Always on |
+| Rate (per-IP — IPv6 bucketed to /64 — + per-site, 60s window) | 45 | Always on |
 | Header anomaly (UA / Accept-Language / Accept-Encoding) | 50 | Always on |
 | IP reputation | 40 | `IP_REPUTATION_FILE` |
 | TLS fingerprint | 35 | `TLS_FINGERPRINT_HEADER` + `TRUSTED_PROXIES` |
@@ -144,6 +149,9 @@ At/above this, the request is shadow-failed: success is still returned to the ca
 ### `VERIFY_BLOCK_MIN` (default `60`)
 At/above this, the request is hard-rejected (`success: false`).
 
+### `VERIFY_REQUIRE_BEHAVIOR` (default `false`)
+By default, a verify request with no `behavior` blob at all contributes 0 — a deliberate allowance for server-to-server integrations and pre-blob clients. The flip side: a bot that skips the widget and hits the API directly opts out of the behavioral layer entirely. When every legitimate client is the bundled widget (which always sends the blob), set this truthy so an absent blob scores +30, same as a flatline — that alone lands in the shadow band, so rollout is observable before it costs anyone a pass. To make a missing blob hard-block instead, lower `VERIFY_BLOCK_MIN` to `30` alongside it.
+
 ### Verify-time signals
 
 | Signal | Score |
@@ -152,6 +160,7 @@ At/above this, the request is hard-rejected (`success: false`).
 | Time-on-page < 500ms | +50 |
 | Time-on-page < 2000ms | +25 |
 | Behavior: flatline (zero events) | +30 |
+| Behavior: blob absent (only with `VERIFY_REQUIRE_BEHAVIOR`) | +30 |
 | Behavior: click without pointer movement | +15 |
 | Behavior: sub-50ms first interaction | +20 |
 

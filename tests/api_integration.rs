@@ -13,7 +13,6 @@ use bollwark::puzzle::challenge::{
     PuzzleEngine, compute_argon2id, has_leading_zero_bits, solve_argon2id_challenge,
     solve_challenge,
 };
-use bollwark::puzzle::difficulty::DifficultyCalculator;
 use bollwark::puzzle::types::{Algorithm, Argon2idParams, PuzzleConfig};
 use bollwark::risk::{
     CidrListReputation, EscalationTier, FingerprintBlocklist, ReputationStore, RiskScorer,
@@ -62,6 +61,10 @@ struct TestAppBuilder {
     algorithm: Option<Algorithm>,
     /// `LOAD_LADDER` spec for the aggregate site-load difficulty floor.
     load_ladder: Option<&'static str>,
+    /// `IP_HARD_LIMIT` override (hard per-IP issuance cap; 0 disables).
+    ip_hard_limit: Option<u32>,
+    /// `VERIFY_REQUIRE_BEHAVIOR`: score an absent behavior blob as flatline.
+    verify_require_behavior: bool,
     /// Override the admin token. Default is the constant `TEST_ADMIN_TOKEN`,
     /// which `create_test_site` sends as a bearer to satisfy the gate.
     /// Set to `Some(None)` to disable the token entirely (so `/v1/sites`
@@ -93,18 +96,18 @@ impl TestAppBuilder {
         let config = AppConfig {
             puzzle_algorithm: algorithm,
             default_difficulty,
-            min_difficulty: 1,
             max_difficulty: 16,
             load_ladder,
             challenge_ttl_secs: 300,
             tls_fingerprint_header: self.tls_header.map(String::from),
+            ip_hard_limit: self
+                .ip_hard_limit
+                .unwrap_or(AppConfig::default().ip_hard_limit),
             ..AppConfig::default()
         };
         let puzzle_config = PuzzleConfig {
             algorithm: config.puzzle_algorithm,
             default_difficulty: config.default_difficulty,
-            min_difficulty: config.min_difficulty,
-            max_difficulty: config.max_difficulty,
             ttl_secs: 300,
         };
         let reputation = std::sync::Arc::new(match self.reputation_cidrs {
@@ -124,7 +127,10 @@ impl TestAppBuilder {
             reputation,
             tls_blocklist,
         );
-        let verify_scorer = VerifyScorer::new(verify_thresholds_from_config(&config));
+        let verify_scorer = VerifyScorer::new(
+            verify_thresholds_from_config(&config),
+            self.verify_require_behavior,
+        );
         let admin_token = match self.admin_token {
             Some(None) => None,
             Some(Some(t)) => Some(Arc::new(t.to_string())),
@@ -134,7 +140,6 @@ impl TestAppBuilder {
         let state = Arc::new(AppState {
             store: store.clone(),
             engine: PuzzleEngine::new(puzzle_config),
-            difficulty: DifficultyCalculator::new(&config),
             risk,
             verify_scorer,
             tls_fingerprint_header: self.tls_header.map(String::from),
@@ -688,6 +693,46 @@ async fn test_spam_plus_suspicious_ua_serves_hard_pow() {
 }
 
 #[tokio::test]
+async fn test_ip_hard_limit_caps_issuance_regardless_of_score() {
+    let app = test_app_with(|b| b.ip_hard_limit = Some(5));
+    let site = create_test_site(&app).await;
+    let key = site.site_key.to_string();
+
+    // Clean headers keep the risk score at ~0 — the scoring path alone
+    // would never block this client, which is exactly what the hard cap
+    // is for.
+    let flood_ip = "10.9.9.9";
+    for _ in 0..5 {
+        let req = puzzle_request(&key, Some(CLEAN_UA), Some(CLEAN_LANG), Some(CLEAN_ENC));
+        let (status, _) = send_puzzle(&app, with_connect_info_ip(req, flood_ip)).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    // Request 6 crosses IP_HARD_LIMIT=5 → forced Block tier → 429.
+    let req = puzzle_request(&key, Some(CLEAN_UA), Some(CLEAN_LANG), Some(CLEAN_ENC));
+    let (status, _) = send_puzzle(&app, with_connect_info_ip(req, flood_ip)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    // The cap is per-IP: a different client is unaffected.
+    let req = puzzle_request(&key, Some(CLEAN_UA), Some(CLEAN_LANG), Some(CLEAN_ENC));
+    let (status, _) = send_puzzle(&app, with_connect_info_ip(req, "10.9.9.10")).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_ip_hard_limit_zero_disables_cap() {
+    let app = test_app_with(|b| b.ip_hard_limit = Some(0));
+    let site = create_test_site(&app).await;
+    let key = site.site_key.to_string();
+
+    for _ in 0..12 {
+        let req = puzzle_request(&key, Some(CLEAN_UA), Some(CLEAN_LANG), Some(CLEAN_ENC));
+        let (status, _) = send_puzzle(&app, with_connect_info_ip(req, "10.9.9.11")).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+}
+
+#[tokio::test]
 async fn test_very_fast_submit_shadow_fails() {
     // No backdating: the challenge is issued and verified ~instantly, so the
     // server-derived time-on-page is well under 500ms → +50. With default
@@ -722,6 +767,81 @@ async fn test_very_fast_submit_shadow_fails() {
     let result: VerifyResponse = serde_json::from_slice(&body).unwrap();
     // ShadowFail returns success: true (caller doesn't see it; only the log does)
     assert!(result.success, "shadow-fail still returns success=true");
+}
+
+#[tokio::test]
+async fn test_require_behavior_blocks_blobless_fast_submit() {
+    // With VERIFY_REQUIRE_BEHAVIOR, an instant submit with no behavior blob
+    // stacks absent(+30) on time<500ms(+50) = 80 ≥ VERIFY_BLOCK_MIN(60) →
+    // Block (success=false). The same request with the flag off is only
+    // ShadowFail — covered by test_very_fast_submit_shadow_fails above.
+    let app = test_app_with(|b| b.verify_require_behavior = true);
+    let site = create_test_site(&app).await;
+    let (_, puzzle) = get_test_puzzle(&app, &site.site_key.to_string()).await;
+    let puzzle = puzzle.unwrap();
+    let nonce = solve_challenge(&puzzle.prefix, puzzle.difficulty);
+
+    let verify_body = serde_json::json!({
+        "challenge_id": puzzle.challenge_id,
+        "nonce": nonce,
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/verify")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", site.secret_key))
+        .body(Body::from(serde_json::to_vec(&verify_body).unwrap()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: VerifyResponse = serde_json::from_slice(&body).unwrap();
+    assert!(
+        !result.success,
+        "absent blob + instant submit must block when behavior is required"
+    );
+}
+
+#[tokio::test]
+async fn test_require_behavior_passes_widget_style_submit() {
+    // The flag must not penalize clients that do send the blob: organic
+    // behavior + realistic dwell scores 0 → Pass.
+    let (app, store) = test_app_with_store(|b| b.verify_require_behavior = true);
+    let site = create_test_site(&app).await;
+    let (_, puzzle) = get_test_puzzle(&app, &site.site_key.to_string()).await;
+    let puzzle = puzzle.unwrap();
+    backdate_challenge(&store, puzzle.challenge_id, 10).await;
+    let nonce = solve_challenge(&puzzle.prefix, puzzle.difficulty);
+
+    let verify_body = serde_json::json!({
+        "challenge_id": puzzle.challenge_id,
+        "nonce": nonce,
+        "behavior": {
+            "mouse_moves": 18,
+            "touches": 0,
+            "interactions": 3,
+            "first_interaction_ms": 900,
+            "webdriver": false,
+        },
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/verify")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", site.secret_key))
+        .body(Body::from(serde_json::to_vec(&verify_body).unwrap()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: VerifyResponse = serde_json::from_slice(&body).unwrap();
+    assert!(result.success);
 }
 
 #[tokio::test]

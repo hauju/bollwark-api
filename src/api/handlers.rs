@@ -69,6 +69,18 @@ pub async fn get_puzzle(
     };
     let score = state.risk.score(&ctx);
 
+    // Hard per-IP issuance cap (IP_HARD_LIMIT): a flood with clean browser
+    // headers never reaches TIER_BLOCK_MIN through scoring (the rate signal
+    // maxes at +45), so without this an attacker mints challenges at line
+    // rate — each one stored in memory and logged. Overriding the tier
+    // reuses the whole Block path below: 429 body, decision log, tracing.
+    let hard_capped = state.config.ip_hard_limit > 0 && ip_count > state.config.ip_hard_limit;
+    let tier = if hard_capped {
+        EscalationTier::Block
+    } else {
+        score.tier
+    };
+
     // Aggregate site-load floor: when the whole site is under load, raise PoW
     // difficulty for every visitor regardless of their individual risk score.
     // It composes with the per-request tier via max() and never blocks — Block
@@ -79,12 +91,12 @@ pub async fn get_puzzle(
     // Block is the only tier that doesn't issue a PoW puzzle (it rejects
     // with 429 below). Every other tier maps to a difficulty here.
     let maybe_difficulty = difficulty_for(
-        score.tier,
+        tier,
         state.config.default_difficulty,
         state.config.max_difficulty,
     )
     .map(|d| d.max(load_floor).min(state.config.max_difficulty));
-    let outcome = match score.tier {
+    let outcome = match tier {
         EscalationTier::Block => "rejected",
         _ => "issued",
     };
@@ -97,7 +109,8 @@ pub async fn get_puzzle(
         ip_count,
         site_count,
         score = score.total,
-        tier = ?score.tier,
+        tier = ?tier,
+        hard_capped,
         difficulty = maybe_difficulty.unwrap_or(0),
         load_floor,
         sig_rate = score.breakdown.rate,
@@ -130,7 +143,7 @@ pub async fn get_puzzle(
     }
     .to_string();
 
-    if score.tier == EscalationTier::Block {
+    if tier == EscalationTier::Block {
         if let Some(log) = &state.decision_log {
             log.record_puzzle(PuzzleRecord {
                 challenge_id: None,
@@ -139,7 +152,7 @@ pub async fn get_puzzle(
                 ip_count,
                 site_count,
                 score: score.total,
-                tier: score.tier,
+                tier,
                 difficulty: 0,
                 outcome: "rejected",
                 breakdown: score.breakdown,
@@ -153,7 +166,7 @@ pub async fn get_puzzle(
         // this is exactly when the user is most likely to want them.
         let body = BlockedResponse {
             error: CaptchaError::RateLimited.to_string(),
-            tier: score.tier,
+            tier,
             info_urls: state.info_urls.clone(),
         };
         return Ok((StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response());
@@ -172,7 +185,7 @@ pub async fn get_puzzle(
             ip_count,
             site_count,
             score: score.total,
-            tier: score.tier,
+            tier,
             difficulty: challenge.difficulty,
             outcome: "issued",
             breakdown: score.breakdown,
@@ -189,7 +202,7 @@ pub async fn get_puzzle(
         difficulty: challenge.difficulty,
         expires_at: challenge.expires_at.to_rfc3339(),
         expires_in_secs: state.config.challenge_ttl_secs,
-        tier: score.tier,
+        tier,
         info_urls: state.info_urls.clone(),
     };
 

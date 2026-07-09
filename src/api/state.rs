@@ -4,7 +4,6 @@ use crate::api::types::InfoUrls;
 use crate::config::AppConfig;
 use crate::dashboard::DecisionLog;
 use crate::puzzle::challenge::PuzzleEngine;
-use crate::puzzle::difficulty::DifficultyCalculator;
 use crate::risk::{RiskScorer, TierThresholds, TrustedProxies, VerifyScorer, VerifyThresholds};
 use crate::storage::memory::InMemoryStore;
 
@@ -13,7 +12,6 @@ pub type SharedState = Arc<AppState>;
 pub struct AppState {
     pub store: Arc<InMemoryStore>,
     pub engine: PuzzleEngine,
-    pub difficulty: DifficultyCalculator,
     pub risk: RiskScorer,
     pub verify_scorer: VerifyScorer,
     /// Header name to read for TLS fingerprint (e.g. `x-ja4`). `None` disables

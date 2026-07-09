@@ -62,8 +62,6 @@ pub struct Solution {
 pub struct PuzzleConfig {
     pub algorithm: Algorithm,
     pub default_difficulty: u32,
-    pub min_difficulty: u32,
-    pub max_difficulty: u32,
     pub ttl_secs: u64,
 }
 
@@ -72,8 +70,6 @@ impl Default for PuzzleConfig {
         Self {
             algorithm: Algorithm::Sha256,
             default_difficulty: 20,
-            min_difficulty: 16,
-            max_difficulty: 28,
             ttl_secs: 300,
         }
     }

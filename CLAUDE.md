@@ -21,7 +21,7 @@ A `justfile` wraps these (`just build`, `just test`, `just lint`, `just ci`). `j
 ### Observability & validation harnesses
 
 - `LOG_FORMAT=json cargo run` emits structured JSONL on stderr. Decision events: `event=puzzle_decision` (per `/v1/puzzle`, with score / tier / signal breakdown / outcome=`issued|rejected`) and `event=verify_decision` (per `/v1/verify`, with score / decision-derived outcome=`pass|shadow_fail|block|pow_invalid` and the verify-side breakdown). Use `jq -c 'select(.event == "puzzle_decision")'` for clean parsing.
-- `cargo run --release --example loadgen -- --base http://127.0.0.1:3000 --requests 200 --concurrency 16` drives 4 synthetic scenarios (`happy`, `no_ua`, `burst`, `full_solve`) and prints latency percentiles + tier distribution per scenario. Use `--only` to pick a subset. `full_solve` does real PoW on the client, so run the server with `DEFAULT_DIFFICULTY=12 MIN_DIFFICULTY=8 MAX_DIFFICULTY=16` to keep solve times sub-second.
+- `cargo run --release --example loadgen -- --base http://127.0.0.1:3000 --requests 200 --concurrency 16` drives 4 synthetic scenarios (`happy`, `no_ua`, `burst`, `full_solve`) and prints latency percentiles + tier distribution per scenario. Use `--only` to pick a subset. `full_solve` does real PoW on the client, so run the server with `DEFAULT_DIFFICULTY=12 MAX_DIFFICULTY=16` to keep solve times sub-second. Also set `IP_HARD_LIMIT=0` — loadgen drives everything from one IP, which otherwise trips the per-IP issuance cap (default 500/min) partway through and skews results with 429s.
 - `cd e2e && bun install && bunx playwright install chromium && bun run test` runs Playwright against `static/testsite.html`. Auto-spawns `cargo run` itself; set `CAPTCHA_REUSE_SERVER=1` to reuse a server you already started (so you can capture its JSONL).
 
 ## Configuration
@@ -30,11 +30,13 @@ All runtime config is via environment variables; every setting has a default. **
 
 - `LISTEN_ADDR` (default `0.0.0.0:3000`), `RUST_LOG` (default `info`)
 - `PUZZLE_ALGORITHM` (default `sha256`; alternative `argon2id`). When `argon2id` is selected, `ARGON2_M_COST` / `ARGON2_T_COST` / `ARGON2_P_COST` (defaults `8192`/`2`/`1`) tune memory/iterations/lanes — and `DEFAULT_DIFFICULTY` should be dropped to ~4–6 since each hash is much more expensive than SHA-256.
-- `DEFAULT_DIFFICULTY` / `MIN_DIFFICULTY` / `MAX_DIFFICULTY` — PoW difficulty in leading zero bits (default `18` / `16` / `28`)
+- `DEFAULT_DIFFICULTY` / `MAX_DIFFICULTY` — base PoW difficulty and upper clamp, in leading zero bits (default `18` / `28`)
 - `LOAD_LADDER` (default unset) — aggregate site-load difficulty floor: `threshold:difficulty` rungs (e.g. `200:20,500:22`) that raise PoW difficulty for *every* visitor once per-site request count crosses a threshold. Composes with the per-request tier via `max()`, never blocks. Implemented in `risk/load.rs` (`LoadLadder`), applied in the puzzle handler.
 - `CHALLENGE_TTL_SECS` / `CLEANUP_INTERVAL_SECS` — challenge expiry + sweeper cadence
 - `TIER_CHECKBOX_MIN` / `TIER_HARD_POW_MIN` / `TIER_BLOCK_MIN` — puzzle-time score → tier thresholds (defaults `20`/`40`/`85`)
+- `IP_HARD_LIMIT` (default `500`, `0` disables) — hard per-IP issuance cap outside the scoring pipeline: past this many puzzle requests per 60s window from one IP (IPv6: /64 bucket), the handler forces the Block tier (429) regardless of score. Exists because the rate signal maxes at +45 — a clean-header flood never reaches `TIER_BLOCK_MIN` on its own.
 - `VERIFY_SHADOW_MIN` / `VERIFY_BLOCK_MIN` — verify-time score thresholds (defaults `30` / `60`)
+- `VERIFY_REQUIRE_BEHAVIOR` (default `false`) — score an absent verify-time `behavior` blob as flatline (+30) instead of 0. For deployments where every legit client is the bundled widget; keeps direct-API bots from opting out of the behavioral layer. +30 alone is shadow-band; pair with `VERIFY_BLOCK_MIN=30` to hard-block.
 - Privacy posture: the service is **cookie-free** (no client-side storage, no consent banner) and runs every signal under legitimate interest with data minimization. There is no global scoring toggle — each signal self-gates on its own input (header anomaly always computes; IP reputation is 0 without `IP_REPUTATION_FILE`; TLS fingerprint is 0 unless a trusted proxy supplies the header).
 - Optional signal inputs, each disabled when its env var is unset: `IP_REPUTATION_FILE`, `TLS_FINGERPRINT_HEADER` (+ `TLS_FINGERPRINT_FILE`, `TRUSTED_PROXIES`).
 - Provisioning + persistence: `ADMIN_TOKEN` gates `POST /v1/sites` (returns 404 when unset — no anonymous provisioning) and `/v1/admin/*`. `SITE_DB_PATH` enables SQLite-backed site persistence; without it sites are in-memory only. `CORS_ALLOWED_ORIGINS` is a comma/whitespace allowlist for `GET /v1/puzzle`; other routes never get CORS. `DEV_DISABLE_ADMIN_AUTH=1` (debug builds only) lets local dev/Playwright call `POST /v1/sites` without a bearer; never affects `/v1/admin/*`.
@@ -55,7 +57,7 @@ Two scoring passes bracket every successful solve:
 
 ### Module Layout
 
-- **`puzzle/`** — Core puzzle engine. `challenge.rs` generates and verifies PoW puzzles: `generate()` + `verify()` dispatch on `Algorithm` (SHA-256 via `compute_sha256` or Argon2id via `compute_argon2id`) and reuse `has_leading_zero_bits()` for both. `difficulty.rs` is the legacy adaptive-difficulty calculator (still constructed in `AppState` but superseded by the risk pipeline). `solve_challenge()` / `solve_argon2id_challenge()` are brute-force solvers used only in tests.
+- **`puzzle/`** — Core puzzle engine. `challenge.rs` generates and verifies PoW puzzles: `generate()` + `verify()` dispatch on `Algorithm` (SHA-256 via `compute_sha256` or Argon2id via `compute_argon2id`) and reuse `has_leading_zero_bits()` for both. `solve_challenge()` / `solve_argon2id_challenge()` are brute-force solvers used only in tests.
 - **`risk/`** — Scoring + escalation. Each signal lives in its own module so it can be disabled by config:
   - `signals.rs` — always-on scorers: `score_rate` (per-IP + per-site, 60s window) and `score_header_anomaly` (UA / Accept-Language / Accept-Encoding).
   - `reputation.rs` — `CidrListReputation` loaded from `IP_REPUTATION_FILE`; categories `tor`/`datacenter`/`vpn`/`residential`.

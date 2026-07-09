@@ -13,7 +13,8 @@ pub struct AppConfig {
     /// 4–6 leading zero bits is comparable to SHA-256's default 20 bits.
     pub puzzle_algorithm: Algorithm,
     pub default_difficulty: u32,
-    pub min_difficulty: u32,
+    /// Upper clamp on the final PoW difficulty after the tier bump and the
+    /// `LOAD_LADDER` floor are applied.
     pub max_difficulty: u32,
     /// Aggregate site-load difficulty floor. When the per-site request count in
     /// the rate window crosses a configured threshold, the PoW difficulty is
@@ -26,6 +27,14 @@ pub struct AppConfig {
     pub tier_checkbox_min: u32,
     pub tier_hard_pow_min: u32,
     pub tier_block_min: u32,
+    /// Hard per-IP issuance cap: once an IP (IPv6: its /64 bucket) exceeds
+    /// this many puzzle requests in the 60s rate window, further requests get
+    /// the Block tier (429) regardless of score. Risk scoring alone can't
+    /// block a flood with clean browser headers (rate maxes at +45, below
+    /// `TIER_BLOCK_MIN`), so without this cap a single host can mint
+    /// challenges at line rate. Default 500 — far above organic per-IP
+    /// traffic, low enough to bound memory/log growth. `0` disables.
+    pub ip_hard_limit: u32,
     /// Path to a CIDR reputation file. If unset, the IP reputation signal contributes 0.
     pub ip_reputation_file: Option<String>,
     /// Verify-time score at/above which the request is shadow-failed (success
@@ -33,6 +42,14 @@ pub struct AppConfig {
     pub verify_shadow_min: u32,
     /// Verify-time score at/above which the request is hard-rejected. Default 60.
     pub verify_block_min: u32,
+    /// When true, a verify request with no `behavior` blob at all scores like
+    /// a flatline (+30) instead of 0. Off by default so server-to-server
+    /// integrations aren't penalized; turn it on when every legitimate client
+    /// is the bundled widget (which always sends the blob) — otherwise the
+    /// behavioral layer is opt-in for attackers hitting the API directly.
+    /// +30 alone lands in the shadow band; combine with a lower
+    /// `VERIFY_BLOCK_MIN` to make a missing blob hard-block.
+    pub verify_require_behavior: bool,
     /// Header name carrying the TLS fingerprint set by a trusted reverse proxy
     /// (e.g. `x-ja4`). If unset, the TLS fingerprint signal is disabled.
     pub tls_fingerprint_header: Option<String>,
@@ -111,10 +128,6 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(18),
-            min_difficulty: env::var("MIN_DIFFICULTY")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(16),
             max_difficulty: env::var("MAX_DIFFICULTY")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -140,6 +153,10 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(85),
+            ip_hard_limit: env::var("IP_HARD_LIMIT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(500),
             ip_reputation_file: env::var("IP_REPUTATION_FILE").ok(),
             verify_shadow_min: env::var("VERIFY_SHADOW_MIN")
                 .ok()
@@ -149,6 +166,9 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(60),
+            verify_require_behavior: parse_truthy(
+                env::var("VERIFY_REQUIRE_BEHAVIOR").ok().as_deref(),
+            ),
             tls_fingerprint_header: env::var("TLS_FINGERPRINT_HEADER").ok(),
             tls_fingerprint_file: env::var("TLS_FINGERPRINT_FILE").ok(),
             trusted_proxies: env::var("TRUSTED_PROXIES").ok(),
@@ -228,7 +248,6 @@ impl Default for AppConfig {
             listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
             puzzle_algorithm: Algorithm::Sha256,
             default_difficulty: 18,
-            min_difficulty: 16,
             max_difficulty: 28,
             load_ladder: LoadLadder::default(),
             challenge_ttl_secs: 300,
@@ -236,9 +255,11 @@ impl Default for AppConfig {
             tier_checkbox_min: 20,
             tier_hard_pow_min: 40,
             tier_block_min: 85,
+            ip_hard_limit: 500,
             ip_reputation_file: None,
             verify_shadow_min: 30,
             verify_block_min: 60,
+            verify_require_behavior: false,
             tls_fingerprint_header: None,
             tls_fingerprint_file: None,
             trusted_proxies: None,

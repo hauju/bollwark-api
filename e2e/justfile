@@ -40,7 +40,7 @@ validate REQUESTS="200":
     # tracing-subscriber's fmt subscriber writes to stdout — capture both streams
     # since cargo also prints status messages to stderr.
     LOG_FORMAT=json RUST_LOG=info,bollwark=debug \
-      DEFAULT_DIFFICULTY=12 MIN_DIFFICULTY=8 MAX_DIFFICULTY=16 \
+      DEFAULT_DIFFICULTY=12 MAX_DIFFICULTY=16 \
       cargo run --quiet &> e2e/run.jsonl &
     SERVER=$!
     trap "kill $SERVER 2>/dev/null || true; wait 2>/dev/null || true" EXIT
