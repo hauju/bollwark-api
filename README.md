@@ -153,3 +153,7 @@ A `justfile` wraps these (`just build`, `just test`, `just lint`, `just ci`).
 - **Playwright e2e** — `cd e2e && bun install && bunx playwright install chromium && bun run test`. Auto-spawns `cargo run`; set `CAPTCHA_REUSE_SERVER=1` to reuse a server you started yourself (so you can capture its JSONL).
 
 Requires Rust 1.85+ (edition 2024).
+
+## License
+
+MIT — see [LICENSE](LICENSE). The vendored `static/vendor/argon2.umd.min.js` (hash-wasm) is also MIT; see `static/vendor/README.md`.
