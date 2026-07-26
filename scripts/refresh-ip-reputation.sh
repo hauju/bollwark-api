@@ -12,7 +12,7 @@
 # Bootstrap (first run also creates the file):
 #   sudo mkdir -p /etc/bollwark
 #   sudo scripts/refresh-ip-reputation.sh
-#   IP_REPUTATION_FILE=/etc/bollwark/ip_reputation.txt FULL_FINGERPRINT_MODE=1 cargo run
+#   IP_REPUTATION_FILE=/etc/bollwark/ip_reputation.txt cargo run
 #
 # Cron (hourly is fine — Tor exits churn slowly, cloud ranges shift weekly):
 #   0 * * * * /opt/bollwark/scripts/refresh-ip-reputation.sh \

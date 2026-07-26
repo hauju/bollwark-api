@@ -1,9 +1,12 @@
+pub mod extract;
 pub mod handlers;
-pub mod middleware;
 pub mod state;
 pub mod types;
 
+use std::time::Duration;
+
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::http::HeaderValue;
 use axum::http::Method;
 use axum::http::StatusCode;
@@ -13,6 +16,7 @@ use axum::routing::{get, post};
 use tower::ServiceBuilder;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::ServeDir;
+use tower_http::timeout::{RequestBodyTimeoutLayer, TimeoutLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::dashboard::routes::AdminState;
@@ -21,6 +25,8 @@ use state::SharedState;
 pub fn router(state: SharedState, admin: Option<AdminState>) -> Router {
     let cors = build_cors_layer(state.config.cors_allowed_origins.as_deref());
     let asset_cors = build_cors_layer(state.config.cors_allowed_origins.as_deref());
+    let static_dir = state.config.static_dir.clone();
+    let landing_path = format!("{static_dir}/landing.html");
 
     // Public CORS-enabled surface: just the puzzle endpoint. Browser widgets
     // hosted on a different origin from the captcha service need to fetch it.
@@ -34,7 +40,16 @@ pub fn router(state: SharedState, admin: Option<AdminState>) -> Router {
     // response), which is what we want for `/v1/verify` (site secret) and
     // `/v1/sites` (admin token).
     let internal = Router::new()
-        .route("/v1/verify", post(handlers::verify))
+        .route(
+            "/v1/verify",
+            post(handlers::verify)
+                // A legitimate verify body is a hex token plus a small behaviour
+                // blob — a few hundred bytes. Axum's 2 MB default let an
+                // unauthenticated caller force a 2 MB read plus a ~1 MB
+                // `hex::decode` allocation per request before the bearer check
+                // ever runs; 8 KiB is generous for the real payload.
+                .layer(DefaultBodyLimit::max(VERIFY_BODY_LIMIT_BYTES)),
+        )
         .route("/v1/sites", post(handlers::create_site))
         .with_state(state);
 
@@ -42,7 +57,7 @@ pub fn router(state: SharedState, admin: Option<AdminState>) -> Router {
         // Marketing landing page at `/`. Static file read on each request —
         // tiny overhead, lets operators edit `static/landing.html` without
         // recompiling. Failing to read falls back to a redirect to `/static/`.
-        .route("/", get(landing))
+        .route("/", get(move || landing(landing_path.clone())))
         // Liveness probe for load balancers / orchestrators. No auth, no
         // state read — returns immediately. We deliberately don't expose
         // dependency health (SQLite, etc.) here: a degraded backend
@@ -55,7 +70,7 @@ pub fn router(state: SharedState, admin: Option<AdminState>) -> Router {
             "/static",
             ServiceBuilder::new()
                 .layer(asset_cors)
-                .service(ServeDir::new("static")),
+                .service(ServeDir::new(&static_dir)),
         );
 
     if let Some(admin) = admin {
@@ -63,15 +78,46 @@ pub fn router(state: SharedState, admin: Option<AdminState>) -> Router {
         app = app.merge(crate::dashboard::routes::router(admin));
     }
 
-    app.layer(TraceLayer::new_for_http())
+    // Outermost layers, applied to every route.
+    //
+    // Neither hyper nor axum imposes any deadline by default, so before this a
+    // request that never finished was held open indefinitely — one task, one fd
+    // and one read buffer per connection, for free, until the process ran out of
+    // descriptors.
+    //
+    // Scope worth being precise about: these bound the time from when the
+    // request reaches the service (body read + handler). They do NOT bound a
+    // client that dribbles out its *headers*, because hyper parses those before
+    // the tower stack is entered. Classic slowloris therefore still has to be
+    // handled at the reverse proxy — see the deployment notes.
+    app.layer(TimeoutLayer::with_status_code(
+        StatusCode::REQUEST_TIMEOUT,
+        Duration::from_secs(REQUEST_TIMEOUT_SECS),
+    ))
+    .layer(RequestBodyTimeoutLayer::new(Duration::from_secs(
+        BODY_READ_TIMEOUT_SECS,
+    )))
+    .layer(TraceLayer::new_for_http())
 }
+
+/// Deadline for a single request once it reaches the service: body read plus
+/// handler execution. Generous enough for a queued Argon2id verification behind
+/// a full permit set, short enough that a stalled client can't pin resources.
+const REQUEST_TIMEOUT_SECS: u64 = 15;
+
+/// Deadline for streaming in a request body.
+const BODY_READ_TIMEOUT_SECS: u64 = 10;
+
+/// Body cap for `/v1/verify`. A widget token plus a behaviour blob is a few
+/// hundred bytes; this leaves an order of magnitude of headroom.
+const VERIFY_BODY_LIMIT_BYTES: usize = 8 * 1024;
 
 async fn healthz() -> (StatusCode, &'static str) {
     (StatusCode::OK, "ok")
 }
 
-async fn landing() -> Response {
-    match tokio::fs::read_to_string("static/landing.html").await {
+async fn landing(path: String) -> Response {
+    match tokio::fs::read_to_string(&path).await {
         Ok(body) => Html(body).into_response(),
         Err(_) => (StatusCode::NOT_FOUND, "landing page not found").into_response(),
     }

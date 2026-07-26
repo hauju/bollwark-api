@@ -72,8 +72,16 @@ impl VerifyRequest {
     /// Resolve into the normalised fields. Decodes the opaque token when
     /// present, otherwise falls back to the explicit fields.
     pub fn resolve(self) -> Result<ResolvedVerify, CaptchaError> {
-        if let Some(token) = self.token.as_deref() {
-            let bytes = hex::decode(token.trim())
+        // Treat an empty/whitespace token as absent so a caller that sends
+        // `"token": ""` alongside explicit `challenge_id`/`nonce` falls through
+        // to those fields instead of failing on an unparsable empty token.
+        if let Some(token) = self
+            .token
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            let bytes = hex::decode(token)
                 .map_err(|_| CaptchaError::BadRequest("invalid captcha token".into()))?;
             let p: TokenPayload = serde_json::from_slice(&bytes)
                 .map_err(|_| CaptchaError::BadRequest("invalid captcha token".into()))?;
@@ -100,6 +108,10 @@ impl VerifyRequest {
 #[derive(Debug, Deserialize)]
 pub struct CreateSiteRequest {
     pub name: String,
+    /// Optional browser-origin allowlist (`http(s)://host[:port]` entries).
+    /// Empty/omitted = allow any origin. Validated + normalized in the handler.
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
 }
 
 // --- Responses ---
@@ -158,4 +170,52 @@ pub struct VerifyResponse {
 pub struct CreateSiteResponse {
     pub site_key: Uuid,
     pub secret_key: String,
+    /// Echoes back the normalized origin allowlist (empty = any origin).
+    pub allowed_origins: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_empty_token_falls_through_to_explicit_fields() {
+        // `"token": ""` must not shadow the explicit challenge_id/nonce.
+        let cid = Uuid::new_v4();
+        let req = VerifyRequest {
+            token: Some(String::new()),
+            challenge_id: Some(cid),
+            nonce: 42,
+            honeypot: None,
+            behavior: None,
+        };
+        let resolved = req.resolve().expect("empty token falls through");
+        assert_eq!(resolved.challenge_id, cid);
+        assert_eq!(resolved.nonce, 42);
+    }
+
+    #[test]
+    fn resolve_whitespace_token_falls_through() {
+        let cid = Uuid::new_v4();
+        let req = VerifyRequest {
+            token: Some("   ".into()),
+            challenge_id: Some(cid),
+            nonce: 7,
+            honeypot: None,
+            behavior: None,
+        };
+        assert_eq!(req.resolve().unwrap().challenge_id, cid);
+    }
+
+    #[test]
+    fn resolve_missing_token_and_challenge_id_is_bad_request() {
+        let req = VerifyRequest {
+            token: None,
+            challenge_id: None,
+            nonce: 0,
+            honeypot: None,
+            behavior: None,
+        };
+        assert!(matches!(req.resolve(), Err(CaptchaError::BadRequest(_))));
+    }
 }

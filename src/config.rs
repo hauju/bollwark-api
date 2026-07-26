@@ -7,10 +7,13 @@ use crate::risk::LoadLadder;
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub listen_addr: SocketAddr,
-    /// PoW algorithm for new challenges. `sha256` (default) or `argon2id`.
-    /// When set to `argon2id`, lower the difficulty knobs accordingly —
-    /// each Argon2id hash is orders of magnitude slower than SHA-256, so
-    /// 4–6 leading zero bits is comparable to SHA-256's default 20 bits.
+    /// Filesystem directory holding the bundled widget assets and landing page.
+    /// Resolved relative to the process working directory unless absolute.
+    pub static_dir: String,
+    /// PoW algorithm for new challenges. `argon2id` (default) or `sha256`.
+    /// The difficulty defaults below track the algorithm — each Argon2id
+    /// hash is orders of magnitude slower than SHA-256, so argon2id's
+    /// default 5 leading zero bits is comparable to SHA-256's default 18.
     pub puzzle_algorithm: Algorithm,
     pub default_difficulty: u32,
     /// Upper clamp on the final PoW difficulty after the tier bump and the
@@ -23,17 +26,31 @@ pub struct AppConfig {
     /// only raises difficulty, composed with the per-request tier via `max()`.
     pub load_ladder: LoadLadder,
     pub challenge_ttl_secs: u64,
+    /// Cadence of the background sweeper that reclaims expired challenges and
+    /// stale rate-window entries. Coerced to at least 1s — `tokio::time::interval`
+    /// panics on a zero period, which would silently kill the only reclaimer
+    /// and let the in-memory maps grow unbounded.
     pub cleanup_interval_secs: u64,
+    /// Global ceiling on the number of challenges held in memory at once. Once
+    /// reached, `GET /v1/puzzle` sheds new issuance via the Block tier (429)
+    /// regardless of per-IP score — a memory backstop against a distributed
+    /// flood (or an IPv6 /64-spread attacker) that stays under `IP_HARD_LIMIT`
+    /// per source. Default 1_000_000 (~200 MB of challenges); `0` disables the
+    /// cap and skips the per-request count check entirely.
+    pub max_active_challenges: usize,
     pub tier_checkbox_min: u32,
     pub tier_hard_pow_min: u32,
     pub tier_block_min: u32,
     /// Hard per-IP issuance cap: once an IP (IPv6: its /64 bucket) exceeds
-    /// this many puzzle requests in the 60s rate window, further requests get
-    /// the Block tier (429) regardless of score. Risk scoring alone can't
-    /// block a flood with clean browser headers (rate maxes at +45, below
-    /// `TIER_BLOCK_MIN`), so without this cap a single host can mint
-    /// challenges at line rate. Default 500 — far above organic per-IP
-    /// traffic, low enough to bound memory/log growth. `0` disables.
+    /// this many puzzle requests in the 60s rate window, further requests are
+    /// throttled to a **max-difficulty** PoW regardless of score (not a 429).
+    /// Risk scoring alone can't escalate a flood with clean browser headers
+    /// (rate maxes at +45, below `TIER_BLOCK_MIN`). A hard block would also
+    /// punish shared-IP populations (CGNAT / corporate NAT) with no recourse,
+    /// so this throttles instead — max PoW slows an abuser while a legitimate
+    /// user still gets through. Memory growth is bounded separately by
+    /// `MAX_ACTIVE_CHALLENGES`. Default 500 — far above organic per-IP
+    /// traffic. `0` disables.
     pub ip_hard_limit: u32,
     /// Path to a CIDR reputation file. If unset, the IP reputation signal contributes 0.
     pub ip_reputation_file: Option<String>,
@@ -42,6 +59,11 @@ pub struct AppConfig {
     pub verify_shadow_min: u32,
     /// Verify-time score at/above which the request is hard-rejected. Default 60.
     pub verify_block_min: u32,
+    /// Max failed PoW attempts a single challenge tolerates before the store
+    /// evicts it. A wrong nonce leaves the challenge live for legitimate retry,
+    /// so without this one challenge could absorb unlimited (with `argon2id`,
+    /// memory-hard) verify attempts. Default 10; `0` disables the cap.
+    pub verify_max_attempts: u32,
     /// When true, a verify request with no `behavior` blob at all scores like
     /// a flatline (+30) instead of 0. Off by default so server-to-server
     /// integrations aren't penalized; turn it on when every legitimate client
@@ -118,20 +140,26 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn from_env() -> Self {
+        // Parse the algorithm first: the difficulty defaults are tuned per
+        // algorithm (SHA-256 and Argon2id differ by orders of magnitude in
+        // per-hash cost), so an unset DEFAULT_DIFFICULTY / MAX_DIFFICULTY must
+        // follow the selected algorithm.
+        let puzzle_algorithm = parse_algorithm_from_env();
         Self {
             listen_addr: env::var("LISTEN_ADDR")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 3000))),
-            puzzle_algorithm: parse_algorithm_from_env(),
+            static_dir: env::var("STATIC_DIR").unwrap_or_else(|_| "static".to_string()),
+            puzzle_algorithm,
             default_difficulty: env::var("DEFAULT_DIFFICULTY")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(18),
+                .unwrap_or_else(|| default_difficulty_for(puzzle_algorithm)),
             max_difficulty: env::var("MAX_DIFFICULTY")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(28),
+                .unwrap_or_else(|| max_difficulty_for(puzzle_algorithm)),
             load_ladder: parse_load_ladder(),
             challenge_ttl_secs: env::var("CHALLENGE_TTL_SECS")
                 .ok()
@@ -140,7 +168,12 @@ impl AppConfig {
             cleanup_interval_secs: env::var("CLEANUP_INTERVAL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(60),
+                .unwrap_or(60)
+                .max(1),
+            max_active_challenges: env::var("MAX_ACTIVE_CHALLENGES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1_000_000),
             tier_checkbox_min: env::var("TIER_CHECKBOX_MIN")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -166,6 +199,10 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(60),
+            verify_max_attempts: env::var("VERIFY_MAX_ATTEMPTS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10),
             verify_require_behavior: parse_truthy(
                 env::var("VERIFY_REQUIRE_BEHAVIOR").ok().as_deref(),
             ),
@@ -194,8 +231,98 @@ impl AppConfig {
                 .unwrap_or(72),
             geoip_db_path: env::var("GEOIP_DB_PATH").ok(),
         }
+        .validated()
+    }
+
+    /// Boot-time validation for settings where a single mistyped env var leaves
+    /// the process running and apparently healthy while providing zero
+    /// protection — the worst failure mode a CAPTCHA has, because the operator
+    /// stops watching. Each check below guards a value that is silent when
+    /// wrong: a difficulty of 0 passes every visitor without computing a hash,
+    /// out-of-range Argon2 params make every verification fail forever, and an
+    /// overflowing TTL or retention window panics a handler or a background
+    /// sweeper with no further log line.
+    ///
+    /// Panics with an actionable message rather than clamping, matching the
+    /// fail-loud stance of `parse_info_url` and `parse_load_ladder`: silently
+    /// correcting a security-relevant value hides the misconfiguration instead
+    /// of surfacing it.
+    fn validated(self) -> Self {
+        // `difficulty_for` computes `default + tier_bump`, clamped by `max`, so
+        // the lowest difficulty any tier can produce is `min(default, max)`.
+        // Either being 0 means `has_leading_zero_bits(_, 0)` returns true for
+        // every hash — the PoW is disabled for everyone, with no error.
+        if self.default_difficulty < MIN_DIFFICULTY || self.max_difficulty < MIN_DIFFICULTY {
+            panic!(
+                "DEFAULT_DIFFICULTY={} / MAX_DIFFICULTY={} — both must be at least {MIN_DIFFICULTY}. \
+                 A difficulty of 0 accepts any nonce without computing a hash, so every visitor \
+                 (including every bot) passes the proof-of-work. Note MAX_DIFFICULTY clamps \
+                 DEFAULT_DIFFICULTY, so setting it to 0 disables the PoW even when \
+                 DEFAULT_DIFFICULTY looks correct.",
+                self.default_difficulty, self.max_difficulty
+            );
+        }
+
+        // Argon2 rejects out-of-range costs at hash time, and `compute_argon2id`
+        // degrades that to `None` → `verify() == false`. The server would boot
+        // cleanly, advertise the invalid params to every browser, and reject
+        // every correct solution forever without logging a reason.
+        if let Algorithm::Argon2id(p) = self.puzzle_algorithm
+            && let Err(e) = argon2::Params::new(p.m_cost, p.t_cost, p.p_cost, None)
+        {
+            panic!(
+                "ARGON2_M_COST={} / ARGON2_T_COST={} / ARGON2_P_COST={} is not a valid Argon2id \
+                 parameter set: {e}. The server would start and hand these to every browser, then \
+                 fail *every* verification with no error. Valid ranges: m_cost >= {} KiB, \
+                 t_cost >= 1, p_cost >= 1.",
+                p.m_cost,
+                p.t_cost,
+                p.p_cost,
+                argon2::Params::MIN_M_COST,
+            );
+        }
+
+        // `generate()` computes `now + Duration::seconds(ttl as i64)`, which
+        // panics on overflow — taking down every /v1/puzzle request while
+        // /healthz still reports 200.
+        if self.challenge_ttl_secs == 0 || self.challenge_ttl_secs > MAX_CHALLENGE_TTL_SECS {
+            panic!(
+                "CHALLENGE_TTL_SECS={} is out of range (expected 1..={MAX_CHALLENGE_TTL_SECS}). \
+                 A TTL of 0 expires every challenge before the client can solve it; an oversized \
+                 value overflows the expiry timestamp and panics every puzzle request.",
+                self.challenge_ttl_secs
+            );
+        }
+
+        // `DecisionLog::prune` builds a `chrono::Duration::hours`, which panics
+        // above ~2.56e12 hours. The retention sweeper would die on its first
+        // tick while the process stays up, so the log grows unbounded and
+        // storage-limitation is silently unenforced.
+        if self.log_retention_hours > MAX_LOG_RETENTION_HOURS {
+            panic!(
+                "LOG_RETENTION_HOURS={} is out of range (expected 0..={MAX_LOG_RETENTION_HOURS}, \
+                 where 0 disables pruning). An oversized value panics the retention sweeper on its \
+                 first tick — the process stays up but the decision log is never pruned again.",
+                self.log_retention_hours
+            );
+        }
+
+        self
     }
 }
+
+/// Lowest difficulty that still requires real work. At 0 the PoW predicate is
+/// a tautology, so the challenge is free to "solve".
+const MIN_DIFFICULTY: u32 = 1;
+
+/// Upper bound on `CHALLENGE_TTL_SECS` (365 days). Far above any sane challenge
+/// lifetime, and far below the point where `now + ttl` overflows.
+const MAX_CHALLENGE_TTL_SECS: u64 = 31_536_000;
+
+/// Upper bound on `LOG_RETENTION_HOURS` (10 years). Keeps both
+/// `chrono::Duration::hours` and the `hours * 3600 / 24` sweep cadence well
+/// inside their ranges.
+const MAX_LOG_RETENTION_HOURS: u64 = 87_600;
 
 /// Read an `INFO_*_URL` env var. Empty/whitespace-only values are treated
 /// as unset. Non-empty values must be absolute (`http://` or `https://`),
@@ -246,12 +373,14 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
-            puzzle_algorithm: Algorithm::Sha256,
-            default_difficulty: 18,
-            max_difficulty: 28,
+            static_dir: "static".to_string(),
+            puzzle_algorithm: Algorithm::Argon2id(Argon2idParams::default()),
+            default_difficulty: 5,
+            max_difficulty: 10,
             load_ladder: LoadLadder::default(),
             challenge_ttl_secs: 300,
             cleanup_interval_secs: 60,
+            max_active_challenges: 1_000_000,
             tier_checkbox_min: 20,
             tier_hard_pow_min: 40,
             tier_block_min: 85,
@@ -259,6 +388,7 @@ impl Default for AppConfig {
             ip_reputation_file: None,
             verify_shadow_min: 30,
             verify_block_min: 60,
+            verify_max_attempts: 10,
             verify_require_behavior: false,
             tls_fingerprint_header: None,
             tls_fingerprint_file: None,
@@ -278,33 +408,162 @@ impl Default for AppConfig {
     }
 }
 
-/// Parse `PUZZLE_ALGORITHM` (default `sha256`). When `argon2id`, also reads
-/// `ARGON2_M_COST`, `ARGON2_T_COST`, `ARGON2_P_COST`. Unknown values fall
-/// back to SHA-256 with a warning printed to stderr at boot — the rest of
-/// the service uses tracing, but this runs before the subscriber is up.
+/// Default base difficulty (leading zero bits) when `DEFAULT_DIFFICULTY` is
+/// unset. SHA-256 needs ~18 bits to cost a browser a few seconds; each
+/// Argon2id hash is orders of magnitude slower, so the same wall-clock cost
+/// lands near 5 bits.
+fn default_difficulty_for(algorithm: Algorithm) -> u32 {
+    match algorithm {
+        Algorithm::Sha256 => 18,
+        Algorithm::Argon2id(_) => 5,
+    }
+}
+
+/// Upper difficulty clamp when `MAX_DIFFICULTY` is unset. Argon2id's ceiling
+/// is far lower so a tier bump or `LOAD_LADDER` rung can't push a memory-hard
+/// solve into the minutes range.
+fn max_difficulty_for(algorithm: Algorithm) -> u32 {
+    match algorithm {
+        Algorithm::Sha256 => 28,
+        Algorithm::Argon2id(_) => 10,
+    }
+}
+
+/// Parse `PUZZLE_ALGORITHM` (default `argon2id`). SHA-256 stays available via
+/// `PUZZLE_ALGORITHM=sha256`, but is no longer the default: it verifies fast
+/// yet is trivially GPU-parallelised, so it taxes honest browsers far more
+/// than attackers. Argon2id is memory-hard, which collapses that asymmetry.
+/// Unknown values fall back to argon2id with a warning printed to stderr at
+/// boot — the rest of the service uses tracing, but this runs before the
+/// subscriber is up.
 fn parse_algorithm_from_env() -> Algorithm {
     match env::var("PUZZLE_ALGORITHM").as_deref() {
-        Ok("sha256") | Err(_) => Algorithm::Sha256,
-        Ok("argon2id") => {
-            let defaults = Argon2idParams::default();
-            Algorithm::Argon2id(Argon2idParams {
-                m_cost: env::var("ARGON2_M_COST")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(defaults.m_cost),
-                t_cost: env::var("ARGON2_T_COST")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(defaults.t_cost),
-                p_cost: env::var("ARGON2_P_COST")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(defaults.p_cost),
-            })
-        }
+        Ok("sha256") => Algorithm::Sha256,
+        Ok("argon2id") | Err(_) => argon2id_from_env(),
         Ok(other) => {
-            eprintln!("PUZZLE_ALGORITHM={other:?} is unknown — defaulting to sha256");
-            Algorithm::Sha256
+            eprintln!("PUZZLE_ALGORITHM={other:?} is unknown — defaulting to argon2id");
+            argon2id_from_env()
         }
+    }
+}
+
+/// Build the Argon2id algorithm variant, reading `ARGON2_M_COST` /
+/// `ARGON2_T_COST` / `ARGON2_P_COST` (each falling back to the tuned default).
+fn argon2id_from_env() -> Algorithm {
+    let defaults = Argon2idParams::default();
+    Algorithm::Argon2id(Argon2idParams {
+        m_cost: env::var("ARGON2_M_COST")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(defaults.m_cost),
+        t_cost: env::var("ARGON2_T_COST")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(defaults.t_cost),
+        p_cost: env::var("ARGON2_P_COST")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(defaults.p_cost),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each case below is a value that leaves the process running and healthy
+    /// while silently providing no protection (or refusing every solve), which
+    /// is why they abort the boot rather than being clamped.
+    #[test]
+    #[should_panic(expected = "must be at least 1")]
+    fn rejects_zero_max_difficulty() {
+        // MAX_DIFFICULTY clamps DEFAULT_DIFFICULTY, so a zero here disables the
+        // PoW even though DEFAULT_DIFFICULTY looks correct — the subtle case.
+        AppConfig {
+            max_difficulty: 0,
+            ..AppConfig::default()
+        }
+        .validated();
+    }
+
+    #[test]
+    #[should_panic(expected = "must be at least 1")]
+    fn rejects_zero_default_difficulty() {
+        AppConfig {
+            default_difficulty: 0,
+            ..AppConfig::default()
+        }
+        .validated();
+    }
+
+    #[test]
+    #[should_panic(expected = "not a valid Argon2id parameter set")]
+    fn rejects_out_of_range_argon2_params() {
+        AppConfig {
+            puzzle_algorithm: Algorithm::Argon2id(Argon2idParams {
+                m_cost: 1,
+                t_cost: 2,
+                p_cost: 1,
+            }),
+            ..AppConfig::default()
+        }
+        .validated();
+    }
+
+    #[test]
+    #[should_panic(expected = "CHALLENGE_TTL_SECS")]
+    fn rejects_overflowing_ttl() {
+        AppConfig {
+            challenge_ttl_secs: u64::MAX,
+            ..AppConfig::default()
+        }
+        .validated();
+    }
+
+    #[test]
+    #[should_panic(expected = "CHALLENGE_TTL_SECS")]
+    fn rejects_zero_ttl() {
+        AppConfig {
+            challenge_ttl_secs: 0,
+            ..AppConfig::default()
+        }
+        .validated();
+    }
+
+    #[test]
+    #[should_panic(expected = "LOG_RETENTION_HOURS")]
+    fn rejects_overflowing_retention() {
+        AppConfig {
+            log_retention_hours: u64::MAX,
+            ..AppConfig::default()
+        }
+        .validated();
+    }
+
+    #[test]
+    fn accepts_defaults_and_documented_edge_values() {
+        // The shipped defaults must pass, or every deployment breaks on upgrade.
+        AppConfig::default().validated();
+        // 0 is the documented "disable pruning" value and must stay valid.
+        AppConfig {
+            log_retention_hours: 0,
+            ..AppConfig::default()
+        }
+        .validated();
+        // A difficulty of exactly 1 is the lowest that still requires work.
+        AppConfig {
+            default_difficulty: 1,
+            max_difficulty: 1,
+            ..AppConfig::default()
+        }
+        .validated();
+        // SHA-256 deployments carry no Argon2 params to validate.
+        AppConfig {
+            puzzle_algorithm: Algorithm::Sha256,
+            default_difficulty: 18,
+            max_difficulty: 28,
+            ..AppConfig::default()
+        }
+        .validated();
     }
 }

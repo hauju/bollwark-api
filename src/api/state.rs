@@ -31,7 +31,31 @@ pub struct AppState {
     /// the 429 block body. `None` when no `INFO_*_URL` env var is set; the
     /// widget then uses bundled `/static/*.html` defaults for every field.
     pub info_urls: Option<InfoUrls>,
+    /// Bounds how many Argon2id verifications run at once. Each one allocates
+    /// `ARGON2_M_COST` KiB (8 MiB by default) for the duration of the hash, and
+    /// tokio grows its blocking pool to 512 threads on demand — so without a
+    /// bound, ~500 concurrent `/v1/verify` calls peak around 4 GiB and OOM a
+    /// small VPS. Permits cap that at `parallelism * 8 MiB`. Requests queue for
+    /// a permit rather than being refused; the global request timeout is what
+    /// bounds the queue, so overload degrades into timeouts instead of an OOM.
+    pub verify_permits: Arc<tokio::sync::Semaphore>,
     pub config: AppConfig,
+}
+
+/// Concurrency limit for memory-hard verification, as a multiple of available
+/// parallelism. Argon2id is CPU- *and* memory-bound, so there's no throughput
+/// gained past a small multiple of the core count — the extra concurrency buys
+/// only resident memory.
+pub const VERIFY_PERMITS_PER_CORE: usize = 2;
+
+/// Permit count for [`AppState::verify_permits`], derived from the host's
+/// parallelism. Falls back to a single core's worth when the platform can't
+/// report it, which errs toward the safe side.
+pub fn verify_permits() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        * VERIFY_PERMITS_PER_CORE
 }
 
 /// Build the `info_urls` payload from config. Returns `None` when no

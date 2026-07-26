@@ -294,6 +294,9 @@ fn stats_blocking(conn: &Connection) -> rusqlite::Result<Stats> {
                     hard_pow: opt_i64(r, 20)? as u64,
                     block: opt_i64(r, 21)? as u64,
                 },
+                // Filled in by the handler from the in-memory drop counter;
+                // the DB has no record of dropped rows (that's the point).
+                dropped_records: 0,
             })
         },
     )?;

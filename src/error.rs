@@ -10,14 +10,11 @@ pub enum CaptchaError {
     #[error("Challenge expired")]
     ChallengeExpired,
 
-    #[error("Challenge already used")]
-    ChallengeAlreadyUsed,
-
-    #[error("Invalid solution")]
-    InvalidSolution,
-
     #[error("Invalid site key")]
     InvalidSiteKey,
+
+    #[error("Origin not allowed")]
+    OriginNotAllowed,
 
     #[error("Unauthorized")]
     Unauthorized,
@@ -40,9 +37,8 @@ impl IntoResponse for CaptchaError {
         let (status, message) = match &self {
             CaptchaError::ChallengeNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             CaptchaError::ChallengeExpired => (StatusCode::GONE, self.to_string()),
-            CaptchaError::ChallengeAlreadyUsed => (StatusCode::CONFLICT, self.to_string()),
-            CaptchaError::InvalidSolution => (StatusCode::OK, self.to_string()),
             CaptchaError::InvalidSiteKey => (StatusCode::BAD_REQUEST, self.to_string()),
+            CaptchaError::OriginNotAllowed => (StatusCode::FORBIDDEN, self.to_string()),
             CaptchaError::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
             CaptchaError::NotFound => (StatusCode::NOT_FOUND, self.to_string()),
             CaptchaError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),

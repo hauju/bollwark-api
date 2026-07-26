@@ -102,6 +102,11 @@ pub struct Stats {
     pub verify_signals: VerifySignalSums,
     pub outcomes: OutcomeCounts,
     pub tiers: TierCounts,
+    /// Decision-log records dropped because the writer queue was full since
+    /// this process started. Non-zero means SQLite can't keep up with the
+    /// request rate — the durable log is undercounting. Sourced from the
+    /// in-memory drop counter, not the database.
+    pub dropped_records: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -232,6 +237,8 @@ pub struct SiteSummary {
     pub site_key: String,
     pub name: String,
     pub created_at: String,
+    /// Browser-origin allowlist (empty = any origin allowed).
+    pub allowed_origins: Vec<String>,
     pub puzzle_count: u64,
     pub verify_count: u64,
     pub last_seen: Option<String>,

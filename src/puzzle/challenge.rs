@@ -32,7 +32,7 @@ impl PuzzleEngine {
             difficulty,
             created_at: now,
             expires_at,
-            solved: false,
+            attempts: 0,
         }
     }
 

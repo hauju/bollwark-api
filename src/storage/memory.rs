@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 use std::path::Path;
 use std::sync::{Mutex, RwLock};
@@ -18,12 +20,66 @@ struct RateWindow {
     window_start: i64,
 }
 
+/// Number of lock stripes for each rate map. Every `GET /v1/puzzle` bumps a
+/// per-IP and a per-site counter; a single `RwLock<HashMap>` per map would
+/// serialise every request on one writer. Striping by key hash spreads that
+/// contention across independent locks. Power of two so the modulo is cheap.
+const RATE_SHARDS: usize = 16;
+
+/// Rate-window map split across `RATE_SHARDS` independently-locked stripes.
+/// Each key lands in one stripe by hash, so concurrent requests for different
+/// keys rarely contend. The critical section stays tiny (an entry lookup + a
+/// counter bump), matching the previous single-lock behaviour per key.
+struct ShardedRates<K> {
+    shards: [RwLock<HashMap<K, RateWindow>>; RATE_SHARDS],
+}
+
+impl<K: Eq + Hash + Clone> ShardedRates<K> {
+    fn new() -> Self {
+        Self {
+            shards: std::array::from_fn(|_| RwLock::new(HashMap::new())),
+        }
+    }
+
+    fn shard(&self, key: &K) -> &RwLock<HashMap<K, RateWindow>> {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        &self.shards[(hasher.finish() as usize) % RATE_SHARDS]
+    }
+
+    /// Increment the key's counter within the current 60s window, resetting it
+    /// when the window has rolled over. Returns the new count.
+    fn increment(&self, key: K) -> Result<u32, CaptchaError> {
+        let mut map = self.shard(&key).write().map_err(lock_err)?;
+        let now = Utc::now().timestamp();
+        let entry = map.entry(key).or_insert(RateWindow {
+            count: 0,
+            window_start: now,
+        });
+        if now - entry.window_start >= RATE_WINDOW_SECS {
+            entry.count = 0;
+            entry.window_start = now;
+        }
+        entry.count += 1;
+        Ok(entry.count)
+    }
+
+    /// Drop windows older than twice the rate window across every stripe.
+    fn retain_fresh(&self, now_ts: i64) -> Result<(), CaptchaError> {
+        for shard in &self.shards {
+            let mut map = shard.write().map_err(lock_err)?;
+            map.retain(|_, w| now_ts - w.window_start < RATE_WINDOW_SECS * 2);
+        }
+        Ok(())
+    }
+}
+
 pub struct InMemoryStore {
     challenges: RwLock<HashMap<Uuid, Challenge>>,
     sites_by_key: RwLock<HashMap<Uuid, Site>>,
     sites_by_secret: RwLock<HashMap<String, Uuid>>,
-    ip_rates: RwLock<HashMap<IpAddr, RateWindow>>,
-    site_rates: RwLock<HashMap<Uuid, RateWindow>>,
+    ip_rates: ShardedRates<IpAddr>,
+    site_rates: ShardedRates<Uuid>,
     /// Optional write-through persistence for the sites table. Challenges
     /// and rate windows stay in-memory — they're cheap to lose on restart.
     /// Sites can't be: integrators store the secret_key client-side, so a
@@ -35,10 +91,11 @@ const RATE_WINDOW_SECS: i64 = 60;
 
 const SITES_SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS sites (
-    site_key   TEXT PRIMARY KEY,
-    secret_key TEXT NOT NULL UNIQUE,
-    name       TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    site_key        TEXT PRIMARY KEY,
+    secret_key      TEXT NOT NULL UNIQUE,
+    name            TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    allowed_origins TEXT NOT NULL DEFAULT ''
 );
 ";
 
@@ -48,8 +105,8 @@ impl InMemoryStore {
             challenges: RwLock::new(HashMap::new()),
             sites_by_key: RwLock::new(HashMap::new()),
             sites_by_secret: RwLock::new(HashMap::new()),
-            ip_rates: RwLock::new(HashMap::new()),
-            site_rates: RwLock::new(HashMap::new()),
+            ip_rates: ShardedRates::new(),
+            site_rates: ShardedRates::new(),
             site_persistence: None,
         }
     }
@@ -62,6 +119,7 @@ impl InMemoryStore {
             .map_err(|e| CaptchaError::Storage(format!("open site db: {e}")))?;
         conn.execute_batch(SITES_SCHEMA)
             .map_err(|e| CaptchaError::Storage(format!("init site schema: {e}")))?;
+        migrate_add_allowed_origins(&conn)?;
 
         let sites = load_all_sites(&conn)?;
 
@@ -78,6 +136,13 @@ impl InMemoryStore {
             site_persistence: Some(Mutex::new(conn)),
             ..store
         })
+    }
+
+    /// Number of challenges currently held in memory. Used by the puzzle
+    /// handler as a global issuance backstop (`MAX_ACTIVE_CHALLENGES`) so a
+    /// distributed flood can't grow the map unbounded between cleanup sweeps.
+    pub fn challenge_count(&self) -> usize {
+        self.challenges.read().map(|m| m.len()).unwrap_or_default()
     }
 
     /// Number of sites currently loaded. Useful at boot to log how many
@@ -100,9 +165,30 @@ impl InMemoryStore {
     }
 }
 
+/// Add the `allowed_origins` column to a `sites` table created before this
+/// feature shipped. SQLite has no `ADD COLUMN IF NOT EXISTS`, so probe
+/// `pragma_table_info` first and only ALTER when the column is absent — a
+/// fresh database created from the current `SITES_SCHEMA` already has it, so
+/// this is a no-op there. Mirrors the in-place migration pattern in
+/// `dashboard/log.rs`.
+fn migrate_add_allowed_origins(conn: &Connection) -> Result<(), CaptchaError> {
+    let has_column: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('sites') WHERE name = 'allowed_origins'")
+        .and_then(|mut stmt| stmt.exists([]))
+        .map_err(|e| CaptchaError::Storage(format!("probe sites schema: {e}")))?;
+    if !has_column {
+        conn.execute(
+            "ALTER TABLE sites ADD COLUMN allowed_origins TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .map_err(|e| CaptchaError::Storage(format!("add allowed_origins column: {e}")))?;
+    }
+    Ok(())
+}
+
 fn load_all_sites(conn: &Connection) -> Result<Vec<Site>, CaptchaError> {
     let mut stmt = conn
-        .prepare("SELECT site_key, secret_key, name, created_at FROM sites")
+        .prepare("SELECT site_key, secret_key, name, created_at, allowed_origins FROM sites")
         .map_err(|e| CaptchaError::Storage(format!("prepare load sites: {e}")))?;
     let rows = stmt
         .query_map([], |row| {
@@ -110,13 +196,14 @@ fn load_all_sites(conn: &Connection) -> Result<Vec<Site>, CaptchaError> {
             let secret: String = row.get(1)?;
             let name: String = row.get(2)?;
             let created_str: String = row.get(3)?;
-            Ok((key_str, secret, name, created_str))
+            let origins_str: String = row.get(4)?;
+            Ok((key_str, secret, name, created_str, origins_str))
         })
         .map_err(|e| CaptchaError::Storage(format!("query sites: {e}")))?;
 
     let mut out = Vec::new();
     for row in rows {
-        let (key_str, secret_key, name, created_str) =
+        let (key_str, secret_key, name, created_str, origins_str) =
             row.map_err(|e| CaptchaError::Storage(format!("read site row: {e}")))?;
         let site_key = Uuid::parse_str(&key_str)
             .map_err(|e| CaptchaError::Storage(format!("bad site_key in db: {e}")))?;
@@ -128,6 +215,9 @@ fn load_all_sites(conn: &Connection) -> Result<Vec<Site>, CaptchaError> {
             secret_key,
             name,
             created_at,
+            // Space-joined; entries never contain whitespace (normalized at
+            // provisioning time), so splitting on whitespace is lossless.
+            allowed_origins: origins_str.split_whitespace().map(String::from).collect(),
         });
     }
     Ok(out)
@@ -135,12 +225,13 @@ fn load_all_sites(conn: &Connection) -> Result<Vec<Site>, CaptchaError> {
 
 fn persist_site(conn: &Connection, site: &Site) -> Result<(), CaptchaError> {
     conn.execute(
-        "INSERT INTO sites (site_key, secret_key, name, created_at) VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO sites (site_key, secret_key, name, created_at, allowed_origins) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
             site.site_key.to_string(),
             site.secret_key,
             site.name,
             site.created_at.to_rfc3339(),
+            site.allowed_origins.join(" "),
         ],
     )
     .map_err(|e| CaptchaError::Storage(format!("insert site: {e}")))?;
@@ -171,40 +262,51 @@ impl Store for InMemoryStore {
         Ok(())
     }
 
-    async fn mark_solution_used(&self, challenge_id: &Uuid) -> Result<(), CaptchaError> {
-        let mut map = self.challenges.write().map_err(lock_err)?;
-        if let Some(challenge) = map.get_mut(challenge_id) {
-            challenge.solved = true;
-            Ok(())
-        } else {
-            Err(CaptchaError::ChallengeNotFound)
-        }
-    }
-
     async fn consume_challenge(&self, challenge_id: &Uuid) -> Result<(), CaptchaError> {
+        // Single-use is enforced by removal: exactly one caller removes the
+        // challenge and passes; concurrent/replayed submits get `None` →
+        // `ChallengeNotFound` (404).
         let mut map = self.challenges.write().map_err(lock_err)?;
         match map.remove(challenge_id) {
-            Some(challenge) if challenge.solved => Err(CaptchaError::ChallengeAlreadyUsed),
             Some(_) => Ok(()),
             None => Err(CaptchaError::ChallengeNotFound),
         }
     }
 
+    async fn register_failed_attempt(
+        &self,
+        challenge_id: &Uuid,
+        max_attempts: u32,
+    ) -> Result<bool, CaptchaError> {
+        if max_attempts == 0 {
+            return Ok(false);
+        }
+        let mut map = self.challenges.write().map_err(lock_err)?;
+        if let Some(challenge) = map.get_mut(challenge_id) {
+            challenge.attempts += 1;
+            if challenge.attempts >= max_attempts {
+                map.remove(challenge_id);
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     async fn store_site(&self, site: &Site) -> Result<(), CaptchaError> {
-        // Persist first so an in-memory insert isn't visible if the disk
-        // write fails (e.g. UNIQUE collision on a regenerated secret).
+        // Hold the in-memory write locks across the SQLite write so persistence
+        // and memory can't diverge under concurrent mutations of the same site
+        // (two admin writes committing to disk in one order but to memory in
+        // the other). Lock order is by_key → by_secret everywhere. Persist
+        // inside the critical section, first, so a failed disk write (e.g.
+        // UNIQUE collision on a regenerated secret) leaves memory untouched.
+        let mut by_key = self.sites_by_key.write().map_err(lock_err)?;
+        let mut by_secret = self.sites_by_secret.write().map_err(lock_err)?;
         if let Some(persist) = &self.site_persistence {
             let conn = persist.lock().map_err(lock_err)?;
             persist_site(&conn, site)?;
         }
-        {
-            let mut by_key = self.sites_by_key.write().map_err(lock_err)?;
-            by_key.insert(site.site_key, site.clone());
-        }
-        {
-            let mut by_secret = self.sites_by_secret.write().map_err(lock_err)?;
-            by_secret.insert(site.secret_key.clone(), site.site_key);
-        }
+        by_key.insert(site.site_key, site.clone());
+        by_secret.insert(site.secret_key.clone(), site.site_key);
         Ok(())
     }
 
@@ -230,9 +332,15 @@ impl Store for InMemoryStore {
         site_key: &Uuid,
         new_secret: String,
     ) -> Result<(), CaptchaError> {
-        // Persist first; on success, swap in-memory. On UNIQUE collision
-        // (vanishingly rare for 32-byte random secrets) the in-memory
-        // state is unchanged.
+        // One critical section (see store_site): resolve NotFound from memory,
+        // persist inside the lock, then swap in-memory. On UNIQUE collision
+        // (vanishingly rare for 32-byte random secrets) the persist fails and
+        // memory is left unchanged.
+        let mut by_key = self.sites_by_key.write().map_err(lock_err)?;
+        let mut by_secret = self.sites_by_secret.write().map_err(lock_err)?;
+        let Some(site) = by_key.get_mut(site_key) else {
+            return Err(CaptchaError::NotFound);
+        };
         if let Some(persist) = &self.site_persistence {
             let conn = persist.lock().map_err(lock_err)?;
             let updated = conn
@@ -242,32 +350,56 @@ impl Store for InMemoryStore {
                 )
                 .map_err(|e| CaptchaError::Storage(format!("rotate site secret: {e}")))?;
             if updated == 0 {
-                return Err(CaptchaError::NotFound);
-            }
-        }
-
-        let mut by_key = self.sites_by_key.write().map_err(lock_err)?;
-        let mut by_secret = self.sites_by_secret.write().map_err(lock_err)?;
-        let Some(site) = by_key.get_mut(site_key) else {
-            // The persistence layer already accepted the UPDATE — but the
-            // in-memory map doesn't know about this site. That's a state
-            // inconsistency we should never hit in practice (rows in the
-            // DB are loaded into memory at boot, every store_site writes
-            // both). Surface as Storage rather than NotFound.
-            if self.site_persistence.is_some() {
+                // Memory has the site but the DB row is missing — a pre-existing
+                // divergence we should never hit. Surface it; memory is untouched.
                 return Err(CaptchaError::Storage(
-                    "site persisted update with no in-memory row".into(),
+                    "site in memory but missing from db".into(),
                 ));
             }
-            return Err(CaptchaError::NotFound);
-        };
+        }
         let old_secret = std::mem::replace(&mut site.secret_key, new_secret.clone());
         by_secret.remove(&old_secret);
         by_secret.insert(new_secret, *site_key);
         Ok(())
     }
 
+    async fn update_site_origins(
+        &self,
+        site_key: &Uuid,
+        origins: Vec<String>,
+    ) -> Result<(), CaptchaError> {
+        // One critical section (see store_site): resolve NotFound from memory,
+        // persist inside the lock, then swap in-memory.
+        let mut by_key = self.sites_by_key.write().map_err(lock_err)?;
+        let Some(site) = by_key.get_mut(site_key) else {
+            return Err(CaptchaError::NotFound);
+        };
+        if let Some(persist) = &self.site_persistence {
+            let conn = persist.lock().map_err(lock_err)?;
+            let updated = conn
+                .execute(
+                    "UPDATE sites SET allowed_origins = ?1 WHERE site_key = ?2",
+                    params![origins.join(" "), site_key.to_string()],
+                )
+                .map_err(|e| CaptchaError::Storage(format!("update site origins: {e}")))?;
+            if updated == 0 {
+                return Err(CaptchaError::Storage(
+                    "site in memory but missing from db".into(),
+                ));
+            }
+        }
+        site.allowed_origins = origins;
+        Ok(())
+    }
+
     async fn delete_site(&self, site_key: &Uuid) -> Result<(), CaptchaError> {
+        // One critical section (see store_site): resolve NotFound from memory,
+        // delete from disk inside the lock, then remove from memory.
+        let mut by_key = self.sites_by_key.write().map_err(lock_err)?;
+        let mut by_secret = self.sites_by_secret.write().map_err(lock_err)?;
+        if !by_key.contains_key(site_key) {
+            return Err(CaptchaError::NotFound);
+        }
         if let Some(persist) = &self.site_persistence {
             let conn = persist.lock().map_err(lock_err)?;
             let deleted = conn
@@ -277,56 +409,24 @@ impl Store for InMemoryStore {
                 )
                 .map_err(|e| CaptchaError::Storage(format!("delete site: {e}")))?;
             if deleted == 0 {
-                return Err(CaptchaError::NotFound);
-            }
-        }
-
-        let mut by_key = self.sites_by_key.write().map_err(lock_err)?;
-        let mut by_secret = self.sites_by_secret.write().map_err(lock_err)?;
-        let Some(site) = by_key.remove(site_key) else {
-            if self.site_persistence.is_some() {
                 return Err(CaptchaError::Storage(
-                    "site persisted delete with no in-memory row".into(),
+                    "site in memory but missing from db".into(),
                 ));
             }
-            return Err(CaptchaError::NotFound);
-        };
+        }
+        let site = by_key
+            .remove(site_key)
+            .expect("presence checked under the same lock");
         by_secret.remove(&site.secret_key);
         Ok(())
     }
 
     async fn increment_ip_count(&self, ip: &IpAddr) -> Result<u32, CaptchaError> {
-        let mut map = self.ip_rates.write().map_err(lock_err)?;
-        let now = Utc::now().timestamp();
-        let entry = map.entry(*ip).or_insert(RateWindow {
-            count: 0,
-            window_start: now,
-        });
-
-        if now - entry.window_start >= RATE_WINDOW_SECS {
-            entry.count = 0;
-            entry.window_start = now;
-        }
-
-        entry.count += 1;
-        Ok(entry.count)
+        self.ip_rates.increment(*ip)
     }
 
     async fn increment_site_count(&self, site_key: &Uuid) -> Result<u32, CaptchaError> {
-        let mut map = self.site_rates.write().map_err(lock_err)?;
-        let now = Utc::now().timestamp();
-        let entry = map.entry(*site_key).or_insert(RateWindow {
-            count: 0,
-            window_start: now,
-        });
-
-        if now - entry.window_start >= RATE_WINDOW_SECS {
-            entry.count = 0;
-            entry.window_start = now;
-        }
-
-        entry.count += 1;
-        Ok(entry.count)
+        self.site_rates.increment(*site_key)
     }
 
     async fn cleanup_expired(&self) -> Result<(), CaptchaError> {
@@ -338,16 +438,10 @@ impl Store for InMemoryStore {
             map.retain(|_, c| c.expires_at > now);
         }
 
-        // Clean stale rate windows
+        // Clean stale rate windows across every stripe
         let ts = now.timestamp();
-        {
-            let mut map = self.ip_rates.write().map_err(lock_err)?;
-            map.retain(|_, w| ts - w.window_start < RATE_WINDOW_SECS * 2);
-        }
-        {
-            let mut map = self.site_rates.write().map_err(lock_err)?;
-            map.retain(|_, w| ts - w.window_start < RATE_WINDOW_SECS * 2);
-        }
+        self.ip_rates.retain_fresh(ts)?;
+        self.site_rates.retain_fresh(ts)?;
 
         Ok(())
     }
@@ -373,7 +467,7 @@ mod tests {
             difficulty: 8,
             created_at: now,
             expires_at: now + Duration::seconds(ttl_secs),
-            solved: false,
+            attempts: 0,
         }
     }
 
@@ -386,6 +480,7 @@ mod tests {
             secret_key: secret,
             name: "Test Site".into(),
             created_at: Utc::now(),
+            allowed_origins: Vec::new(),
         }
     }
 
@@ -403,25 +498,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mark_solution_used() {
-        let store = InMemoryStore::new();
-        let challenge = make_challenge(Uuid::new_v4(), 300);
-
-        store.store_challenge(&challenge).await.unwrap();
-        store.mark_solution_used(&challenge.id).await.unwrap();
-
-        let fetched = store.get_challenge(&challenge.id).await.unwrap().unwrap();
-        assert!(fetched.solved);
-    }
-
-    #[tokio::test]
-    async fn test_mark_solution_not_found() {
-        let store = InMemoryStore::new();
-        let result = store.mark_solution_used(&Uuid::new_v4()).await;
-        assert!(matches!(result, Err(CaptchaError::ChallengeNotFound)));
-    }
-
-    #[tokio::test]
     async fn test_consume_challenge_removes_once() {
         let store = InMemoryStore::new();
         let challenge = make_challenge(Uuid::new_v4(), 300);
@@ -432,6 +508,80 @@ mod tests {
         assert!(store.get_challenge(&challenge.id).await.unwrap().is_none());
         let second = store.consume_challenge(&challenge.id).await;
         assert!(matches!(second, Err(CaptchaError::ChallengeNotFound)));
+    }
+
+    #[tokio::test]
+    async fn test_register_failed_attempt_evicts_at_cap() {
+        let store = InMemoryStore::new();
+        let challenge = make_challenge(Uuid::new_v4(), 300);
+        store.store_challenge(&challenge).await.unwrap();
+
+        // Below the cap the challenge stays live.
+        assert!(
+            !store
+                .register_failed_attempt(&challenge.id, 3)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .register_failed_attempt(&challenge.id, 3)
+                .await
+                .unwrap()
+        );
+        assert!(store.get_challenge(&challenge.id).await.unwrap().is_some());
+
+        // The third failed attempt reaches the cap and evicts it.
+        assert!(
+            store
+                .register_failed_attempt(&challenge.id, 3)
+                .await
+                .unwrap()
+        );
+        assert!(store.get_challenge(&challenge.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_register_failed_attempt_disabled_when_zero() {
+        let store = InMemoryStore::new();
+        let challenge = make_challenge(Uuid::new_v4(), 300);
+        store.store_challenge(&challenge).await.unwrap();
+
+        // max_attempts = 0 disables the cap: never evicts, never increments.
+        for _ in 0..1000 {
+            assert!(
+                !store
+                    .register_failed_attempt(&challenge.id, 0)
+                    .await
+                    .unwrap()
+            );
+        }
+        assert!(store.get_challenge(&challenge.id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_register_failed_attempt_missing_challenge() {
+        let store = InMemoryStore::new();
+        // A never-existed / already-consumed challenge is a no-op, not an error.
+        assert!(
+            !store
+                .register_failed_attempt(&Uuid::new_v4(), 3)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_challenge_count() {
+        let store = InMemoryStore::new();
+        assert_eq!(store.challenge_count(), 0);
+        let a = make_challenge(Uuid::new_v4(), 300);
+        let b = make_challenge(Uuid::new_v4(), 300);
+        store.store_challenge(&a).await.unwrap();
+        store.store_challenge(&b).await.unwrap();
+        assert_eq!(store.challenge_count(), 2);
+        store.consume_challenge(&a.id).await.unwrap();
+        assert_eq!(store.challenge_count(), 1);
     }
 
     #[tokio::test]
@@ -625,6 +775,112 @@ mod tests {
             .unwrap()
             .expect("site reloaded by secret");
         assert_eq!(by_secret.site_key, site.site_key);
+    }
+
+    #[tokio::test]
+    async fn test_allowed_origins_round_trip() {
+        let dir = tempdir();
+        let path = dir.join("sites.db");
+
+        let mut site = make_site();
+        site.allowed_origins = vec![
+            "https://a.example".to_string(),
+            "https://b.example:8443".to_string(),
+        ];
+        {
+            let store = InMemoryStore::with_site_persistence(&path).unwrap();
+            store.store_site(&site).await.unwrap();
+        }
+
+        let store = InMemoryStore::with_site_persistence(&path).unwrap();
+        let reloaded = store
+            .get_site_by_key(&site.site_key)
+            .await
+            .unwrap()
+            .expect("site reloaded");
+        assert_eq!(reloaded.allowed_origins, site.allowed_origins);
+    }
+
+    #[tokio::test]
+    async fn test_update_site_origins_persists_across_reopen() {
+        let dir = tempdir();
+        let path = dir.join("sites.db");
+
+        let site = make_site();
+        {
+            let store = InMemoryStore::with_site_persistence(&path).unwrap();
+            store.store_site(&site).await.unwrap();
+            // Site starts with no restriction; set one.
+            store
+                .update_site_origins(&site.site_key, vec!["https://only.example".to_string()])
+                .await
+                .unwrap();
+        }
+
+        let store = InMemoryStore::with_site_persistence(&path).unwrap();
+        let reloaded = store
+            .get_site_by_key(&site.site_key)
+            .await
+            .unwrap()
+            .expect("site reloaded");
+        assert_eq!(reloaded.allowed_origins, vec!["https://only.example"]);
+    }
+
+    #[tokio::test]
+    async fn test_update_site_origins_not_found() {
+        let store = InMemoryStore::new();
+        let result = store
+            .update_site_origins(&Uuid::new_v4(), vec!["https://x.example".to_string()])
+            .await;
+        assert!(matches!(result, Err(CaptchaError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn test_old_schema_db_migrates_allowed_origins_column() {
+        let dir = tempdir();
+        let path = dir.join("sites.db");
+
+        // Hand-create the pre-feature table (no allowed_origins column) and
+        // insert a row, exactly as an older binary would have left it.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r"CREATE TABLE sites (
+                    site_key   TEXT PRIMARY KEY,
+                    secret_key TEXT NOT NULL UNIQUE,
+                    name       TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sites (site_key, secret_key, name, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    "legacy-secret",
+                    "Legacy Site",
+                    Utc::now().to_rfc3339(),
+                ],
+            )
+            .unwrap();
+        }
+
+        // Opening with the current code must migrate the column in place and
+        // load the legacy row with an empty (unrestricted) origin list.
+        let store = InMemoryStore::with_site_persistence(&path).unwrap();
+        assert_eq!(store.site_count(), 1);
+        let reloaded = store
+            .get_site_by_secret("legacy-secret")
+            .await
+            .unwrap()
+            .expect("legacy site reloaded");
+        assert!(reloaded.allowed_origins.is_empty());
+
+        // And the migrated column is usable going forward.
+        store
+            .update_site_origins(&reloaded.site_key, vec!["https://new.example".to_string()])
+            .await
+            .unwrap();
     }
 
     fn tempdir() -> std::path::PathBuf {

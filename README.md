@@ -1,6 +1,6 @@
 # Bollwark
 
-Self-hostable proof-of-work CAPTCHA service in Rust. Clients solve a SHA-256 (or Argon2id) puzzle to prove they aren't bots; the server brackets each solve with two scoring passes that adapt difficulty — or short-circuit — based on per-request risk signals.
+Self-hostable proof-of-work CAPTCHA service in Rust. Clients solve a memory-hard Argon2id (or SHA-256) puzzle to prove they aren't bots; the server brackets each solve with two scoring passes that adapt difficulty — or short-circuit — based on per-request risk signals.
 
 - **Two-pass risk scoring.** A puzzle-time pass picks an escalation tier (invisible / checkbox / hard PoW / 429 block) and issues a proof-of-work puzzle at a tier-adjusted difficulty. A verify-time pass re-scores after submit using time-on-page, honeypot, and behavioural telemetry, returning `pass` / `shadow_fail` / `block`.
 - **Pluggable signals.** Rate, header anomaly, honeypot, time-on-page, and behavioural telemetry are always on; IP reputation (CIDR list) and TLS fingerprint (read from a trusted reverse-proxy header) self-gate on their own config. The service is cookie-free — there's no global scoring toggle and no consent-triggering client storage; every signal runs under legitimate interest with data minimization.
@@ -90,8 +90,8 @@ Static assets (`captcha-widget.js`, `captcha-widget.css`, `captcha-worker.js`, `
 Everything is env-var driven and every setting has a default — `cargo run` works out of the box with the always-on signals (rate, header anomaly, honeypot, time-on-page, behaviour) plus PoW; the service is cookie-free and IP reputation / TLS fingerprint self-gate on their own config. See **[CONFIGURATION.md](./CONFIGURATION.md)** for the full reference, score weights, and file formats. The most load-bearing knobs:
 
 - `LISTEN_ADDR` (default `0.0.0.0:3000`), `RUST_LOG` (default `info`)
-- `PUZZLE_ALGORITHM` — `sha256` (default) or `argon2id`. With Argon2id, drop `DEFAULT_DIFFICULTY` to `4`–`6` and tune `ARGON2_M_COST` / `ARGON2_T_COST` / `ARGON2_P_COST`.
-- `DEFAULT_DIFFICULTY` / `MAX_DIFFICULTY` — base PoW difficulty and upper clamp, in leading zero bits (`18` / `28`).
+- `PUZZLE_ALGORITHM` — `argon2id` (default, memory-hard) or `sha256`. For Argon2id, tune `ARGON2_M_COST` / `ARGON2_T_COST` / `ARGON2_P_COST`.
+- `DEFAULT_DIFFICULTY` / `MAX_DIFFICULTY` — base PoW difficulty and upper clamp, in leading zero bits. Defaults track the algorithm: `5` / `10` for argon2id, `18` / `28` for sha256.
 - `TIER_CHECKBOX_MIN` / `TIER_HARD_POW_MIN` / `TIER_BLOCK_MIN` — puzzle-time score → tier thresholds.
 - `VERIFY_SHADOW_MIN` / `VERIFY_BLOCK_MIN` — verify-time score thresholds.
 - Optional signal inputs (off until configured): `IP_REPUTATION_FILE`, `TLS_FINGERPRINT_HEADER` (+ `TLS_FINGERPRINT_FILE`, `TRUSTED_PROXIES`).

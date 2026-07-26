@@ -5,15 +5,16 @@ use tracing_subscriber::EnvFilter;
 
 use bollwark::api;
 use bollwark::api::state::{
-    AppState, info_urls_from_config, tier_thresholds_from_config, verify_thresholds_from_config,
+    AppState, info_urls_from_config, tier_thresholds_from_config, verify_permits,
+    verify_thresholds_from_config,
 };
 use bollwark::config::AppConfig;
 use bollwark::dashboard::{DecisionLog, GeoIp, Sessions, routes::AdminState};
 use bollwark::puzzle::challenge::PuzzleEngine;
-use bollwark::puzzle::types::PuzzleConfig;
+use bollwark::puzzle::types::{Algorithm, PuzzleConfig};
 use bollwark::risk::{
-    CidrListReputation, FingerprintBlocklist, ReputationStore, RiskScorer, TrustedProxies,
-    VerifyScorer,
+    CidrListReputation, EscalationTier, FingerprintBlocklist, ReputationStore, RiskScorer,
+    TrustedProxies, VerifyScorer, difficulty_for,
 };
 use bollwark::storage::Store;
 use bollwark::storage::memory::InMemoryStore;
@@ -28,10 +29,22 @@ async fn main() {
     let json_logs = std::env::var("LOG_FORMAT")
         .map(|v| v.eq_ignore_ascii_case("json"))
         .unwrap_or(false);
+    // Log through a bounded, lossy background writer rather than straight to
+    // stderr. `std::io::Stderr` is a process-global mutex around a blocking
+    // `write_all`, and every /v1/puzzle emits a decision event — so at load the
+    // hot path funnels thousands of syscalls per second through one lock, and a
+    // stalled log consumer (slow disk, log rotation, a wedged sidecar) blocks
+    // every tokio worker that touches the handler. This gives logging the same
+    // posture the decision log already has: drop under pressure rather than
+    // apply backpressure to request handling.
+    //
+    // `_log_guard` must outlive the server — dropping it flushes and shuts down
+    // the writer thread, so binding it here keeps logs flowing until main exits.
+    let (log_writer, _log_guard) = tracing_appender::non_blocking(std::io::stderr());
     if json_logs {
         tracing_subscriber::fmt()
             .with_env_filter(filter)
-            .with_writer(std::io::stderr)
+            .with_writer(log_writer)
             .json()
             .flatten_event(true)
             .with_current_span(false)
@@ -40,7 +53,7 @@ async fn main() {
     } else {
         tracing_subscriber::fmt()
             .with_env_filter(filter)
-            .with_writer(std::io::stderr)
+            .with_writer(log_writer)
             .init();
     }
 
@@ -65,12 +78,49 @@ async fn main() {
         }
     }
 
+    // Argon2id is orders of magnitude slower per hash than SHA-256, so the
+    // SHA-256-tuned default difficulty makes puzzles effectively unsolvable in
+    // the browser (a 2^18 target at ~10ms/hash is tens of minutes). This is a
+    // one-env-var footgun — warn loudly rather than silently shipping a widget
+    // that never completes. Difficulty is a continuum, so this warns rather
+    // than refusing to start.
+    if let Algorithm::Argon2id(_) = config.puzzle_algorithm {
+        const ARGON2_SANE_MAX_DIFFICULTY: u32 = 12;
+        if config.default_difficulty > ARGON2_SANE_MAX_DIFFICULTY {
+            tracing::warn!(
+                default_difficulty = config.default_difficulty,
+                "PUZZLE_ALGORITHM=argon2id with DEFAULT_DIFFICULTY={} is almost certainly far \
+                 too high — each Argon2id hash is orders of magnitude slower than SHA-256, so \
+                 solves can take minutes in the browser and the widget may never complete. Drop \
+                 DEFAULT_DIFFICULTY to ~4–6 for argon2id.",
+                config.default_difficulty
+            );
+        }
+    }
+
     let puzzle_config = PuzzleConfig {
         algorithm: config.puzzle_algorithm,
         default_difficulty: config.default_difficulty,
         ttl_secs: config.challenge_ttl_secs,
     };
-    tracing::info!(algorithm = ?config.puzzle_algorithm, "Puzzle engine initialised");
+    // Log the difficulty each tier actually resolves to, not just the configured
+    // base. The final value is `default + tier_bump` clamped by MAX_DIFFICULTY,
+    // so a too-low MAX silently flattens every tier — printing the effective
+    // ladder makes that visible in the first few lines of output instead of
+    // only showing up as an unexplained drop in solve times.
+    let effective = |tier| {
+        difficulty_for(tier, config.default_difficulty, config.max_difficulty)
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "block (429)".to_string())
+    };
+    tracing::info!(
+        algorithm = ?config.puzzle_algorithm,
+        invisible_pass = %effective(EscalationTier::InvisiblePass),
+        checkbox = %effective(EscalationTier::Checkbox),
+        hard_pow = %effective(EscalationTier::HardPow),
+        max_difficulty = config.max_difficulty,
+        "Puzzle engine initialised (effective difficulty per tier)"
+    );
 
     // Site registrations: persist to SQLite when SITE_DB_PATH is set so
     // restarts don't invalidate every integrator's stored secret_key.
@@ -284,6 +334,23 @@ async fn main() {
          No client-side storage; signals run under legitimate interest with data minimization."
     );
 
+    // A handle kept out of AppState so we can flush the writer after the
+    // server stops (AppState's copy is owned by the router by then).
+    let shutdown_log = decision_log.clone();
+
+    // Concurrency ceiling for memory-hard verification. Surfaced at boot because
+    // it, together with ARGON2_M_COST, is what actually bounds peak RSS under a
+    // verify flood — an operator sizing a container needs both numbers.
+    let verify_permits = verify_permits();
+    if let Algorithm::Argon2id(p) = config.puzzle_algorithm {
+        tracing::info!(
+            permits = verify_permits,
+            m_cost_kib = p.m_cost,
+            peak_mib = (verify_permits as u64 * p.m_cost as u64) / 1024,
+            "Argon2id verification concurrency bounded"
+        );
+    }
+
     let state = Arc::new(AppState {
         store,
         engine: PuzzleEngine::new(puzzle_config),
@@ -301,6 +368,7 @@ async fn main() {
         decision_log,
         admin_token,
         info_urls,
+        verify_permits: Arc::new(tokio::sync::Semaphore::new(verify_permits)),
         config: config.clone(),
     });
 
@@ -316,6 +384,15 @@ async fn main() {
     .with_graceful_shutdown(shutdown_signal())
     .await
     .unwrap();
+
+    // Graceful shutdown drained in-flight HTTP requests, so their decision-log
+    // records are already queued. Flush the writer before exiting so they land
+    // on disk instead of dying with the process.
+    if let Some(log) = &shutdown_log
+        && log.flush().await.is_err()
+    {
+        tracing::warn!("decision-log flush on shutdown failed (writer already gone)");
+    }
 
     tracing::info!("Shutdown complete");
 }

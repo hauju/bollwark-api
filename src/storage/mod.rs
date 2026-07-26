@@ -22,11 +22,6 @@ pub trait Store: Send + Sync + 'static {
 
     fn delete_challenge(&self, id: &Uuid) -> impl Future<Output = Result<(), CaptchaError>> + Send;
 
-    fn mark_solution_used(
-        &self,
-        challenge_id: &Uuid,
-    ) -> impl Future<Output = Result<(), CaptchaError>> + Send;
-
     /// Atomically consume a correctly-solved challenge. Exactly one caller
     /// can consume a challenge; later callers receive `ChallengeNotFound`
     /// because the challenge has been removed from the active set.
@@ -34,6 +29,17 @@ pub trait Store: Send + Sync + 'static {
         &self,
         challenge_id: &Uuid,
     ) -> impl Future<Output = Result<(), CaptchaError>> + Send;
+
+    /// Record a failed PoW attempt against a challenge and evict it once the
+    /// count reaches `max_attempts`. Returns `true` when the challenge was
+    /// evicted (cap reached), `false` while it stays live for retry. A
+    /// `max_attempts` of 0 disables the cap and is always a no-op. Bounds how
+    /// many (potentially memory-hard) verify attempts one challenge can absorb.
+    fn register_failed_attempt(
+        &self,
+        challenge_id: &Uuid,
+        max_attempts: u32,
+    ) -> impl Future<Output = Result<bool, CaptchaError>> + Send;
 
     fn store_site(&self, site: &Site) -> impl Future<Output = Result<(), CaptchaError>> + Send;
 
@@ -55,6 +61,15 @@ pub trait Store: Send + Sync + 'static {
         &self,
         site_key: &Uuid,
         new_secret: String,
+    ) -> impl Future<Output = Result<(), CaptchaError>> + Send;
+
+    /// Replace the site's allowed-origins list (already validated/normalized
+    /// by the caller). Returns `NotFound` if the site doesn't exist. Lets an
+    /// operator change a tenant's origin allowlist without rotating its secret.
+    fn update_site_origins(
+        &self,
+        site_key: &Uuid,
+        origins: Vec<String>,
     ) -> impl Future<Output = Result<(), CaptchaError>> + Send;
 
     /// Delete a site. Returns `NotFound` if the site doesn't exist.

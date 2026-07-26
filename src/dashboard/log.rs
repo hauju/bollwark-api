@@ -23,6 +23,14 @@ use super::types::{PuzzleRecord, VerifyRecord};
 /// SQLite write speed, not the channel.
 const CHANNEL_CAPACITY: usize = 8192;
 
+/// Max records folded into a single insert transaction. The writer greedily
+/// drains queued inserts up to this many and commits them together, so a burst
+/// that filled the channel costs a handful of fsyncs instead of thousands —
+/// the difference between the writer keeping up and the channel dropping under
+/// load. Capped (rather than draining the whole queue) to bound per-commit
+/// latency and the batch buffer.
+const MAX_INSERT_BATCH: usize = 256;
+
 pub(crate) const SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS puzzle_decisions (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,6 +118,12 @@ enum Msg {
         cutoff: String,
         ack: oneshot::Sender<rusqlite::Result<usize>>,
     },
+    /// Drain barrier: the writer acks only after every record queued *before*
+    /// this message has been committed (FIFO channel + single consumer). Used
+    /// on graceful shutdown to flush the queue without joining the writer
+    /// thread (which can't be joined cleanly — the detached retention sweeper
+    /// keeps a sender alive).
+    Flush(oneshot::Sender<()>),
 }
 
 #[derive(Clone)]
@@ -155,29 +169,38 @@ impl DecisionLog {
             .spawn(move || {
                 while let Some(msg) = rx.blocking_recv() {
                     match msg {
-                        Msg::Puzzle(rec) => {
-                            if let Err(e) = insert_puzzle(&writer, &rec, geoip.as_ref()) {
-                                tracing::warn!(error = %e, "decision-log: insert failed");
-                            }
+                        // Control messages run alone, in order, in their own tx.
+                        Msg::Clear(_) | Msg::Prune { .. } | Msg::Flush(_) => {
+                            handle_control(&writer, msg)
                         }
-                        Msg::Verify(rec) => {
-                            if let Err(e) = insert_verify(&writer, &rec) {
-                                tracing::warn!(error = %e, "decision-log: insert failed");
+                        // Inserts are batched: start with this record, then
+                        // greedily drain whatever inserts are already queued and
+                        // commit them in one transaction. A control message that
+                        // interrupts the drain is handled right after the flush
+                        // so ordering (e.g. a Clear wiping prior inserts) holds.
+                        first => {
+                            let mut batch = vec![first];
+                            let mut deferred = None;
+                            while batch.len() < MAX_INSERT_BATCH {
+                                match rx.try_recv() {
+                                    Ok(m @ (Msg::Clear(_) | Msg::Prune { .. } | Msg::Flush(_))) => {
+                                        deferred = Some(m);
+                                        break;
+                                    }
+                                    Ok(insert) => batch.push(insert),
+                                    Err(_) => break,
+                                }
                             }
-                        }
-                        Msg::Clear(ack) => {
-                            let result = clear_all(&writer);
-                            if let Err(e) = &result {
-                                tracing::warn!(error = %e, "decision-log: clear failed");
+                            if let Err(e) = flush_batch(&writer, &batch, geoip.as_ref()) {
+                                tracing::warn!(
+                                    error = %e,
+                                    count = batch.len(),
+                                    "decision-log: batch insert failed"
+                                );
                             }
-                            let _ = ack.send(result);
-                        }
-                        Msg::Prune { cutoff, ack } => {
-                            let result = prune_before(&writer, &cutoff);
-                            if let Err(e) = &result {
-                                tracing::warn!(error = %e, "decision-log: prune failed");
+                            if let Some(control) = deferred {
+                                handle_control(&writer, control);
                             }
-                            let _ = ack.send(result);
                         }
                     }
                 }
@@ -254,9 +277,19 @@ impl DecisionLog {
     /// writer thread so the delete is serialised with in-flight inserts.
     /// Called by the periodic retention sweeper in `main.rs`.
     pub async fn prune(&self, retention_hours: u64) -> rusqlite::Result<usize> {
-        let cutoff = (chrono::Utc::now()
-            - chrono::Duration::hours(i64::try_from(retention_hours).unwrap_or(i64::MAX)))
-        .to_rfc3339();
+        // `Duration::hours` panics out of range, and the previous
+        // `unwrap_or(i64::MAX)` fallback was itself guaranteed to panic — so an
+        // oversized retention window killed this task on its first tick and the
+        // log silently stopped being pruned. `AppConfig` now rejects such values
+        // at boot; fall back to an error here too so a direct caller can't take
+        // the sweeper down.
+        let Some(window) = i64::try_from(retention_hours)
+            .ok()
+            .and_then(chrono::Duration::try_hours)
+        else {
+            return Err(rusqlite::Error::InvalidQuery);
+        };
+        let cutoff = (chrono::Utc::now() - window).to_rfc3339();
         let (tx, rx) = oneshot::channel();
         if self
             .sender
@@ -267,6 +300,63 @@ impl DecisionLog {
             return Err(rusqlite::Error::InvalidQuery);
         }
         rx.await.unwrap_or(Err(rusqlite::Error::InvalidQuery))
+    }
+
+    /// Block until every record queued so far has been written to disk.
+    /// Called on graceful shutdown so decisions from requests that drained
+    /// during shutdown aren't lost with the process. Returns `Err(())` if the
+    /// writer thread is already gone.
+    pub async fn flush(&self) -> Result<(), ()> {
+        let (tx, rx) = oneshot::channel();
+        if self.sender.send(Msg::Flush(tx)).await.is_err() {
+            return Err(());
+        }
+        rx.await.map_err(|_| ())
+    }
+}
+
+/// Insert a batch of Puzzle/Verify records in a single transaction — one fsync
+/// per batch instead of per record. A single failing insert rolls back the
+/// whole batch, but the only realistic failures here are connection-level
+/// (disk full, I/O error) that would sink any approach.
+fn flush_batch(conn: &Connection, batch: &[Msg], geoip: Option<&GeoIp>) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for msg in batch {
+        match msg {
+            Msg::Puzzle(rec) => insert_puzzle(&tx, rec, geoip)?,
+            Msg::Verify(rec) => insert_verify(&tx, rec)?,
+            // Control messages are never placed in an insert batch.
+            Msg::Clear(_) | Msg::Prune { .. } | Msg::Flush(_) => {}
+        }
+    }
+    tx.commit()
+}
+
+/// Run a control message (Clear/Prune) in its own transaction and ack the
+/// caller. Serialised with inserts by the single writer thread.
+fn handle_control(conn: &Connection, msg: Msg) {
+    match msg {
+        Msg::Clear(ack) => {
+            let result = clear_all(conn);
+            if let Err(e) = &result {
+                tracing::warn!(error = %e, "decision-log: clear failed");
+            }
+            let _ = ack.send(result);
+        }
+        Msg::Prune { cutoff, ack } => {
+            let result = prune_before(conn, &cutoff);
+            if let Err(e) = &result {
+                tracing::warn!(error = %e, "decision-log: prune failed");
+            }
+            let _ = ack.send(result);
+        }
+        // A Flush is reached only after every earlier record has been
+        // committed (FIFO), so acking here signals the drain is complete.
+        Msg::Flush(ack) => {
+            let _ = ack.send(());
+        }
+        // Inserts are handled by flush_batch, never here.
+        Msg::Puzzle(_) | Msg::Verify(_) => {}
     }
 }
 
@@ -437,5 +527,38 @@ mod tests {
 
         // A cutoff before everything is a no-op.
         assert_eq!(prune_before(&conn, "2025-01-01T00:00:00+00:00").unwrap(), 0);
+    }
+
+    /// `flush` resolves only after the writer thread has committed everything
+    /// queued before it — the guarantee graceful shutdown relies on.
+    #[tokio::test]
+    async fn flush_commits_queued_records() {
+        let path =
+            std::env::temp_dir().join(format!("bollwark-flush-test-{}.db", uuid::Uuid::new_v4()));
+        let log = DecisionLog::open(&path, None).unwrap();
+        log.record_puzzle(PuzzleRecord {
+            challenge_id: Some(uuid::Uuid::new_v4()),
+            site_key: uuid::Uuid::new_v4(),
+            ip: "1.2.3.0".into(),
+            ip_count: 1,
+            site_count: 1,
+            score: 0,
+            tier: crate::risk::EscalationTier::InvisiblePass,
+            difficulty: 5,
+            outcome: "issued",
+            breakdown: Default::default(),
+            ip_reputation_category: None,
+            tls_fingerprint: "Skipped".into(),
+            user_agent: None,
+        });
+
+        // Returns only once the writer has committed the record above.
+        log.flush().await.unwrap();
+
+        let conn = Connection::open(&path).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM puzzle_decisions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
     }
 }

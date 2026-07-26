@@ -399,6 +399,7 @@ function renderApp(token) {
           h('tr', {},
             h('th', {}, 'name'),
             h('th', {}, 'site key'),
+            h('th', {}, 'origins'),
             h('th', {}, 'created'),
             h('th', {}, 'puzzles'),
             h('th', {}, 'verifies'),
@@ -559,7 +560,7 @@ function renderApp(token) {
   const renderSiteRows = (sites) => {
     if (sites.length === 0) {
       sitesTbody.replaceChildren(h('tr', {},
-        h('td', { colspan: '7', class: 'empty', style: 'text-align: center; padding: 24px;' },
+        h('td', { colspan: '8', class: 'empty', style: 'text-align: center; padding: 24px;' },
           'No sites registered. Click “Add site” to register one.'),
       ));
       return;
@@ -567,9 +568,13 @@ function renderApp(token) {
     sitesTbody.replaceChildren(...sites.map(s => {
       const p = Math.round(s.avg_bot_probability);
       const pCls = probabilityClass(p);
+      const origins = (s.allowed_origins && s.allowed_origins.length)
+        ? s.allowed_origins.join(', ')
+        : 'any';
       return h('tr', { style: 'cursor: default;' },
         h('td', {}, s.name),
         h('td', { class: 'mono', title: s.site_key }, s.site_key.slice(0, 8) + '…'),
+        h('td', { class: 'mono', title: origins }, origins),
         h('td', { class: 'mono' }, new Date(s.created_at).toLocaleString()),
         h('td', { class: 'mono' }, String(s.puzzle_count)),
         h('td', { class: 'mono' }, String(s.verify_count)),

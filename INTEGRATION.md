@@ -46,7 +46,8 @@ Response:
 ```json
 {
   "site_key": "00000000-0000-0000-0000-000000000000",
-  "secret_key": "hex-encoded-secret"
+  "secret_key": "hex-encoded-secret",
+  "allowed_origins": []
 }
 ```
 
@@ -58,6 +59,31 @@ Use the keys this way:
 | `secret_key` | Private backend config only |
 
 Never expose `secret_key` to the browser.
+
+### Optional: restrict browser origins
+
+Pass an `allowed_origins` array to limit which origins can request puzzles for
+this `site_key`:
+
+```bash
+curl -s -X POST http://localhost:3000/v1/sites \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"my-app","allowed_origins":["https://app.example.com"]}' | jq
+```
+
+Each entry is a full web origin — `http(s)://host[:port]`, no path or trailing
+slash (up to 32 entries; values are lowercased and validated, a bad entry
+returns `400`). When the list is non-empty, `GET /v1/puzzle` returns `403` to a
+browser whose `Origin` header isn't on the list. Requests with **no** `Origin`
+header (same-origin embeds, server-to-server calls) always pass.
+
+This is **tenant hygiene, not bot defense**: it stops a third party from
+embedding your public `site_key` on their own page and burning your quota or
+polluting your stats. It is *not* a security control — a non-browser client can
+forge the `Origin` header, so the real trust boundary stays the `secret_key` at
+`/v1/verify`. Change the list later without rotating the secret via
+`PUT /v1/admin/sites/{site_key}/origins` with the same `allowed_origins` body.
 
 ## 3. Embed the Widget
 
@@ -280,10 +306,11 @@ Common responses:
 | Case | Response | What to do |
 |---|---|---|
 | Missing or bad `site_key` | `400` from `/v1/puzzle` | Check frontend config |
+| Origin not on the site's allowlist | `403` from `/v1/puzzle` | Add the embedding origin via `allowed_origins`, or leave the allowlist empty to allow any origin. |
 | High-risk puzzle request (`block` tier) | `429` from `/v1/puzzle` | Show a retry/error state or fall back to your own moderation path. |
 | Missing verify auth | `401` from `/v1/verify` | Check backend `secret_key` |
 | Challenge expired | `410` from `/v1/verify` | Ask user to retry the form |
-| Replayed challenge | `404` or `409` from `/v1/verify` | Ask user to retry; do not accept the form |
+| Replayed challenge | `404` from `/v1/verify` (single-use: the challenge is removed on the first successful verify) | Ask user to retry; do not accept the form |
 | Valid PoW but blocked risk score | `{ "success": false }` | Reject or queue for manual review |
 
 ## 10. Local Test Harness

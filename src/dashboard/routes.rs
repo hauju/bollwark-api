@@ -40,6 +40,10 @@ pub fn router(state: AdminState) -> Router {
             "/v1/admin/sites/{id}/rotate",
             axum::routing::post(rotate_site),
         )
+        .route(
+            "/v1/admin/sites/{id}/origins",
+            axum::routing::put(update_site_origins),
+        )
         .with_state(state)
 }
 
@@ -112,7 +116,12 @@ async fn get_stats(State(state): State<AdminState>, headers: HeaderMap) -> impl 
     }
 
     match state.sessions.stats().await {
-        Ok(stats) => Json(stats).into_response(),
+        Ok(mut stats) => {
+            // The DB can't know how many records were dropped before they were
+            // written — merge in the writer's live drop counter.
+            stats.dropped_records = state.log.dropped_count();
+            Json(stats).into_response()
+        }
         Err(e) => {
             tracing::warn!(error = %e, "admin get_stats failed");
             (StatusCode::INTERNAL_SERVER_ERROR, "query failed").into_response()
@@ -179,6 +188,7 @@ async fn list_sites(State(state): State<AdminState>, headers: HeaderMap) -> impl
                 site_key: key,
                 name: s.name,
                 created_at: s.created_at.to_rfc3339(),
+                allowed_origins: s.allowed_origins,
                 puzzle_count: act.puzzle_count,
                 verify_count: act.verify_count,
                 last_seen: act.last_seen,
@@ -219,6 +229,51 @@ async fn rotate_site(
         Err(e) => {
             tracing::warn!(error = %e, "admin rotate_site failed");
             (StatusCode::INTERNAL_SERVER_ERROR, "rotate failed").into_response()
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateOriginsRequest {
+    #[serde(default)]
+    allowed_origins: Vec<String>,
+}
+
+/// Replace a site's origin allowlist without rotating its secret. Validates +
+/// normalizes each entry exactly like `POST /v1/sites`; a bad entry → 400.
+async fn update_site_origins(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateOriginsRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_auth(&state, &headers) {
+        return resp;
+    }
+    let site_key = match uuid::Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid site_key").into_response(),
+    };
+    let origins = match crate::site::types::normalize_origins(&body.allowed_origins) {
+        Ok(o) => o,
+        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+    };
+    match state
+        .store
+        .update_site_origins(&site_key, origins.clone())
+        .await
+    {
+        Ok(()) => {
+            tracing::info!(site_key = %site_key, "admin: updated site origins");
+            Json(json!({ "site_key": site_key.to_string(), "allowed_origins": origins }))
+                .into_response()
+        }
+        Err(crate::error::CaptchaError::NotFound) => {
+            (StatusCode::NOT_FOUND, "site not found").into_response()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "admin update_site_origins failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "update failed").into_response()
         }
     }
 }

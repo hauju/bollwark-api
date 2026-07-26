@@ -9,15 +9,17 @@ use bollwark::api;
 use bollwark::api::state::{AppState, tier_thresholds_from_config, verify_thresholds_from_config};
 use bollwark::api::types::{CreateSiteResponse, PuzzleResponse, VerifyResponse};
 use bollwark::config::AppConfig;
+use bollwark::dashboard::{DecisionLog, Sessions, routes::AdminState};
 use bollwark::puzzle::challenge::{
-    PuzzleEngine, compute_argon2id, has_leading_zero_bits, solve_argon2id_challenge,
-    solve_challenge,
+    PuzzleEngine, compute_argon2id, compute_sha256, has_leading_zero_bits,
+    solve_argon2id_challenge, solve_challenge,
 };
 use bollwark::puzzle::types::{Algorithm, Argon2idParams, PuzzleConfig};
 use bollwark::risk::{
     CidrListReputation, EscalationTier, FingerprintBlocklist, ReputationStore, RiskScorer,
     TrustedProxies, VerifyScorer,
 };
+use bollwark::storage::Store;
 use bollwark::storage::memory::InMemoryStore;
 
 fn test_app() -> axum::Router {
@@ -63,6 +65,12 @@ struct TestAppBuilder {
     load_ladder: Option<&'static str>,
     /// `IP_HARD_LIMIT` override (hard per-IP issuance cap; 0 disables).
     ip_hard_limit: Option<u32>,
+    /// `VERIFY_MAX_ATTEMPTS` override (failed PoW attempts per challenge; 0 disables).
+    verify_max_attempts: Option<u32>,
+    /// `MAX_ACTIVE_CHALLENGES` override (global challenge-map ceiling; 0 disables).
+    max_active_challenges: Option<usize>,
+    /// Mount the `/v1/admin/*` router backed by a temp-file decision log.
+    enable_admin: bool,
     /// `VERIFY_REQUIRE_BEHAVIOR`: score an absent behavior blob as flatline.
     verify_require_behavior: bool,
     /// Override the admin token. Default is the constant `TEST_ADMIN_TOKEN`,
@@ -103,6 +111,12 @@ impl TestAppBuilder {
             ip_hard_limit: self
                 .ip_hard_limit
                 .unwrap_or(AppConfig::default().ip_hard_limit),
+            verify_max_attempts: self
+                .verify_max_attempts
+                .unwrap_or(AppConfig::default().verify_max_attempts),
+            max_active_challenges: self
+                .max_active_challenges
+                .unwrap_or(AppConfig::default().max_active_challenges),
             ..AppConfig::default()
         };
         let puzzle_config = PuzzleConfig {
@@ -137,6 +151,25 @@ impl TestAppBuilder {
             None => Some(Arc::new(TEST_ADMIN_TOKEN.to_string())),
         };
         let store = Arc::new(InMemoryStore::new());
+
+        // Optionally mount the admin dashboard: a real (temp-file) decision log
+        // shared between AppState (so handlers record decisions) and AdminState
+        // (so the admin endpoints read them), plus the admin sub-router.
+        let (decision_log, admin) = if self.enable_admin {
+            let path = temp_db_path();
+            let log = DecisionLog::open(&path, None).expect("open admin decision log");
+            let sessions = Sessions::new(log.db_path().to_string());
+            let admin = AdminState {
+                sessions,
+                log: log.clone(),
+                token: Arc::new(TEST_ADMIN_TOKEN.to_string()),
+                store: store.clone(),
+            };
+            (Some(log), Some(admin))
+        } else {
+            (None, None)
+        };
+
         let state = Arc::new(AppState {
             store: store.clone(),
             engine: PuzzleEngine::new(puzzle_config),
@@ -144,13 +177,27 @@ impl TestAppBuilder {
             verify_scorer,
             tls_fingerprint_header: self.tls_header.map(String::from),
             trusted_proxies,
-            decision_log: None,
+            decision_log,
             admin_token,
             info_urls: None,
+            verify_permits: Arc::new(tokio::sync::Semaphore::new(
+                bollwark::api::state::verify_permits(),
+            )),
             config,
         });
-        (api::router(state, None), store)
+        (api::router(state, admin), store)
     }
+}
+
+/// Unique temp path for an admin decision-log SQLite file.
+fn temp_db_path() -> std::path::PathBuf {
+    let mut dir = std::env::temp_dir();
+    dir.push(format!(
+        "bollwark-admin-test-{}-{}.db",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    dir
 }
 
 fn with_connect_info(req: Request<Body>) -> Request<Body> {
@@ -209,6 +256,37 @@ async fn create_test_site(app: &axum::Router) -> CreateSiteResponse {
         .await
         .unwrap();
     serde_json::from_slice(&body).unwrap()
+}
+
+/// Like `create_test_site` but registers an origin allowlist. `origins` is
+/// serialized into the `allowed_origins` field of the provisioning request.
+async fn create_test_site_with_origins(app: &axum::Router, origins: &[&str]) -> CreateSiteResponse {
+    let body = serde_json::json!({ "name": "test site", "allowed_origins": origins });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/sites")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+/// Build a clean GET /v1/puzzle request, optionally carrying an `Origin`
+/// header (pass `None` to omit it entirely).
+fn puzzle_request_with_origin(site_key: &str, origin: Option<&str>) -> Request<Body> {
+    let mut req = puzzle_request(site_key, Some(CLEAN_UA), Some(CLEAN_LANG), Some(CLEAN_ENC));
+    if let Some(o) = origin {
+        req.headers_mut().insert("origin", o.parse().unwrap());
+    }
+    req
 }
 
 async fn get_test_puzzle(
@@ -430,6 +508,191 @@ async fn test_wrong_nonce() {
     assert!(!result.success);
 }
 
+/// POST /v1/verify with an explicit nonce; returns the status and the parsed
+/// body on 200.
+async fn verify_nonce(
+    app: &axum::Router,
+    secret: &str,
+    challenge_id: uuid::Uuid,
+    nonce: u64,
+) -> (StatusCode, Option<VerifyResponse>) {
+    let verify_body = serde_json::json!({ "challenge_id": challenge_id, "nonce": nonce });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/verify")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {secret}"))
+        .body(Body::from(serde_json::to_vec(&verify_body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    let status = resp.status();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    if status == StatusCode::OK {
+        (status, Some(serde_json::from_slice(&body).unwrap()))
+    } else {
+        (status, None)
+    }
+}
+
+/// The first `n` nonces that do NOT satisfy the difficulty target — guaranteed
+/// wrong solutions for exercising the failed-attempt path.
+fn wrong_nonces(prefix: &str, difficulty: u32, n: usize) -> Vec<u64> {
+    (0u64..)
+        .filter(|&nonce| !has_leading_zero_bits(&compute_sha256(prefix, nonce), difficulty))
+        .take(n)
+        .collect()
+}
+
+#[tokio::test]
+async fn test_failed_attempts_evict_challenge() {
+    // Cap failed attempts at 3; the 3rd wrong nonce evicts the challenge so it
+    // can't absorb further (potentially memory-hard) verify attempts.
+    let app = test_app_with(|b| b.verify_max_attempts = Some(3));
+    let site = create_test_site(&app).await;
+    let (_, puzzle) = get_test_puzzle(&app, &site.site_key.to_string()).await;
+    let puzzle = puzzle.unwrap();
+
+    let wrong = wrong_nonces(&puzzle.prefix, puzzle.difficulty, 3);
+    let correct = solve_challenge(&puzzle.prefix, puzzle.difficulty);
+
+    // First two wrong nonces fail but leave the challenge live for retry.
+    for &nonce in &wrong[..2] {
+        let (status, body) = verify_nonce(&app, &site.secret_key, puzzle.challenge_id, nonce).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.unwrap().success);
+    }
+    // Third failed attempt reaches the cap and evicts the challenge.
+    let (status, body) = verify_nonce(&app, &site.secret_key, puzzle.challenge_id, wrong[2]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!body.unwrap().success);
+
+    // Even the correct nonce now finds no challenge — it was evicted.
+    let (status, _) = verify_nonce(&app, &site.secret_key, puzzle.challenge_id, correct).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_max_active_challenges_blocks_new_issuance() {
+    // Ceiling of 2 active challenges: the third puzzle request is shed with a
+    // 429 (Block tier) even though its per-IP score is clean.
+    let app = test_app_with(|b| b.max_active_challenges = Some(2));
+    let site = create_test_site(&app).await;
+    let site_key = site.site_key.to_string();
+
+    let (s1, p1) = get_test_puzzle(&app, &site_key).await;
+    assert_eq!(s1, StatusCode::OK);
+    assert!(p1.is_some());
+    let (s2, p2) = get_test_puzzle(&app, &site_key).await;
+    assert_eq!(s2, StatusCode::OK);
+    assert!(p2.is_some());
+
+    // The map now holds 2 challenges == the cap, so the next one is shed.
+    let (s3, _) = get_test_puzzle(&app, &site_key).await;
+    assert_eq!(s3, StatusCode::TOO_MANY_REQUESTS);
+}
+
+/// Issue a puzzle from a specific client IP so a test can distinguish a
+/// flooding source from an unrelated visitor.
+async fn get_test_puzzle_from_ip(
+    app: &axum::Router,
+    site_key: &str,
+    ip: &str,
+) -> (StatusCode, Option<PuzzleResponse>) {
+    let req = puzzle_request(site_key, Some(CLEAN_UA), Some(CLEAN_LANG), Some(CLEAN_ENC));
+    let resp = app
+        .clone()
+        .oneshot(with_connect_info_ip(req, ip))
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    if status == StatusCode::OK {
+        (status, Some(serde_json::from_slice(&body).unwrap()))
+    } else {
+        (status, None)
+    }
+}
+
+#[tokio::test]
+async fn test_pressure_sheds_flooding_ip_before_the_map_fills() {
+    // The global ceiling alone is indiscriminate: at 100% it refuses everyone,
+    // so one flooding IP could 429 every tenant. Past 80% of capacity we refuse
+    // the sources that are over IP_HARD_LIMIT instead, which is what stops the
+    // map ever reaching the ceiling on a single source's account.
+    //
+    // Ceiling 10 → shed threshold is 8 held challenges. IP_HARD_LIMIT 3 → the
+    // flooder trips the per-IP cap on its 4th request.
+    let app = test_app_with(|b| {
+        b.max_active_challenges = Some(10);
+        b.ip_hard_limit = Some(3);
+    });
+    let site = create_test_site(&app).await;
+    let site_key = site.site_key.to_string();
+
+    // The flooder is served while headroom remains — being over IP_HARD_LIMIT
+    // only throttles difficulty until the map is under pressure.
+    let mut issued = 0;
+    let mut shed_at = None;
+    for attempt in 1..=12 {
+        let (status, _) = get_test_puzzle_from_ip(&app, &site_key, "203.0.113.9").await;
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            shed_at = Some(attempt);
+            break;
+        }
+        assert_eq!(status, StatusCode::OK, "attempt {attempt} should be served");
+        issued += 1;
+    }
+
+    // Shed on the 9th request, with 8 of 10 slots used — *not* at the ceiling.
+    assert_eq!(
+        shed_at,
+        Some(9),
+        "flooder should be shed once 80% is reached"
+    );
+    assert_eq!(issued, 8);
+
+    // The critical property: at that same moment the map still has headroom, so
+    // an unrelated visitor (nowhere near the per-IP cap) is still served. This
+    // is what the old global-only shed got wrong — it refused this request too.
+    let (status, puzzle) = get_test_puzzle_from_ip(&app, &site_key, "198.51.100.4").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an unrelated IP must still be served while the map has headroom"
+    );
+    assert!(puzzle.is_some());
+}
+
+#[tokio::test]
+async fn test_full_map_still_sheds_everyone_as_last_resort() {
+    // Pressure-based shedding targets sources over IP_HARD_LIMIT. A distributed
+    // flood that stays under the per-IP cap slips past it, so the global ceiling
+    // must still refuse everyone once the map is genuinely full.
+    let app = test_app_with(|b| {
+        b.max_active_challenges = Some(3);
+        // Disable the per-IP cap so nothing is shed for flooding — the only
+        // thing that can refuse a request here is the ceiling itself.
+        b.ip_hard_limit = Some(0);
+    });
+    let site = create_test_site(&app).await;
+    let site_key = site.site_key.to_string();
+
+    for (i, ip) in ["203.0.113.1", "203.0.113.2", "203.0.113.3"]
+        .iter()
+        .enumerate()
+    {
+        let (status, _) = get_test_puzzle_from_ip(&app, &site_key, ip).await;
+        assert_eq!(status, StatusCode::OK, "challenge {i} should be issued");
+    }
+
+    let (status, _) = get_test_puzzle_from_ip(&app, &site_key, "203.0.113.4").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
 #[tokio::test]
 async fn test_create_site_empty_name() {
     let app = test_app();
@@ -495,6 +758,91 @@ async fn test_create_site_missing_authorization_unauthorized() {
 
     let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+// --- Per-site origin allowlist tests ---
+
+#[tokio::test]
+async fn test_origin_allowlist_matching_origin_passes() {
+    let app = test_app();
+    let site = create_test_site_with_origins(&app, &["https://example.com"]).await;
+    let key = site.site_key.to_string();
+
+    let req = puzzle_request_with_origin(&key, Some("https://example.com"));
+    let (status, _) = send_puzzle(&app, with_connect_info(req)).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_origin_allowlist_mismatched_origin_forbidden() {
+    let app = test_app();
+    let site = create_test_site_with_origins(&app, &["https://example.com"]).await;
+    let key = site.site_key.to_string();
+
+    let req = puzzle_request_with_origin(&key, Some("https://evil.example"));
+    let (status, _) = send_puzzle(&app, with_connect_info(req)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_origin_allowlist_missing_origin_passes() {
+    // No Origin header → always allowed (same-origin embeds and
+    // server-to-server fetches don't send one).
+    let app = test_app();
+    let site = create_test_site_with_origins(&app, &["https://example.com"]).await;
+    let key = site.site_key.to_string();
+
+    let req = puzzle_request_with_origin(&key, None);
+    let (status, _) = send_puzzle(&app, with_connect_info(req)).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_no_allowlist_allows_any_origin() {
+    // A site registered without an allowlist accepts any Origin.
+    let app = test_app();
+    let site = create_test_site(&app).await;
+    let key = site.site_key.to_string();
+
+    let req = puzzle_request_with_origin(&key, Some("https://anything.example"));
+    let (status, _) = send_puzzle(&app, with_connect_info(req)).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_origin_allowlist_lowercases_header_before_matching() {
+    // The stored entry is normalized to lowercase; a mixed-case Origin header
+    // that lowercases to an allowed value must still match.
+    let app = test_app();
+    let site = create_test_site_with_origins(&app, &["https://example.com"]).await;
+    let key = site.site_key.to_string();
+
+    let req = puzzle_request_with_origin(&key, Some("HTTPS://Example.COM"));
+    let (status, _) = send_puzzle(&app, with_connect_info(req)).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_create_site_rejects_invalid_origin() {
+    let app = test_app();
+    let body = serde_json::json!({ "name": "bad", "allowed_origins": ["not-an-origin"] });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/sites")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_create_site_echoes_normalized_origins() {
+    let app = test_app();
+    let site = create_test_site_with_origins(&app, &["HTTPS://Example.COM"]).await;
+    assert_eq!(site.allowed_origins, vec!["https://example.com"]);
 }
 
 #[tokio::test]
@@ -693,30 +1041,37 @@ async fn test_spam_plus_suspicious_ua_serves_hard_pow() {
 }
 
 #[tokio::test]
-async fn test_ip_hard_limit_caps_issuance_regardless_of_score() {
+async fn test_ip_hard_limit_throttles_to_max_pow_regardless_of_score() {
     let app = test_app_with(|b| b.ip_hard_limit = Some(5));
     let site = create_test_site(&app).await;
     let key = site.site_key.to_string();
 
-    // Clean headers keep the risk score at ~0 — the scoring path alone
-    // would never block this client, which is exactly what the hard cap
-    // is for.
+    // Clean headers keep the risk score at ~0 — the scoring path alone would
+    // never escalate this client, which is exactly what the hard cap is for.
+    // Below the cap, puzzles come out at the base InvisiblePass difficulty.
     let flood_ip = "10.9.9.9";
     for _ in 0..5 {
         let req = puzzle_request(&key, Some(CLEAN_UA), Some(CLEAN_LANG), Some(CLEAN_ENC));
-        let (status, _) = send_puzzle(&app, with_connect_info_ip(req, flood_ip)).await;
+        let (status, puzzle) = send_puzzle(&app, with_connect_info_ip(req, flood_ip)).await;
         assert_eq!(status, StatusCode::OK);
+        assert_eq!(puzzle.unwrap().tier, EscalationTier::InvisiblePass);
     }
 
-    // Request 6 crosses IP_HARD_LIMIT=5 → forced Block tier → 429.
+    // Request 6 crosses IP_HARD_LIMIT=5 → still issued, but throttled to the
+    // max-difficulty HardPow tier rather than hard-blocked, so a shared IP
+    // (CGNAT) isn't 429'd with no recourse. (max_difficulty is 16 in tests.)
     let req = puzzle_request(&key, Some(CLEAN_UA), Some(CLEAN_LANG), Some(CLEAN_ENC));
-    let (status, _) = send_puzzle(&app, with_connect_info_ip(req, flood_ip)).await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-
-    // The cap is per-IP: a different client is unaffected.
-    let req = puzzle_request(&key, Some(CLEAN_UA), Some(CLEAN_LANG), Some(CLEAN_ENC));
-    let (status, _) = send_puzzle(&app, with_connect_info_ip(req, "10.9.9.10")).await;
+    let (status, puzzle) = send_puzzle(&app, with_connect_info_ip(req, flood_ip)).await;
     assert_eq!(status, StatusCode::OK);
+    let puzzle = puzzle.unwrap();
+    assert_eq!(puzzle.tier, EscalationTier::HardPow);
+    assert_eq!(puzzle.difficulty, 16);
+
+    // The cap is per-IP: a different client is unaffected (base difficulty).
+    let req = puzzle_request(&key, Some(CLEAN_UA), Some(CLEAN_LANG), Some(CLEAN_ENC));
+    let (status, puzzle) = send_puzzle(&app, with_connect_info_ip(req, "10.9.9.10")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(puzzle.unwrap().tier, EscalationTier::InvisiblePass);
 }
 
 #[tokio::test]
@@ -1395,4 +1750,196 @@ async fn test_tls_fingerprint_disabled_when_header_unset() {
     let (status, puzzle) = send_puzzle(&app, with_connect_info(req)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(puzzle.unwrap().tier, EscalationTier::InvisiblePass);
+}
+
+// --- Admin router (/v1/admin/*) ---
+
+/// Issue an admin request; returns the status and parsed JSON body (Null if
+/// the body isn't JSON).
+async fn admin_req(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    bearer: Option<&str>,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(b) = bearer {
+        builder = builder.header("Authorization", format!("Bearer {b}"));
+    }
+    let req = match body {
+        Some(json) => builder
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&json).unwrap()))
+            .unwrap(),
+        None => builder.body(Body::empty()).unwrap(),
+    };
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+#[tokio::test]
+async fn test_admin_requires_bearer() {
+    let (app, _store) = test_app_with_store(|b| b.enable_admin = true);
+    // No bearer at all.
+    let (status, _) = admin_req(&app, "GET", "/v1/admin/stats", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // Wrong bearer.
+    let (status, _) = admin_req(&app, "GET", "/v1/admin/stats", Some("nope"), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_admin_stats_exposes_dropped_records() {
+    let (app, _store) = test_app_with_store(|b| b.enable_admin = true);
+    let (status, body) =
+        admin_req(&app, "GET", "/v1/admin/stats", Some(TEST_ADMIN_TOKEN), None).await;
+    assert_eq!(status, StatusCode::OK);
+    // The drop counter is surfaced (0 on a fresh log) — the field must exist.
+    assert_eq!(body["dropped_records"], serde_json::json!(0));
+}
+
+#[tokio::test]
+async fn test_admin_update_origins_happy_path() {
+    let (app, store) = test_app_with_store(|b| b.enable_admin = true);
+    let site = create_test_site(&app).await;
+    let uri = format!("/v1/admin/sites/{}/origins", site.site_key);
+    let body = serde_json::json!({ "allowed_origins": ["https://Allowed.Example"] });
+
+    let (status, resp) = admin_req(&app, "PUT", &uri, Some(TEST_ADMIN_TOKEN), Some(body)).await;
+    assert_eq!(status, StatusCode::OK);
+    // Response echoes the normalized (lowercased) origin.
+    assert_eq!(resp["allowed_origins"][0], "https://allowed.example");
+    // And the store actually reflects it.
+    let reloaded = store
+        .get_site_by_key(&site.site_key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reloaded.allowed_origins, vec!["https://allowed.example"]);
+}
+
+#[tokio::test]
+async fn test_admin_update_origins_rejects_bad_input() {
+    let (app, _store) = test_app_with_store(|b| b.enable_admin = true);
+    let site = create_test_site(&app).await;
+
+    // Invalid UUID in the path → 400.
+    let (status, _) = admin_req(
+        &app,
+        "PUT",
+        "/v1/admin/sites/not-a-uuid/origins",
+        Some(TEST_ADMIN_TOKEN),
+        Some(serde_json::json!({ "allowed_origins": [] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Malformed origin (no scheme) → 400.
+    let uri = format!("/v1/admin/sites/{}/origins", site.site_key);
+    let (status, _) = admin_req(
+        &app,
+        "PUT",
+        &uri,
+        Some(TEST_ADMIN_TOKEN),
+        Some(serde_json::json!({ "allowed_origins": ["notaurl"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Unknown (but well-formed) site_key → 404.
+    let uri = format!("/v1/admin/sites/{}/origins", uuid::Uuid::new_v4());
+    let (status, _) = admin_req(
+        &app,
+        "PUT",
+        &uri,
+        Some(TEST_ADMIN_TOKEN),
+        Some(serde_json::json!({ "allowed_origins": ["https://x.example"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_admin_rotate_and_delete_site() {
+    let (app, store) = test_app_with_store(|b| b.enable_admin = true);
+    let site = create_test_site(&app).await;
+
+    // Rotate: 200 with a new secret; the old one stops resolving.
+    let uri = format!("/v1/admin/sites/{}/rotate", site.site_key);
+    let (status, resp) = admin_req(&app, "POST", &uri, Some(TEST_ADMIN_TOKEN), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let new_secret = resp["secret_key"].as_str().unwrap();
+    assert_ne!(new_secret, site.secret_key);
+    assert!(
+        store
+            .get_site_by_secret(&site.secret_key)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get_site_by_secret(new_secret)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // Delete: 200, then a second delete is 404.
+    let uri = format!("/v1/admin/sites/{}", site.site_key);
+    let (status, _) = admin_req(&app, "DELETE", &uri, Some(TEST_ADMIN_TOKEN), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = admin_req(&app, "DELETE", &uri, Some(TEST_ADMIN_TOKEN), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_malformed_query_returns_json_error_envelope() {
+    let app = test_app();
+    // site_key isn't a UUID → the query extractor rejects → 400 with the JSON
+    // envelope, not axum's default plain-text 400.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/puzzle?site_key=not-a-uuid")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        json.get("error").is_some(),
+        "expected JSON error envelope, got {json}"
+    );
+}
+
+#[tokio::test]
+async fn test_malformed_verify_body_returns_json_error_envelope() {
+    let app = test_app();
+    let site = create_test_site(&app).await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/verify")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", site.secret_key))
+        .body(Body::from("this is not json"))
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        json.get("error").is_some(),
+        "expected JSON error envelope, got {json}"
+    );
 }

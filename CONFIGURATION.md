@@ -10,21 +10,24 @@ A `.env` file in the working directory is loaded automatically at startup (via `
 |---|---|---|
 | `LISTEN_ADDR` | `0.0.0.0:3000` | Socket address to bind |
 | `RUST_LOG` | `info` | Tracing filter |
-| `PUZZLE_ALGORITHM` | `sha256` | PoW algorithm: `sha256` or `argon2id` |
+| `STATIC_DIR` | `static` | Filesystem directory for the bundled widget assets and landing page. Resolved relative to the process working directory unless absolute. |
+| `PUZZLE_ALGORITHM` | `argon2id` | PoW algorithm: `argon2id` (default, memory-hard) or `sha256`. SHA-256 is fast to verify but trivially GPU-parallelised, so it taxes honest browsers more than attackers; Argon2id collapses that asymmetry. |
 | `ARGON2_M_COST` | `8192` | Argon2id memory cost in KiB (when `PUZZLE_ALGORITHM=argon2id`) |
 | `ARGON2_T_COST` | `2` | Argon2id iteration count |
 | `ARGON2_P_COST` | `1` | Argon2id lanes / parallelism |
-| `DEFAULT_DIFFICULTY` | `18` | Base PoW difficulty (leading zero bits). ~250–500ms on a modern CPU; ~3–5s on low-end mobile in a Web Worker. For Argon2id, drop to `4`–`6`. |
-| `MAX_DIFFICULTY` | `28` | Upper clamp on the final difficulty (tier bump + `LOAD_LADDER` floor) |
+| `DEFAULT_DIFFICULTY` | `5` (argon2id) / `18` (sha256) | Base PoW difficulty (leading zero bits). The default tracks `PUZZLE_ALGORITHM` since each Argon2id hash is orders of magnitude slower than SHA-256. An explicit value overrides. |
+| `MAX_DIFFICULTY` | `10` (argon2id) / `28` (sha256) | Upper clamp on the final difficulty (tier bump + `LOAD_LADDER` floor). Also algorithm-tracking so a bump/rung can't push a memory-hard solve into the minutes range. |
 | `LOAD_LADDER` | _unset_ | Aggregate site-load difficulty floor. Comma-separated `threshold:difficulty` rungs, e.g. `200:20,500:22,1000:24` (thresholds are requests per `RATE_WINDOW_SECS` window; difficulty in leading zero bits). When the per-site request count crosses a rung, the floor is raised for every visitor. Composes with the per-request tier via `max()`, clamped to `MAX_DIFFICULTY`. Never blocks — only raises difficulty. Empty/unset = no floor. Malformed = boot panics. |
 | `CHALLENGE_TTL_SECS` | `300` | How long an issued puzzle is valid |
-| `CLEANUP_INTERVAL_SECS` | `60` | How often expired challenges are swept |
+| `CLEANUP_INTERVAL_SECS` | `60` | How often expired challenges + stale rate windows are swept. Coerced to at least `1` — a `0` period would panic the sweeper and let the in-memory maps grow unbounded. |
+| `MAX_ACTIVE_CHALLENGES` | `1000000` | Global ceiling on challenges held in memory. Once reached, `GET /v1/puzzle` sheds new issuance with `block` (429) regardless of score — a memory backstop against a distributed / IPv6-spread flood that stays under `IP_HARD_LIMIT` per source. `0` disables (and skips the per-request count check). |
 | `TIER_CHECKBOX_MIN` | `20` | Score at/above which tier becomes `checkbox` |
 | `TIER_HARD_POW_MIN` | `40` | …becomes `hard_pow` (covers the whole 40–`TIER_BLOCK_MIN` band) |
 | `TIER_BLOCK_MIN` | `85` | …becomes `block` (returns 429) |
-| `IP_HARD_LIMIT` | `500` | Hard per-IP issuance cap: once an IP (IPv6: its /64 bucket) exceeds this many puzzle requests in the 60s rate window, further requests get `block` (429) regardless of score. `0` disables. Set `0` (or higher) when load-testing from a single IP. |
+| `IP_HARD_LIMIT` | `500` | Hard per-IP issuance cap: once an IP (IPv6: its /64 bucket) exceeds this many puzzle requests in the 60s rate window, further requests are throttled to a **max-difficulty PoW** regardless of score (not a 429 — a hard block would strand CGNAT users). `0` disables. Set `0` (or higher) when load-testing from a single IP. |
 | `VERIFY_SHADOW_MIN` | `30` | Verify-time score for shadow-fail (success returned, log emitted) |
 | `VERIFY_BLOCK_MIN` | `60` | Verify-time score for hard rejection |
+| `VERIFY_MAX_ATTEMPTS` | `10` | Max failed PoW attempts a single challenge tolerates before the store evicts it. A wrong nonce leaves the challenge live for legitimate retry, so this bounds how many (with `argon2id`, memory-hard) verify attempts one challenge can absorb. `0` disables the cap. |
 | `VERIFY_REQUIRE_BEHAVIOR` | `false` | When truthy, a verify request with no `behavior` blob scores +30 (like a flatline) instead of 0. Enable when every legitimate client is the bundled widget. |
 | `IP_REPUTATION_FILE` | _unset_ | Path to CIDR reputation list (signal off if unset) |
 | `TLS_FINGERPRINT_HEADER` | _unset_ | Header to read TLS fingerprint from (signal off if unset) |
@@ -56,25 +59,32 @@ Standard `tracing-subscriber` env filter. Useful targets:
 - `bollwark::api::handlers=debug` — adds per-request scoring detail (Pass-tier verifies)
 - `bollwark=trace` — everything
 
+### `STATIC_DIR`
+Filesystem directory holding the bundled browser widget assets and the `landing.html` page served at `/`.
+
+- Default: `static`
+- Resolved relative to the process working directory unless absolute. Deployments not started from the repo root (systemd, etc.) should set an absolute path; the Dockerfile's `WORKDIR` already handles the container case.
+- Only the filesystem location is configurable — the `/static` URL prefix is unaffected.
+
 ---
 
 ## PoW configuration
 
 PoW difficulty is the number of **leading zero bits** the SHA-256 hash of `prefix || nonce` must have. Each additional bit roughly doubles the expected solve time.
 
-### `DEFAULT_DIFFICULTY` (default `18`)
-Base difficulty for `invisible_pass` tier. Each additional bit doubles expected solve time:
+### `DEFAULT_DIFFICULTY` (default `5` for argon2id, `18` for sha256)
+Base difficulty for `invisible_pass` tier. Because per-hash cost differs by orders of magnitude between the algorithms, the default follows `PUZZLE_ALGORITHM`; an explicit `DEFAULT_DIFFICULTY` always overrides. The SHA-256 wall-clock table (each additional bit doubles expected solve time):
 
-| Difficulty | Modern CPU | Low-end mobile (Web Worker) |
+| Difficulty (sha256) | Modern CPU | Low-end mobile (Web Worker) |
 |---|---|---|
 | 16 | ~100ms | ~1–2s |
 | 18 | ~300ms | ~3–5s |
 | 20 | ~1s | ~10–15s |
 | 22 | ~4s | timeout territory |
 
-The default `18` trades a bit of bot resistance for materially better mobile UX. Bump to `20` if you have telemetry showing your audience is desktop-heavy.
+For Argon2id, a single memory-hard hash already costs tens of milliseconds, so `5` bits (~32 expected hashes) lands in a comparable few-hundred-ms-to-few-seconds range. Setting Argon2id with a SHA-256-scale difficulty (e.g. `18`) makes puzzles effectively unsolvable — the server logs a loud WARN at boot when it detects that combination.
 
-### `MAX_DIFFICULTY` (default `28`)
+### `MAX_DIFFICULTY` (default `10` for argon2id, `28` for sha256)
 Upper clamp on the final difficulty. The risk tier can bump difficulty above `DEFAULT_DIFFICULTY`:
 - `invisible_pass` → `DEFAULT_DIFFICULTY`
 - `checkbox` → `DEFAULT_DIFFICULTY + 2`
@@ -101,6 +111,17 @@ A challenge is valid for this many seconds after issuance. Verify with an expire
 ### `CLEANUP_INTERVAL_SECS` (default `60`)
 How often the background sweeper deletes expired challenges and stale rate-window counters.
 
+### Argon2id verify-side cost
+
+With `argon2id` (the default), every `POST /v1/verify` re-derives one full Argon2id hash server-side to check the submitted nonce. At the defaults (`ARGON2_M_COST=8192` KiB, `ARGON2_T_COST=2`, `ARGON2_P_COST=1`) that is tens of milliseconds of CPU plus an 8 MiB allocation **per attempt**. Two mechanisms bound the resulting DoS surface:
+
+- The verify hash runs on a `spawn_blocking` thread, not an async runtime worker, so even a burst of memory-hard verifies can't starve the runtime and stall other endpoints (`/v1/puzzle`, `/healthz`).
+- A failed PoW check leaves the challenge live for legitimate wrong-nonce retry, but `VERIFY_MAX_ATTEMPTS` (default 10) evicts a challenge once its failed-attempt count hits the cap, so one challenge can't be reused as an unlimited work amplifier.
+
+`/v1/verify` is still gated only by the per-site secret bearer token, so the residual exposure is a hostile or compromised integrator (or a leaked secret), not the anonymous public — but they can no longer take the whole service down or replay one challenge indefinitely. The `sha256` path runs inline (one SHA-256 hash per verify is negligible).
+
+Keep `ARGON2_M_COST` modest so each verify stays cheap, treat every `secret_key` as a sensitive credential, and put proxy-level rate limiting in front of `/v1/verify` if your integrators are not fully trusted.
+
 ---
 
 ## Risk tier thresholds (puzzle-time)
@@ -118,7 +139,7 @@ Defaults: `20` / `40` / `85`.
 
 ### `IP_HARD_LIMIT` (default `500`)
 
-A hard per-IP issuance cap that sits *outside* the scoring pipeline. The rate signal maxes out at +45, so a flood with clean browser headers can never reach `TIER_BLOCK_MIN` on its own — without this cap, a single host could request puzzles at line rate indefinitely (each request stores a challenge in memory and writes a decision-log row). Once an IP (IPv6: its /64 bucket) exceeds the cap within the 60s rate window, further requests are served the `block` tier (429) regardless of score; the window resets like any other rate counter. The default `500`/min is far above organic per-visitor traffic (the widget fetches one puzzle per page load), including large CGNAT egresses. Set `0` to disable — do this (or raise it) when driving load tests such as `examples/loadgen.rs` from a single IP.
+A hard per-IP issuance cap that sits *outside* the scoring pipeline. The rate signal maxes out at +45, so a flood with clean browser headers can never reach `TIER_BLOCK_MIN` on its own. Once an IP (IPv6: its /64 bucket) exceeds the cap within the 60s rate window, further requests are throttled to a **max-difficulty** PoW (`hard_pow` tier at `MAX_DIFFICULTY`) regardless of score — *not* a hard 429. A plain block would also strand shared-IP populations (CGNAT / corporate NAT: hundreds of legitimate users behind one address) with no recourse, so max PoW is used instead: it makes each request expensive enough to throttle an abuser while a real user still gets through, slowly. The runaway-memory concern the cap originally guarded (each issued challenge sits in memory) is handled separately by `MAX_ACTIVE_CHALLENGES`. The window resets like any other rate counter. The default `500`/min is far above organic per-visitor traffic (the widget fetches one puzzle per page load), including large CGNAT egresses. Set `0` to disable — do this (or raise it) when driving load tests such as `examples/loadgen.rs` from a single IP.
 
 ### Puzzle-time signals
 
@@ -163,6 +184,12 @@ By default, a verify request with no `behavior` blob at all contributes 0 — a 
 | Behavior: blob absent (only with `VERIFY_REQUIRE_BEHAVIOR`) | +30 |
 | Behavior: click without pointer movement | +15 |
 | Behavior: sub-50ms first interaction | +20 |
+| Behavior: driven browser (`navigator.webdriver` **or** driver artifacts) | +30 |
+| Behavior: headless hints | +20 |
+
+The two automation markers — `navigator.webdriver` and driver artifacts (ChromeDriver's `cdc_` globals, legacy Selenium/PhantomJS markers) — are **one dimension and saturate at +30**; they don't sum. They describe the same fact, and scoring them additively would put every driven browser at the block threshold. The artifact probe adds *recall*, catching drivers that scrub `navigator.webdriver` but leave the globals behind.
+
+Headless hints (`HeadlessChrome` UA, zero outer window dimensions, empty `navigator.languages`) sit at +20 — deliberately below `VERIFY_SHADOW_MIN`, so a false positive on an otherwise-organic visitor changes nothing on its own. Modern headless modes defeat these checks; like the rest of the behavioral layer they raise the floor against the cheap long tail rather than catching stealth tooling. All three probes are reduced to a single boolean in the browser, so the blob carries no fingerprinting entropy.
 
 ---
 
@@ -246,7 +273,7 @@ Empty/unset → no peer is trusted → signal never fires (boot log will WARN if
 
 ## Site registration & provisioning
 
-Sites are registered with `POST /v1/sites`, which returns a `site_key` (public, embedded in the widget) and a `secret_key` (server-to-server, used as the bearer for `/v1/verify`). Two settings govern this surface:
+Sites are registered with `POST /v1/sites`, which returns a `site_key` (public, embedded in the widget) and a `secret_key` (server-to-server, used as the bearer for `/v1/verify`). An optional `allowed_origins` array (`http(s)://host[:port]` entries, max 32) restricts which browser origins `GET /v1/puzzle` serves — a non-listed `Origin` gets `403`; requests with no `Origin` header always pass. This is tenant hygiene (quota/stats protection), not bot defense — `Origin` is browser-set only. Change it later without rotating the secret via `PUT /v1/admin/sites/{id}/origins`. Two settings govern this surface:
 
 ### `ADMIN_TOKEN`
 Bearer token required for `POST /v1/sites`. **When unset, `/v1/sites` returns 404** — no anonymous provisioning. Generate with `openssl rand -hex 32` and pass on the call:
@@ -261,7 +288,7 @@ curl -X POST http://localhost:3000/v1/sites \
 The same token also gates `/v1/admin/*` (validation dashboard).
 
 ### `SITE_DB_PATH`
-Path to a SQLite file that persists site rows. When unset, sites live only in `Arc<RwLock<HashMap>>` and are lost on restart — meaning every integrator's stored `secret_key` becomes invalid. **Set this for any deployment beyond local dev.** Created on first run, schema is `(site_key TEXT PRIMARY KEY, secret_key TEXT UNIQUE, name TEXT, created_at TEXT)`.
+Path to a SQLite file that persists site rows. When unset, sites live only in `Arc<RwLock<HashMap>>` and are lost on restart — meaning every integrator's stored `secret_key` becomes invalid. **Set this for any deployment beyond local dev.** Created on first run, schema is `(site_key TEXT PRIMARY KEY, secret_key TEXT UNIQUE, name TEXT, created_at TEXT, allowed_origins TEXT)`. Databases from before `allowed_origins` shipped are migrated in place on open.
 
 Challenges and rate-window counters intentionally stay in-memory: they're cheap to lose and a fresh start is fine.
 
@@ -326,7 +353,7 @@ Each session row includes the puzzle score, tier, signal breakdown, verify resul
 ### `ANONYMIZE_LOG_IP` (default `true`)
 Controls the IP value persisted in each decision-log row. On by default: the IP is truncated to its network prefix (IPv4 → /24, e.g. `203.0.113.42` → `203.0.113.0`; IPv6 → /48) before it is written, so the durable log — and the dashboard reading from it — never holds a per-visitor address. This is the data-minimization control that keeps the dashboard defensible under GDPR.
 
-Live scoring (rate window, IP reputation, XFF resolution) always operates on the **full** IP, so anonymizing the logged copy does not weaken detection. Set `ANONYMIZE_LOG_IP=false` to store full IPs where the operator is the data controller and needs them for abuse forensics. Note: the full IP still appears transiently in the structured `puzzle_decision` tracing event (`ip=…`); this flag governs the durable decision log only, not your log pipeline.
+Live scoring (rate window, IP reputation, XFF resolution) always operates on the **full** IP, so anonymizing the logged copy does not weaken detection. Set `ANONYMIZE_LOG_IP=false` to store full IPs where the operator is the data controller and needs them for abuse forensics. The flag applies to *everything the handler emits*: both the durable decision log and the structured `puzzle_decision` tracing event (`ip=…`) use the truncated copy when it's on, so shipping stderr to a log aggregator doesn't leak per-visitor addresses.
 
 ### `LOG_RETENTION_HOURS` (default `72`)
 Caps how long decision-log rows live. A background sweeper (spawned at startup, only when `ADMIN_DB_PATH` is set) deletes any puzzle/verify row older than the window. The default `72` matches ALTCHA's retention; together with `ANONYMIZE_LOG_IP` it is what makes the durable log defensible under GDPR **storage limitation** (Art. 5(1)(e)) — without it the table grows forever and the only way to bound it is the operator-initiated "Clear all".
@@ -384,7 +411,11 @@ A production-leaning configuration:
 
 ```bash
 LISTEN_ADDR=0.0.0.0:3000
-DEFAULT_DIFFICULTY=18
+
+# PoW defaults to argon2id (memory-hard) at DEFAULT_DIFFICULTY=5. To use the
+# faster-but-GPU-parallelisable SHA-256 instead, set both:
+#   PUZZLE_ALGORITHM=sha256
+#   DEFAULT_DIFFICULTY=18
 
 # Provisioning + persistence (do not deploy without these)
 ADMIN_TOKEN=$(openssl rand -hex 32)

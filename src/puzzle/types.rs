@@ -49,7 +49,13 @@ pub struct Challenge {
     pub difficulty: u32,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
-    pub solved: bool,
+    /// Failed PoW verify attempts against this challenge. A wrong nonce
+    /// deliberately leaves the challenge live for retry, so without a cap one
+    /// challenge could absorb unlimited (potentially memory-hard) verify
+    /// attempts. The store evicts the challenge once this reaches
+    /// `VERIFY_MAX_ATTEMPTS`.
+    #[serde(default)]
+    pub attempts: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

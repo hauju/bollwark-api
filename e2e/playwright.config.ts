@@ -14,9 +14,7 @@ const sharedEnv: Record<string, string> = {
   RUST_LOG: "info,bollwark=debug",
   TIER_CHECKBOX_MIN: "8",
   TIER_HARD_POW_MIN: "15",
-  TIER_VISUAL_MIN: "200",
   TIER_BLOCK_MIN: "250",
-  FULL_FINGERPRINT_MODE: "1",
   DEV_DISABLE_ADMIN_AUTH: "1",
 };
 
