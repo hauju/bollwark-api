@@ -1,0 +1,63 @@
+# Bollwark — single-service self-hosting compose file.
+#
+#   docker compose up -d
+#
+# The service is stateless by default (challenges and rate counters live in
+# memory). Uncomment SITE_DB_PATH / ADMIN_DB_PATH below to persist registered
+# sites and the decision log into the named volume mounted at /data.
+#
+# Full env-var reference: ../CONFIGURATION.md — deployment notes: DEPLOYMENT.md
+
+services:
+  bollwark:
+    image: ghcr.io/hauju/bollwark:latest
+    # Build from this checkout instead of pulling the published image:
+    # build: .
+    container_name: bollwark
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - bollwark-data:/data
+    environment:
+      # LISTEN_ADDR and STATIC_DIR are already set correctly in the image.
+      RUST_LOG: info
+      # Structured JSONL on stderr (decision events); omit for human-readable logs.
+      # LOG_FORMAT: json
+
+      # --- Site provisioning -------------------------------------------------
+      # Without ADMIN_TOKEN, POST /v1/sites returns 404 (no anonymous
+      # provisioning) and /v1/admin/* is unreachable.
+      # Generate with: openssl rand -hex 32
+      # ADMIN_TOKEN: replace-me-with-openssl-rand-hex-32
+
+      # --- Persistence (SQLite, inside the /data volume) ---------------------
+      # Without SITE_DB_PATH sites are in-memory only: every restart
+      # invalidates every integrator's stored secret_key.
+      # SITE_DB_PATH: /data/sites.db
+      # Validation dashboard + decision log. Requires ADMIN_TOKEN to be set,
+      # or the server refuses to start.
+      # ADMIN_DB_PATH: /data/decisions.db
+
+      # --- Browser embeds ----------------------------------------------------
+      # Comma-separated allowlist for GET /v1/puzzle. Unset = any origin.
+      # CORS_ALLOWED_ORIGINS: https://app.example,https://www.app.example
+
+      # --- Behind a reverse proxy -------------------------------------------
+      # CIDRs of the proxies in front of this service. Required for
+      # X-Forwarded-For walking, or every request scores as the proxy's IP.
+      # TRUSTED_PROXIES: 172.16.0.0/12,10.0.0.0/8
+
+      # --- Optional signal inputs (each off until configured) ----------------
+      # TLS_FINGERPRINT_HEADER: cf-ja4
+      # IP_REPUTATION_FILE: /data/ip-reputation.txt
+      # GEOIP_DB_PATH: /data/GeoLite2-Country.mmdb
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/healthz"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  bollwark-data:

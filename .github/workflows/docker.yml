@@ -1,0 +1,76 @@
+name: Docker (ghcr.io)
+
+# Publishes the public self-hosting image to ghcr.io.
+#
+# This is separate from the `docker` job in bollwark.yml, which pushes the
+# amd64 deployment image to the private dcr.oxidt.com registry and triggers
+# the Coolify webhook. That one deploys the maintainer's instance; this one
+# is what self-hosters pull.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  # Derived from the owner rather than ${{ github.repository }} so the image
+  # is named after the project (bollwark), not the repo (rust-captcha).
+  IMAGE_NAME: ${{ github.repository_owner }}/bollwark
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # linux/arm64 is cross-built under QEMU emulation, which makes a cold
+      # Rust release build slow (tens of minutes). If that becomes painful,
+      # split this into per-platform jobs on native runners (ubuntu-latest +
+      # ubuntu-24.04-arm) and merge the digests with `docker buildx
+      # imagetools create`.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,format=long
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

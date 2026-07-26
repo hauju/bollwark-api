@@ -112,6 +112,8 @@ docker run --rm -p 3000:3000 \
 
 The image exposes port `3000`, serves static widget assets from `/static`, and keeps runtime configuration env-var driven. CI publishes `dcr.oxidt.com/bollwark:latest` and `dcr.oxidt.com/bollwark:<commit-sha>` from `main`.
 
+Public multi-arch images are published to `ghcr.io/hauju/bollwark`. For self-hosting — compose quickstart, reverse-proxy and persistence notes, Coolify setup — see **[DEPLOYMENT.md](./DEPLOYMENT.md)**.
+
 ## Architecture
 
 ```

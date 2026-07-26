@@ -1,12 +1,19 @@
+# The image build only needs Cargo.toml, Cargo.lock, src/ and static/.
+# Everything else is context-transfer overhead or must never reach the image.
 /.git
 /.github
+/.claude
 /target
-/e2e/node_modules
-/e2e/test-results
-/e2e/playwright-report
+/tmp
+/docs
+/e2e
+/tests
+/examples
+/scripts
 /.env
 *.db
 *.sqlite
 *.sqlite3
+*.mmdb
 *.log
 .DS_Store
