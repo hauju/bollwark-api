@@ -36,6 +36,79 @@
     return hex;
   }
 
+  // ── Environment probes ──
+  //
+  // Both reduce to a single boolean before leaving the browser: we report the
+  // environment *class*, never the underlying strings, so the behavior blob
+  // gains no fingerprinting entropy. Both are trivially patched out by a
+  // determined bot — like `navigator.webdriver`, they exist to raise the floor
+  // against the cheap long tail, not to catch stealth tooling. (Verified:
+  // current Playwright leaves none of these traces.)
+
+  // Globals injected by automation drivers. ChromeDriver installs `cdc_`-
+  // prefixed properties with a build-specific suffix; the rest are legacy
+  // Selenium / PhantomJS / Nightmare markers. Absence proves nothing, but
+  // presence is near-conclusive — and it survives `navigator.webdriver`
+  // being scrubbed, which is the case worth catching.
+  const AUTOMATION_MARKERS = [
+    "__webdriver_evaluate",
+    "__webdriver_script_fn",
+    "__webdriver_script_func",
+    "__webdriver_unwrapped",
+    "__selenium_evaluate",
+    "__selenium_unwrapped",
+    "__fxdriver_evaluate",
+    "__fxdriver_unwrapped",
+    "_Selenium_IDE_Recorder",
+    "_phantom",
+    "callPhantom",
+    "__nightmare",
+    "domAutomation",
+    "domAutomationController",
+  ];
+
+  function detectAutomation() {
+    try {
+      const hasCdcKey = (obj) =>
+        Object.getOwnPropertyNames(obj).some(
+          (k) => k.indexOf("cdc_") === 0 || k.indexOf("$cdc_") === 0
+        );
+      if (hasCdcKey(window) || hasCdcKey(document)) return true;
+      return AUTOMATION_MARKERS.some((m) => m in window || m in document);
+    } catch {
+      return false;
+    }
+  }
+
+  // Coarse "windowless environment" hints. Deliberately only the three checks
+  // that don't misfire on real-world oddities: in-app WebViews and Chromium
+  // forks break the popular `window.chrome` / `navigator.plugins` heuristics,
+  // and those carry far too much genuine traffic to risk. Modern headless
+  // modes defeat all of this, which is why the server scores it below the
+  // shadow threshold on its own.
+  function detectHeadless() {
+    try {
+      if (/HeadlessChrome/.test(navigator.userAgent || "")) return true;
+      // A real browser window always reports non-zero outer dimensions.
+      if (window.outerWidth === 0 && window.outerHeight === 0) return true;
+      if (!navigator.languages || navigator.languages.length === 0) return true;
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  // Snapshot at mount — some stealth patches restore these later.
+  function probeEnvironment() {
+    return {
+      // navigator.webdriver is set by CDP-driven Chromium (Playwright,
+      // Puppeteer, Selenium, browser-harness in default mode).
+      webdriver: typeof navigator !== "undefined" && navigator.webdriver === true,
+      automation: detectAutomation(),
+      headless: detectHeadless(),
+    };
+  }
+
   // ── CaptchaWidget Class ──
 
   /**
@@ -103,10 +176,7 @@
         touches: 0,
         interactions: 0,
         first_interaction_ms: null,
-        // navigator.webdriver is set by CDP-driven Chromium (Playwright,
-        // Puppeteer, Selenium, browser-harness in default mode). Captured
-        // at mount because some stealth patches restore it later.
-        webdriver: typeof navigator !== "undefined" && navigator.webdriver === true,
+        ...probeEnvironment(),
       };
       this._behaviorListeners = [];
       this._installBehaviorListeners();
@@ -691,7 +761,7 @@
         touches: 0,
         interactions: 0,
         first_interaction_ms: null,
-        webdriver: typeof navigator !== "undefined" && navigator.webdriver === true,
+        ...probeEnvironment(),
       };
       this._installBehaviorListeners();
       this._render();

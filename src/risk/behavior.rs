@@ -46,6 +46,19 @@ pub struct BehaviorReport {
     /// agents. `None` = older widget that didn't include the field.
     #[serde(default)]
     pub webdriver: Option<bool>,
+    /// Automation-driver artifacts found at widget mount: ChromeDriver's
+    /// `cdc_`-prefixed globals and legacy Selenium/PhantomJS markers.
+    /// Scores as the same dimension as `webdriver` (see `score_behavior`) —
+    /// its value is catching drivers that scrub `navigator.webdriver` but
+    /// leave the globals behind. `None` = older widget.
+    #[serde(default)]
+    pub automation: Option<bool>,
+    /// Coarse headless-environment hints (`HeadlessChrome` UA, zero outer
+    /// window dimensions, empty `navigator.languages`). Noisier than the
+    /// automation signals and defeated by modern headless modes, so it's
+    /// weighted below the shadow threshold on its own. `None` = older widget.
+    #[serde(default)]
+    pub headless: Option<bool>,
 }
 
 /// Distinguishes "no client behavior block at all" (older widget,
@@ -67,11 +80,17 @@ pub const BEHAVIOR_NO_POINTER_SCORE: u32 = 15;
 // a one-click form takes longer than that for a human.
 pub const BEHAVIOR_INSTANT_INTERACTION_MS: u64 = 50;
 pub const BEHAVIOR_INSTANT_INTERACTION_SCORE: u32 = 20;
-// `navigator.webdriver === true`. Calibrated so that *alone* it lands at
-// the shadow-fail threshold (success=true, logged) — webdriver can be
-// patched out, so we don't hard-block on it. Combined with any other
+// The browser is driven — `navigator.webdriver === true` and/or driver
+// artifacts on `window`/`document`. Calibrated so that *alone* it lands at
+// the shadow-fail threshold (success=true, logged); both markers can be
+// patched out, so we don't hard-block on them. Combined with any other
 // behaviour penalty it crosses the block threshold.
-pub const BEHAVIOR_WEBDRIVER_SCORE: u32 = 30;
+pub const BEHAVIOR_AUTOMATION_SCORE: u32 = 30;
+// Headless-environment hints. Deliberately below the shadow threshold on
+// its own: the checks are coarser than the automation markers and the
+// populations they can misfire on (in-app WebViews, embedded browsers) are
+// real traffic. It earns its keep in combination, not alone.
+pub const BEHAVIOR_HEADLESS_SCORE: u32 = 20;
 
 pub fn score_behavior(presence: BehaviorPresence) -> u32 {
     let BehaviorPresence::Present(b) = presence else {
@@ -92,8 +111,18 @@ pub fn score_behavior(presence: BehaviorPresence) -> u32 {
         score += BEHAVIOR_INSTANT_INTERACTION_SCORE;
     }
 
-    if matches!(b.webdriver, Some(true)) {
-        score += BEHAVIOR_WEBDRIVER_SCORE;
+    // `webdriver` and `automation` are two views of one fact — the browser is
+    // driven — so they saturate rather than sum. Summing would push every
+    // driven browser to 60 and reverse the deliberate stance that a driven
+    // browser showing organic interaction is ShadowFail, not Block (see the
+    // e2e browser-harness-simulator regression test). The artifact probe adds
+    // *recall*, not weight: it catches drivers that scrub `navigator.webdriver`.
+    if matches!(b.webdriver, Some(true)) || matches!(b.automation, Some(true)) {
+        score += BEHAVIOR_AUTOMATION_SCORE;
+    }
+
+    if matches!(b.headless, Some(true)) {
+        score += BEHAVIOR_HEADLESS_SCORE;
     }
 
     score
@@ -110,6 +139,8 @@ mod tests {
             interactions: 3,
             first_interaction_ms: Some(800),
             webdriver: Some(false),
+            automation: Some(false),
+            headless: Some(false),
         }
     }
 
@@ -208,7 +239,7 @@ mod tests {
         // Otherwise organic, but webdriver=true → 30 → shadow_min boundary.
         assert_eq!(
             score_behavior(BehaviorPresence::Present(r)),
-            BEHAVIOR_WEBDRIVER_SCORE
+            BEHAVIOR_AUTOMATION_SCORE
         );
     }
 
@@ -221,8 +252,89 @@ mod tests {
         // Flatline (30) + webdriver (30) = 60 → block_min boundary.
         assert_eq!(
             score_behavior(BehaviorPresence::Present(r)),
-            BEHAVIOR_FLATLINE_SCORE + BEHAVIOR_WEBDRIVER_SCORE
+            BEHAVIOR_FLATLINE_SCORE + BEHAVIOR_AUTOMATION_SCORE
         );
+    }
+
+    #[test]
+    fn automation_artifacts_score_like_webdriver() {
+        // A driver that scrubbed navigator.webdriver but left cdc_ globals
+        // behind — the case the artifact probe exists to catch.
+        let r = BehaviorReport {
+            mouse_moves: 30,
+            interactions: 5,
+            first_interaction_ms: Some(1_500),
+            webdriver: Some(false),
+            automation: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            score_behavior(BehaviorPresence::Present(r)),
+            BEHAVIOR_AUTOMATION_SCORE
+        );
+    }
+
+    #[test]
+    fn webdriver_and_automation_saturate() {
+        // Both markers describe one fact (driven browser), so they must not
+        // sum — otherwise every driven browser lands at block_min and the
+        // "organic interaction ⇒ ShadowFail" stance is silently reversed.
+        let r = BehaviorReport {
+            mouse_moves: 30,
+            interactions: 5,
+            first_interaction_ms: Some(1_500),
+            webdriver: Some(true),
+            automation: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            score_behavior(BehaviorPresence::Present(r)),
+            BEHAVIOR_AUTOMATION_SCORE
+        );
+    }
+
+    #[test]
+    fn headless_alone_stays_below_shadow_band() {
+        // 20 < the default VERIFY_SHADOW_MIN of 30 — a false positive on an
+        // otherwise-organic visitor must not change their outcome.
+        let mut r = report();
+        r.headless = Some(true);
+        assert_eq!(
+            score_behavior(BehaviorPresence::Present(r)),
+            BEHAVIOR_HEADLESS_SCORE
+        );
+    }
+
+    #[test]
+    fn headless_compounds_with_automation() {
+        let r = BehaviorReport {
+            mouse_moves: 30,
+            interactions: 5,
+            first_interaction_ms: Some(1_500),
+            webdriver: Some(true),
+            headless: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            score_behavior(BehaviorPresence::Present(r)),
+            BEHAVIOR_AUTOMATION_SCORE + BEHAVIOR_HEADLESS_SCORE
+        );
+    }
+
+    #[test]
+    fn new_probes_absent_scores_like_legacy_widget() {
+        // Older widgets omit both fields entirely — they must stay neutral so
+        // existing integrations don't shift on rollout.
+        let r = BehaviorReport {
+            mouse_moves: 30,
+            touches: 0,
+            interactions: 5,
+            first_interaction_ms: Some(1_500),
+            webdriver: Some(false),
+            automation: None,
+            headless: None,
+        };
+        assert_eq!(score_behavior(BehaviorPresence::Present(r)), 0);
     }
 
     #[test]
