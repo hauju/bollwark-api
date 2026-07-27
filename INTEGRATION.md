@@ -87,11 +87,9 @@ forge the `Origin` header, so the real trust boundary stays the `secret_key` at
 
 ## 3. Embed the Widget
 
-Add the stylesheet, widget container, and script to the form you want to protect.
+Add the widget container and one script tag to the form you want to protect.
 
 ```html
-<link rel="stylesheet" href="https://captcha.example.com/static/captcha-widget.css">
-
 <form action="/signup" method="post">
   <label>
     Email
@@ -103,19 +101,30 @@ Add the stylesheet, widget container, and script to the form you want to protect
   <button type="submit">Create account</button>
 </form>
 
-<script src="https://captcha.example.com/static/captcha-widget.js"></script>
+<script src="https://api.bollwark.eu/v1/widget.js"></script>
 ```
 
-When the script is loaded from `https://captcha.example.com`, the widget automatically uses that origin for `GET /v1/puzzle` and worker assets.
+> Examples here use `https://api.bollwark.eu`, the hosted endpoint. Self-hosting? Substitute your own host throughout — nothing below is specific to ours.
 
-If you bundle or proxy the script from your own app origin, set `data-server-url` explicitly:
+`/v1/widget.js` is the entry point, and the only URL you should ever hardcode. It loads the stylesheet, the PoW worker and the Argon2 bundle itself, from a content-hashed directory pinned to that exact widget build — so a deploy can never leave you with a new widget talking to a worker your browser cached last month. The entry point is cached for 5 minutes; everything it pulls is cached for a year and never mutates.
+
+Because the script is served from `https://api.bollwark.eu`, the widget uses that origin for `GET /v1/puzzle` and its assets automatically. Nothing else to configure.
+
+If you bundle or proxy the script from your own app origin instead, set `data-server-url` explicitly:
 
 ```html
 <div
   data-sitekey="<SITE_KEY>"
-  data-server-url="https://captcha.example.com"
+  data-server-url="https://api.bollwark.eu"
 ></div>
 ```
+
+<details>
+<summary>Older embeds using <code>/static/captcha-widget.js</code></summary>
+
+The previous embed — a `<link>` for `/static/captcha-widget.css` plus a `<script>` for `/static/captcha-widget.js` — keeps working and is not going away. It just doesn't get the version pinning: those paths are unversioned, so the widget and worker are cached independently. Moving over is deleting the `<link>` and repointing the `<script>` at `/v1/widget.js`. If you keep your own `<link>`, the widget detects it and won't inject a second one.
+
+</details>
 
 ### Widget Modes
 
@@ -172,7 +181,7 @@ Your form handler should reject the submission if:
 Forward the token verbatim:
 
 ```bash
-curl -s -X POST https://captcha.example.com/v1/verify \
+curl -s -X POST https://api.bollwark.eu/v1/verify \
   -H "Authorization: Bearer <SECRET_KEY>" \
   -H "Content-Type: application/json" \
   -d '{ "token": "<captcha-token value>" }'
@@ -203,7 +212,7 @@ app.post("/signup", express.urlencoded({ extended: false }), async (req, res) =>
     return res.status(400).send("CAPTCHA failed");
   }
 
-  const verifyResp = await fetch("https://captcha.example.com/v1/verify", {
+  const verifyResp = await fetch("https://api.bollwark.eu/v1/verify", {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${process.env.BOLLWARK_SECRET_KEY}`,
@@ -245,7 +254,7 @@ async fn verify_captcha(token: &str) -> anyhow::Result<bool> {
 
     let client = reqwest::Client::new();
     let resp = client
-        .post("https://captcha.example.com/v1/verify")
+        .post("https://api.bollwark.eu/v1/verify")
         .bearer_auth(std::env::var("BOLLWARK_SECRET_KEY")?)
         .json(&serde_json::json!({ "token": token }))
         .send()
@@ -262,7 +271,7 @@ async fn verify_captcha(token: &str) -> anyhow::Result<bool> {
 
 ## 7. Cross-Origin Setup
 
-If your app runs at `https://app.example.com` and bollwark runs at `https://captcha.example.com`, set:
+If your app runs at `https://app.example.com` and bollwark runs at `https://api.bollwark.eu`, set:
 
 ```bash
 CORS_ALLOWED_ORIGINS="https://app.example.com"
@@ -296,7 +305,7 @@ ADMIN_TOKEN=<same-admin-token>
 Then open:
 
 ```text
-https://captcha.example.com/static/admin.html
+https://api.bollwark.eu/static/admin.html
 ```
 
 ## 9. Error Handling

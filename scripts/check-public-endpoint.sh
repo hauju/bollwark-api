@@ -10,9 +10,9 @@
 # silently breaks every integrator's embed while the app itself looks healthy.
 #
 # Checks, against the public URL with FULL TLS verification (no `-k`):
-#   1. /healthz, /static/captcha-widget.js, /static/captcha-widget.css each
-#      return 2xx over a valid cert chain. curl without `-k` fails on a
-#      self-signed / expired / incomplete chain exactly like a browser.
+#   1. Each path in MONITOR_PATHS returns 2xx over a valid cert chain. curl
+#      without `-k` fails on a self-signed / expired / incomplete chain exactly
+#      like a browser.
 #   2. The leaf cert is not self-signed / the Traefik default, and is not
 #      expiring within EXPIRY_DAYS (proactive warning before it breaks).
 #
@@ -23,15 +23,26 @@
 #   scripts/check-public-endpoint.sh [URL]
 #
 # Env:
-#   MONITOR_URL      Base URL to check (default https://captcha.oxidt.com).
+#   MONITOR_URL      Base URL to check (default https://api.bollwark.eu).
 #                    The [URL] argument, if given, overrides it.
+#   MONITOR_PATHS    Space-separated paths to fetch. Defaults to the service
+#                    set below. Override it for a host that isn't running the
+#                    service — the marketing site at bollwark.eu has no
+#                    /healthz, so it is monitored as MONITOR_PATHS=/.
 #   EXPIRY_DAYS      Warn if the cert expires within this many days (default 14).
 #   MONITOR_WEBHOOK  Optional Slack/Discord-compatible webhook for alerts.
 set -euo pipefail
 
-URL="${1:-${MONITOR_URL:-https://captcha.oxidt.com}}"
+URL="${1:-${MONITOR_URL:-https://api.bollwark.eu}}"
 URL="${URL%/}"
 EXPIRY_DAYS="${EXPIRY_DAYS:-14}"
+
+# `/v1/widget.js` is the URL every current embed loads, so it is the one whose
+# TLS failure breaks customers; the `/static/` pair is still checked because
+# older embeds point there and it is a permanent path. Deliberately not
+# checking a hashed `/assets/<hash>/…` URL: the hash changes every time the
+# bundle does, so any pinned one would rot into a false alarm.
+MONITOR_PATHS="${MONITOR_PATHS:-/healthz /v1/widget.js /static/captcha-widget.js /static/captcha-widget.css}"
 
 host="${URL#https://}"; host="${host#http://}"; host="${host%%/*}"
 port=443
@@ -41,7 +52,7 @@ fails=()
 echo "▶ Monitoring ${URL} (host ${host}, warn if cert expires < ${EXPIRY_DAYS}d)"
 
 # 1) Reachability + valid TLS chain for each public asset (browser-equivalent).
-for path in /healthz /static/captcha-widget.js /static/captcha-widget.css; do
+for path in $MONITOR_PATHS; do
     if out=$(curl --fail --show-error --silent --location --max-time 15 \
                   -o /dev/null -w '%{http_code}' "${URL}${path}" 2>&1); then
         echo "  ✓ ${path} → HTTP ${out}"

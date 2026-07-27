@@ -1,10 +1,18 @@
-// Bollwark Widget — SHA-256 proof-of-work with risk-tier-aware UI.
+// Bollwark Widget — Argon2id / SHA-256 proof-of-work with risk-tier-aware UI.
 
 (function () {
   "use strict";
 
   const SCRIPT_SRC = document.currentScript && document.currentScript.src;
   const DEFAULT_SERVER_URL = inferServerUrl(SCRIPT_SRC);
+
+  // Rewritten by the server when this file is served from `/v1/widget.js`, to
+  // the immutable content-hashed asset directory (`/assets/<hash>`). Left as
+  // the literal placeholder when the file is served verbatim — from the
+  // legacy `/static/` path, from inside `/assets/<hash>/` itself, or from a
+  // copy the integrator bundled into their own build. See src/api/assets.rs.
+  const ASSET_BASE = "__BOLLWARK_ASSET_BASE__";
+  const ASSET_BASE_SUBSTITUTED = ASSET_BASE.charAt(0) === "/";
 
   function inferServerUrl(scriptSrc) {
     if (!scriptSrc) return "";
@@ -14,6 +22,37 @@
     } catch (_) {
       return "";
     }
+  }
+
+  // Where to load the worker, the vendored Argon2 bundle and the stylesheet
+  // from, as a path appended to `serverUrl`.
+  //
+  // The substituted case is the common one and needs no inference. Otherwise
+  // we prefer this script's own directory, so a copy served out of
+  // `/assets/<hash>/` keeps loading its own siblings rather than silently
+  // falling back to the unversioned tree and re-opening the skew window the
+  // hashing exists to close.
+  //
+  // That inference is only valid when the script came from the captcha origin
+  // itself. An integrator who bundles `captcha-widget.js` into their own app
+  // and points it at us with `data-server-url` has a script URL that says
+  // nothing about our layout, and joining their bundle path onto our origin
+  // would 404 — those fall back to `/static`, which is exactly where a
+  // separately-downloaded copy's siblings are.
+  function resolveAssetBase(scriptSrc, serverUrl) {
+    if (ASSET_BASE_SUBSTITUTED) return ASSET_BASE;
+    if (scriptSrc) {
+      try {
+        const script = new URL(scriptSrc, window.location.href);
+        const server = new URL(serverUrl || window.location.origin, window.location.href);
+        if (script.origin === server.origin) {
+          return script.pathname.replace(/\/[^/]*$/, "");
+        }
+      } catch (_) {
+        /* fall through */
+      }
+    }
+    return "/static";
   }
 
   function isCrossOrigin(url) {
@@ -148,6 +187,10 @@
       this.container = container;
       this.siteKey = options.sitekey;
       this.serverUrl = options.serverUrl || DEFAULT_SERVER_URL;
+      // Per-instance, not module-level: `data-server-url` can differ per
+      // widget, and it is what decides whether this script's own path is a
+      // usable hint for where our sibling assets live.
+      this.assetBase = resolveAssetBase(SCRIPT_SRC, this.serverUrl);
       this.debug = options.debug === "true" || options.debug === true;
       // "invisible" defers all visible UI until the tier requires it.
       // Mirrors hCaptcha size=invisible / reCAPTCHA v3 → v2 fallback.
@@ -307,6 +350,7 @@
     // silently for the `invisible_pass` tier and only materialises a
     // checkbox if the server escalates.
     _render() {
+      this._ensureStylesheet();
       this.container.innerHTML = "";
       this.container.classList.remove("rc-captcha");
       this._uiRendered = false;
@@ -331,6 +375,26 @@
       if (this.mode !== "invisible") {
         this._promoteToInteractiveUI();
       }
+    }
+
+    // Load `captcha-widget.css` from the same asset base as the worker, so a
+    // single `<script src=".../v1/widget.js">` is the whole embed and the
+    // stylesheet is version-locked to the script that expects it.
+    //
+    // Integrators who still hand-write the `<link>` — every embed predating
+    // the entry point — are left alone: injecting a second identical
+    // stylesheet would be harmless but pointless, and skipping keeps their
+    // load order and any overrides they layered on top intact.
+    _ensureStylesheet() {
+      const existing = document.querySelector(
+        'link[rel="stylesheet"][href*="captcha-widget.css"]'
+      );
+      if (existing) return;
+
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = this.serverUrl + this.assetBase + "/captcha-widget.css";
+      document.head.appendChild(link);
     }
 
     // Build the visible widget chrome: checkbox row, status line, debug
@@ -665,8 +729,11 @@
     }
 
     async _createWorker() {
-      const workerUrl = this.serverUrl + "/static/captcha-worker.js";
+      const workerUrl = this.serverUrl + this.assetBase + "/captcha-worker.js";
       if (!isCrossOrigin(workerUrl)) {
+        // Same-origin: the worker's own `importScripts("vendor/…")` resolves
+        // relative to its URL, so it lands in the same asset directory we
+        // loaded it from and the bundle stays internally consistent.
         return new Worker(workerUrl);
       }
 
@@ -674,7 +741,10 @@
       if (!resp.ok) {
         throw new Error(`Worker fetch failed (${resp.status})`);
       }
-      const vendorUrl = this.serverUrl + "/static/vendor/argon2.umd.min.js";
+      // Cross-origin: the worker runs from a blob URL, where a relative
+      // `importScripts` would resolve against the blob and fail, so the
+      // vendor path has to be absolutised against the same asset base.
+      const vendorUrl = this.serverUrl + this.assetBase + "/vendor/argon2.umd.min.js";
       const source = (await resp.text()).replace(
         /importScripts\(["']vendor\/argon2\.umd\.min\.js["']\)/g,
         `importScripts(${JSON.stringify(vendorUrl)})`

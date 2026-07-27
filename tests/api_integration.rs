@@ -1943,3 +1943,126 @@ async fn test_malformed_verify_body_returns_json_error_envelope() {
         "expected JSON error envelope, got {json}"
     );
 }
+
+// ── Widget asset bundle ──
+//
+// The widget, its worker and the vendored Argon2 build are separate cache
+// entries that must never be mixed across versions. These cover the contract
+// that prevents that: one short-lived entry point naming one immutable,
+// content-hashed directory.
+
+/// GET the widget entry point and return `(cache-control, body)`.
+async fn fetch_widget_entry(app: &axum::Router) -> (String, String) {
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/widget.js")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cache_control = resp
+        .headers()
+        .get("cache-control")
+        .expect("entry point must declare Cache-Control")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (cache_control, String::from_utf8(bytes.to_vec()).unwrap())
+}
+
+/// Pull the `/assets/<hash>` directory the entry point points at, straight
+/// out of the served JavaScript — the same string the browser will use.
+///
+/// Anchored on the opening quote of the substituted string literal, not on
+/// `/assets/` alone: the file's own comments mention the path shape, and
+/// matching one of those would silently test a directory nothing loads from.
+fn asset_base_from(source: &str) -> String {
+    let start = source
+        .find("\"/assets/")
+        .expect("entry point must name its asset directory")
+        + 1;
+    let rest = &source[start..];
+    let end = rest.find('"').expect("unterminated asset base literal");
+    rest[..end].to_string()
+}
+
+#[tokio::test]
+async fn widget_entry_point_is_short_lived_and_names_its_bundle() {
+    let app = test_app();
+    let (cache_control, source) = fetch_widget_entry(&app).await;
+
+    assert_eq!(cache_control, "public, max-age=300");
+    // The placeholder surviving substitution is the silent failure mode: the
+    // widget would fall back to unversioned paths and nothing would error.
+    assert!(
+        !source.contains("__BOLLWARK_ASSET_BASE__"),
+        "asset base placeholder must be substituted before serving"
+    );
+    assert!(source.contains("/assets/"));
+}
+
+#[tokio::test]
+async fn hashed_assets_are_served_immutable() {
+    let app = test_app();
+    let (_, source) = fetch_widget_entry(&app).await;
+    let base = asset_base_from(&source);
+
+    for asset in [
+        "captcha-worker.js",
+        "captcha-widget.css",
+        "vendor/argon2.umd.min.js",
+    ] {
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("{base}/{asset}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "{asset} should be served from {base}"
+        );
+        assert_eq!(
+            resp.headers().get("cache-control").unwrap(),
+            "public, max-age=31536000, immutable",
+            "{asset} is content-addressed and should be cacheable indefinitely"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_stale_asset_hash_is_not_served() {
+    let app = test_app();
+    // A year-long TTL is only safe if an old hash stops resolving instead of
+    // quietly serving whatever the current build has at that filename.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/assets/00000000deadbeef/captcha-worker.js")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn legacy_static_widget_path_still_serves() {
+    let app = test_app();
+    // Every embed predating /v1/widget.js points here, including the ones on
+    // the instance being migrated away from. This path is permanent.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/static/captcha-widget.js")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get("cache-control").unwrap(),
+        "public, max-age=300",
+        "unversioned assets must not be cached beyond the entry point's window"
+    );
+}

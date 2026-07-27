@@ -861,17 +861,14 @@
           <span class="terminal-title">signup.html</span>
         </div>
         <div class="terminal-body">
-<span class="c-c">&lt;!-- One link, one script, one div --&gt;</span>
-<span class="c-tag">&lt;link</span> <span class="c-attr">rel</span>=<span class="c-str">"stylesheet"</span>
-      <span class="c-attr">href</span>=<span class="c-str">"https://bollwark.com/static/captcha-widget.css"</span><span class="c-tag">&gt;</span>
-
+<span class="c-c">&lt;!-- One script, one div --&gt;</span>
 <span class="c-tag">&lt;form</span> <span class="c-attr">action</span>=<span class="c-str">"/signup"</span> <span class="c-attr">method</span>=<span class="c-str">"post"</span><span class="c-tag">&gt;</span>
   <span class="c-c">...</span>
   <span class="c-tag">&lt;div</span> <span class="c-attr">data-sitekey</span>=<span class="c-str">"<span class="c-key">a1b2c3…</span>"</span><span class="c-tag">&gt;&lt;/div&gt;</span>
   <span class="c-tag">&lt;button&gt;</span>Register<span class="c-tag">&lt;/button&gt;</span>
 <span class="c-tag">&lt;/form&gt;</span>
 
-<span class="c-tag">&lt;script</span> <span class="c-attr">src</span>=<span class="c-str">"https://bollwark.com/static/captcha-widget.js"</span><span class="c-tag">&gt;&lt;/script&gt;</span>
+<span class="c-tag">&lt;script</span> <span class="c-attr">src</span>=<span class="c-str">"https://api.bollwark.eu/v1/widget.js"</span><span class="c-tag">&gt;&lt;/script&gt;</span>
 
           <div class="mock-widget">
             <div class="mock-row">
@@ -990,7 +987,7 @@
 curl -X POST \
  -H <span class="c-str">"Authorization: Bearer $SECRET"</span> \
  -d <span class="c-str">'{"token":"7b226368…"}'</span> \
- bollwark.com/v1/verify</pre>
+ api.bollwark.eu/v1/verify</pre>
         </div>
       </div>
     </div>
@@ -1185,7 +1182,7 @@ curl -X POST \
       </div>
 
       <p class="pricing-note">
-        Hosted Bollwark is in early access — founding customers lock these rates and get a direct line to the maintainer. Migrating from FriendlyCaptcha, reCAPTCHA, or hCaptcha? We'll help you port. Need more than 10M / month, on-prem deployment, or a custom SLA? <a href="mailto:hello@bollwark.com">Talk to us</a>.
+        Hosted Bollwark is in early access — founding customers lock these rates and get a direct line to the maintainer. Migrating from FriendlyCaptcha, reCAPTCHA, or hCaptcha? We'll help you port. Need more than 10M / month, on-prem deployment, or a custom SLA? <a href="mailto:hello@bollwark.eu">Talk to us</a>.
       </p>
     </div>
   </section>
@@ -1284,7 +1281,7 @@ curl -X POST \
             <li><a href="/static/about.html">About</a></li>
             <li><a href="/static/privacy.html">Privacy</a></li>
             <li><a href="/static/terms.html">Terms</a></li>
-            <li><a href="mailto:hello@bollwark.com">Contact</a></li>
+            <li><a href="mailto:hello@bollwark.eu">Contact</a></li>
           </ul>
         </div>
       </div>

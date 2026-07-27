@@ -191,3 +191,59 @@ docker compose pull && docker compose up -d
 
 Expect the challenge/rate-counter reset described above. Sites and the
 decision log survive if they are on the `/data` volume.
+
+Browser assets need no cache-busting on your side. `/v1/widget.js` is the
+only mutable URL (5-minute TTL) and it names a content-hashed directory that
+changes whenever any asset does, so a visitor can never end up running a new
+widget against a worker cached from an older build. The unversioned
+`/static/` paths are still served for pre-existing embeds, on the same short
+TTL.
+
+## Migrating to a new hostname
+
+The widget resolves its API origin from the URL its `<script>` was loaded
+from, so the hostname is baked into every integrator's HTML. There is no
+server-side switch that moves them — migration is necessarily
+integrator-driven, and the only safe shape is to run both hosts at once.
+
+**1. Stand up the new instance.** Same image, new Coolify app, new domain.
+Copy `CORS_ALLOWED_ORIGINS`, `TRUSTED_PROXIES` and `ADMIN_TOKEN` across.
+
+**2. Copy `sites.db` before anything else.** This is what makes the
+migration a one-line change for integrators instead of a key rotation. Copy
+it, don't re-provision: the `site_key` and `secret_key` stay valid, so an
+integrator only repoints a URL and never touches their backend config.
+
+```bash
+# On the old host — .backup is WAL-safe, plain cp is not.
+sqlite3 /data/sites.db ".backup '/data/sites-migration.db'"
+```
+
+Both instances sharing site keys is fine. Challenges and rate counters are
+per-process, and a visitor's `/v1/puzzle` and `/v1/verify` both go to
+whichever host their widget was loaded from, so the two never need to agree.
+
+**3. Freeze the old instance.** Pin it to a specific image tag
+(`<registry>/bollwark:<sha>`), not `:latest`, and point the deploy webhook at
+the new app only. Otherwise one "Redeploy" click ships breaking changes to
+the host you are trying to keep stable — the default algorithm flip to
+Argon2id is exactly that: a browser holding a cached SHA-256-only worker
+cannot solve the puzzle it gets handed, and no server-side rollback reaches
+it. Belt and braces: set `PUZZLE_ALGORITHM=sha256` explicitly on the old
+instance so its behaviour is pinned even if the image moves.
+
+**4. Migrate integrators.** They change two URLs, not one — the browser
+`<script src>` *and* their server-side `POST /v1/verify` host. Both must
+move; a half-migrated integrator whose frontend points at the new host and
+whose backend still verifies against the old one will fail every
+verification, because the challenge lives only in the process that issued it.
+
+**5. Retire the old host on evidence, not on a date.** With `ADMIN_DB_PATH`
+set, the old instance's decision log is the signal: when
+`GET /v1/admin/sessions` shows no recent activity, nothing is still pointing
+at it. Keep it running until then — it costs one container.
+
+Add both hosts to the external monitor for the duration
+(`MONITOR_TARGETS`, see `.github/workflows/monitor.yml`). Note that an
+instance predating the versioned bundle has no `/v1/widget.js`, so monitor it
+with the `/static/` paths only or it will report a permanent false failure.

@@ -4,7 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bollwark Test Site</title>
-  <link rel="stylesheet" href="/static/captcha-widget.css">
+  <!-- No stylesheet link on purpose: /v1/widget.js injects it from the
+       versioned bundle, and this harness is what proves that path works. -->
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -271,7 +272,7 @@
     </div>
   </div>
 
-  <script src="/static/captcha-widget.js"></script>
+  <script src="/v1/widget.js"></script>
   <script>
     let siteSecret = null;
     let siteKey = null;

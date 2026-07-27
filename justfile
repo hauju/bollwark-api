@@ -48,6 +48,6 @@ fmt-check:
 # Run clippy + format check
 ci: fmt-check lint test
 
-# Check the public endpoint + TLS cert (defaults to captcha.oxidt.com)
+# Check the public endpoint + TLS cert (defaults to api.bollwark.eu)
 monitor URL="":
     bash scripts/check-public-endpoint.sh {{ URL }}

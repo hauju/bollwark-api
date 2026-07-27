@@ -44,18 +44,20 @@ For a full application walkthrough, see **[INTEGRATION.md](./INTEGRATION.md)**.
 ## Embedding the widget
 
 ```html
-<link rel="stylesheet" href="https://your-host/static/captcha-widget.css">
-
 <form action="/signup" method="post">
   <!-- … -->
   <div id="captcha" data-sitekey="<SITE_KEY>"></div>
   <button type="submit">Register</button>
 </form>
 
-<script src="https://your-host/static/captcha-widget.js"></script>
+<script src="https://api.bollwark.eu/v1/widget.js"></script>
 ```
 
-When `captcha-widget.js` is served from a different origin than your app, the widget automatically uses the script origin as the CAPTCHA API origin and loads the PoW worker through a same-page Blob wrapper. If you self-host or bundle the script somewhere else, set `data-server-url="https://your-captcha-host"` on the widget element.
+One tag. `/v1/widget.js` is the entry point — it pulls the stylesheet, the PoW worker and the Argon2 bundle from a content-hashed directory pinned to that build, so the pieces can never go out of sync in a visitor's cache. Self-hosting? Swap in your own host; the path is the same.
+
+When the script is served from a different origin than your app, the widget uses the script origin as the CAPTCHA API origin and loads the PoW worker through a same-page Blob wrapper. If you bundle the script into your own build instead, set `data-server-url="https://api.bollwark.eu"` on the widget element.
+
+The older two-tag embed (`/static/captcha-widget.css` + `/static/captcha-widget.js`) still works, unversioned — see [INTEGRATION.md](./INTEGRATION.md#3-embed-the-widget).
 
 For cross-origin embeds, allowlist your app origin on the puzzle endpoint:
 

@@ -1,8 +1,10 @@
+pub mod assets;
 pub mod extract;
 pub mod handlers;
 pub mod state;
 pub mod types;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
@@ -16,6 +18,7 @@ use axum::routing::{get, post};
 use tower::ServiceBuilder;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::timeout::{RequestBodyTimeoutLayer, TimeoutLayer};
 use tower_http::trace::TraceLayer;
 
@@ -25,8 +28,10 @@ use state::SharedState;
 pub fn router(state: SharedState, admin: Option<AdminState>) -> Router {
     let cors = build_cors_layer(state.config.cors_allowed_origins.as_deref());
     let asset_cors = build_cors_layer(state.config.cors_allowed_origins.as_deref());
+    let bundle_cors = build_cors_layer(state.config.cors_allowed_origins.as_deref());
     let static_dir = state.config.static_dir.clone();
     let landing_path = format!("{static_dir}/landing.html");
+    let bundle = build_widget_routes(&static_dir, bundle_cors);
 
     // Public CORS-enabled surface: just the puzzle endpoint. Browser widgets
     // hosted on a different origin from the captcha service need to fetch it.
@@ -66,10 +71,22 @@ pub fn router(state: SharedState, admin: Option<AdminState>) -> Router {
         .route("/healthz", get(healthz))
         .merge(public)
         .merge(internal)
+        .merge(bundle)
+        // Legacy unversioned assets. This is the embed path integrators used
+        // before `/v1/widget.js` existed, and the only path that serves the
+        // operator-facing pages (`admin.html`, `testsite.html`, the info
+        // pages), so it stays mounted indefinitely. It gets the entry point's
+        // short TTL rather than the immutable one — nothing here is
+        // content-addressed, so a long TTL would be the very staleness the
+        // hashed bundle exists to avoid.
         .nest_service(
             "/static",
             ServiceBuilder::new()
                 .layer(asset_cors)
+                .layer(SetResponseHeaderLayer::if_not_present(
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static(assets::LEGACY_CACHE_CONTROL),
+                ))
                 .service(ServeDir::new(&static_dir)),
         );
 
@@ -98,6 +115,51 @@ pub fn router(state: SharedState, admin: Option<AdminState>) -> Router {
         BODY_READ_TIMEOUT_SECS,
     )))
     .layer(TraceLayer::new_for_http())
+}
+
+/// Mount the versioned widget bundle: the stable `/v1/widget.js` entry point
+/// plus the immutable `/assets/<hash>/` directory it points at.
+///
+/// CORS is applied at the router level so it covers both the entry point and
+/// the nested asset service — the widget `fetch()`es its worker cross-origin
+/// (to blob-wrap it), which is a CORS request even though the `<script>` tag
+/// that loaded the entry point was not.
+fn build_widget_routes(static_dir: &str, cors: CorsLayer) -> Router {
+    let Some(bundle) = assets::WidgetBundle::load(static_dir) else {
+        // No verifiable bundle. Answer the entry point with a 503 rather than
+        // a 404: the URL is right, the server just can't serve it, and an
+        // operator debugging a bad STATIC_DIR should be able to tell those
+        // apart. `/static/` keeps working, so embeds on the legacy path are
+        // unaffected.
+        return Router::new().route("/v1/widget.js", get(assets::unavailable));
+    };
+
+    let mount = bundle.mount_path();
+    tracing::info!(
+        version = %bundle.version,
+        mount = %mount,
+        "widget bundle mounted"
+    );
+
+    let bundle = Arc::new(bundle);
+    Router::new()
+        .route(
+            "/v1/widget.js",
+            get(move || {
+                let bundle = bundle.clone();
+                async move { bundle.respond() }
+            }),
+        )
+        .nest_service(
+            &mount,
+            ServiceBuilder::new()
+                .layer(SetResponseHeaderLayer::if_not_present(
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static(assets::IMMUTABLE_CACHE_CONTROL),
+                ))
+                .service(ServeDir::new(static_dir)),
+        )
+        .layer(cors)
 }
 
 /// Deadline for a single request once it reaches the service: body read plus
