@@ -84,17 +84,30 @@ async fn main() {
     // one-env-var footgun — warn loudly rather than silently shipping a widget
     // that never completes. Difficulty is a continuum, so this warns rather
     // than refusing to start.
+    // `max_difficulty` is checked as well as `default_difficulty`, because it is
+    // the one an escalated visitor actually gets: risk scoring raises the tier
+    // and `difficulty_for(HardPow, …)` returns the max. A config whose default
+    // is survivable but whose max is not looks healthy at boot and only breaks
+    // for the subset of visitors that score badly — the hardest kind of failure
+    // to attribute. That is not hypothetical: the e2e harness ran for a month
+    // with argon2id (the new default) at a SHA-256-scale max of 16, and only
+    // the tests that escalated to HardPow hung.
     if let Algorithm::Argon2id(_) = config.puzzle_algorithm {
         const ARGON2_SANE_MAX_DIFFICULTY: u32 = 12;
-        if config.default_difficulty > ARGON2_SANE_MAX_DIFFICULTY {
-            tracing::warn!(
-                default_difficulty = config.default_difficulty,
-                "PUZZLE_ALGORITHM=argon2id with DEFAULT_DIFFICULTY={} is almost certainly far \
-                 too high — each Argon2id hash is orders of magnitude slower than SHA-256, so \
-                 solves can take minutes in the browser and the widget may never complete. Drop \
-                 DEFAULT_DIFFICULTY to ~4–6 for argon2id.",
-                config.default_difficulty
-            );
+        for (name, value) in [
+            ("DEFAULT_DIFFICULTY", config.default_difficulty),
+            ("MAX_DIFFICULTY", config.max_difficulty),
+        ] {
+            if value > ARGON2_SANE_MAX_DIFFICULTY {
+                tracing::warn!(
+                    setting = name,
+                    difficulty = value,
+                    "PUZZLE_ALGORITHM=argon2id with {name}={value} is almost certainly far too \
+                     high — each Argon2id hash is orders of magnitude slower than SHA-256, so \
+                     solves can take minutes in the browser and the widget may never complete. \
+                     Drop it to ~4–6 (default) / ~10 (max) for argon2id."
+                );
+            }
         }
     }
 

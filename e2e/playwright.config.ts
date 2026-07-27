@@ -40,7 +40,7 @@ export default defineConfig({
     ? undefined
     : [
         {
-          // SHA-256 server (default algorithm) on :3000 — the baseURL host.
+          // SHA-256 server on :3000 — the baseURL host.
           // `cargo run` (release would be much faster but slower to build).
           // LOG_FORMAT=json so the JSONL captured during e2e is parseable.
           command: "cargo run --quiet",
@@ -48,6 +48,14 @@ export default defineConfig({
           env: {
             ...sharedEnv,
             LISTEN_ADDR: "127.0.0.1:3000",
+            // Pin the algorithm explicitly. This used to rely on sha256 being
+            // the server default; when the default flipped to argon2id, this
+            // server silently began issuing memory-hard puzzles at the
+            // SHA-256-scale difficulties below, and every test that escalated
+            // to HardPow (difficulty 16 ≈ 65k Argon2id hashes) hung until it
+            // timed out. The difficulties here only make sense for SHA-256, so
+            // the algorithm belongs next to them rather than inherited.
+            PUZZLE_ALGORITHM: "sha256",
             // Lower difficulty so the widget solves PoW within the page lifetime.
             DEFAULT_DIFFICULTY: "12",
             MAX_DIFFICULTY: "16",
