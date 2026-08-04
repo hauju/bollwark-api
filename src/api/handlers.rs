@@ -353,7 +353,7 @@ pub async fn verify(
             // gigabytes of resident memory. Queueing on the permit (rather than
             // refusing) keeps honest callers working through a burst; the
             // request timeout layer bounds how long anyone waits.
-            let _permit = state
+            let permit = state
                 .verify_permits
                 .clone()
                 .acquire_owned()
@@ -361,9 +361,21 @@ pub async fn verify(
                 .map_err(|_| CaptchaError::Storage("verify permits closed".to_string()))?;
             let state = state.clone();
             let challenge = challenge.clone();
-            tokio::task::spawn_blocking(move || state.engine.verify(&challenge, nonce))
-                .await
-                .map_err(|e| CaptchaError::Storage(format!("verify task failed: {e}")))?
+            tokio::task::spawn_blocking(move || {
+                // The permit is moved *into* the closure, not merely held by
+                // this request's future. A blocking task cannot be cancelled:
+                // if the future is dropped mid-hash — request timeout, or a
+                // caller with an impatient HTTP client — tokio detaches the
+                // task and the ~8 MiB allocation lives on until the hash
+                // returns. Releasing the permit with the future would hand it
+                // to the next request against memory that is still in use, so
+                // a caller who retries faster than the hash completes could
+                // over-commit the bound this semaphore exists to enforce.
+                let _permit = permit;
+                state.engine.verify(&challenge, nonce)
+            })
+            .await
+            .map_err(|e| CaptchaError::Storage(format!("verify task failed: {e}")))?
         }
     };
     let invalid_outcome = "pow_invalid";

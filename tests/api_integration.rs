@@ -78,6 +78,10 @@ struct TestAppBuilder {
     /// Set to `Some(None)` to disable the token entirely (so `/v1/sites`
     /// returns 404).
     admin_token: Option<Option<&'static str>>,
+    /// Override the Argon2id verify-concurrency permit count. Default is the
+    /// production `verify_permits()` (cores * 2); tests that assert on permit
+    /// accounting set it to 1 so the numbers are unambiguous.
+    verify_permits: Option<usize>,
 }
 
 const TEST_ADMIN_TOKEN: &str = "test-admin-token-32bytes-of-entropy";
@@ -88,6 +92,13 @@ impl TestAppBuilder {
     }
 
     fn build_with_store(self) -> (axum::Router, Arc<InMemoryStore>) {
+        let (router, store, _state) = self.build_with_state();
+        (router, store)
+    }
+
+    /// Also hands back the `AppState`, so a test can observe internals the HTTP
+    /// surface deliberately doesn't expose (currently the verify semaphore).
+    fn build_with_state(self) -> (axum::Router, Arc<InMemoryStore>, Arc<AppState>) {
         let algorithm = self.algorithm.unwrap_or(Algorithm::Sha256);
         // Argon2id needs a much lower default difficulty than SHA-256 — even
         // 4 leading zero bits at minimum-cost params already takes a few
@@ -181,11 +192,12 @@ impl TestAppBuilder {
             admin_token,
             info_urls: None,
             verify_permits: Arc::new(tokio::sync::Semaphore::new(
-                bollwark::api::state::verify_permits(),
+                self.verify_permits
+                    .unwrap_or_else(bollwark::api::state::verify_permits),
             )),
             config,
         });
-        (api::router(state, admin), store)
+        (api::router(state.clone(), admin), store, state)
     }
 }
 
@@ -2065,4 +2077,104 @@ async fn legacy_static_widget_path_still_serves() {
         "public, max-age=300",
         "unversioned assets must not be cached beyond the entry point's window"
     );
+}
+
+/// Give a stored challenge a deliberately expensive Argon2id cost so the
+/// server-side verify hash runs long enough to observe mid-flight. `t_cost`
+/// scales the work linearly at constant memory, which keeps the test cheap in
+/// RAM while making it slow in wall-clock — the opposite trade to raising
+/// `m_cost`.
+async fn make_verify_slow(store: &InMemoryStore, id: uuid::Uuid, t_cost: u32) {
+    let mut challenge = store.get_challenge(&id).await.unwrap().unwrap();
+    challenge.algorithm = Algorithm::Argon2id(Argon2idParams {
+        m_cost: 8_192,
+        t_cost,
+        p_cost: 1,
+    });
+    store.store_challenge(&challenge).await.unwrap();
+}
+
+/// A cancelled `/v1/verify` must not hand its permit to the next request while
+/// its hash is still running.
+///
+/// `spawn_blocking` tasks cannot be cancelled. When the request future is
+/// dropped mid-hash — the request timeout firing, or a caller whose HTTP client
+/// gives up early and retries — tokio detaches the blocking task and its
+/// ~8 MiB allocation lives until the hash returns. If the permit were released
+/// with the future rather than with the hash, a caller retrying faster than the
+/// hash completes would over-commit the very bound `verify_permits` exists to
+/// enforce, and could push resident memory past it.
+///
+/// The permit is therefore moved into the blocking closure. This test pins that:
+/// with the permit merely held by the future, the first assertion sees the
+/// permit already back in the semaphore and fails.
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelled_verify_holds_its_permit_until_the_hash_finishes() {
+    let (app, store, state) = TestAppBuilder {
+        algorithm: Some(Algorithm::Argon2id(Argon2idParams::default())),
+        // One permit makes the accounting unambiguous: 1 = free, 0 = in use.
+        verify_permits: Some(1),
+        ..Default::default()
+    }
+    .build_with_state();
+
+    let site = create_test_site(&app).await;
+    let (status, puzzle) = get_test_puzzle(&app, &site.site_key.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    let puzzle = puzzle.unwrap();
+
+    // ~30x the default work, so the hash comfortably outlives the cancellation
+    // below even on hardware much faster than the machine this was written on.
+    make_verify_slow(&store, puzzle.challenge_id, 64).await;
+
+    assert_eq!(
+        state.verify_permits.available_permits(),
+        1,
+        "permit should be free before the verify starts",
+    );
+
+    // The nonce is irrelevant: verify computes the hash before it can know
+    // whether the nonce is right, which is the window this test needs.
+    let verify_body = serde_json::json!({
+        "challenge_id": puzzle.challenge_id,
+        "nonce": 1u64,
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/verify")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", site.secret_key))
+        .body(Body::from(serde_json::to_vec(&verify_body).unwrap()))
+        .unwrap();
+
+    // Dropping this future is what a request timeout or a disconnected caller
+    // does to the handler.
+    let cancelled = tokio::time::timeout(
+        std::time::Duration::from_millis(40),
+        app.clone().oneshot(with_connect_info(req)),
+    )
+    .await;
+    assert!(
+        cancelled.is_err(),
+        "the verify should still have been hashing when it was cancelled — if this \
+         fails the challenge cost is too low to exercise the race",
+    );
+
+    assert_eq!(
+        state.verify_permits.available_permits(),
+        0,
+        "the detached hash still owns ~8 MiB, so its permit must not be reissued yet",
+    );
+
+    // ...and it must come back once the hash finishes, or a cancelled request
+    // would leak a permit and the endpoint would wedge after enough of them.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while state.verify_permits.available_permits() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "permit was never released — a cancelled verify leaks it",
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(state.verify_permits.available_permits(), 1);
 }
