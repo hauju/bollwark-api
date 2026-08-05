@@ -157,6 +157,10 @@ pub struct Analytics {
     /// Browser-family counts parsed from the logged User-Agent, sorted
     /// descending.
     pub browsers: Vec<BrowserCount>,
+    /// Bot-family counts for the automated slice of traffic, sorted
+    /// descending — a finer split of the single "bot/script" browser family.
+    /// Sessions with a non-automated UA don't appear here.
+    pub bots: Vec<BotCount>,
     /// IP-reputation network-type counts (datacenter/tor/vpn/residential),
     /// sorted descending. Only sessions whose IP matched the reputation list
     /// appear here, so the panel is empty when no `IP_REPUTATION_FILE` is set.
@@ -190,6 +194,12 @@ pub struct TimeBucket {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BrowserCount {
+    pub name: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BotCount {
     pub name: String,
     pub count: u64,
 }

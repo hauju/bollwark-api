@@ -9,9 +9,9 @@ use std::path::PathBuf;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row};
 
 use super::types::{
-    Analytics, BrowserCount, CountryCount, NetworkTypeCount, OutcomeCounts, PuzzleBreakdownDto,
-    PuzzleSignalSums, Session, SignalFires, SiteActivity, Stats, TierCounts, TimeBucket,
-    VerifyBreakdownDto, VerifySection, VerifySignalSums,
+    Analytics, BotCount, BrowserCount, CountryCount, NetworkTypeCount, OutcomeCounts,
+    PuzzleBreakdownDto, PuzzleSignalSums, Session, SignalFires, SiteActivity, Stats, TierCounts,
+    TimeBucket, VerifyBreakdownDto, VerifySection, VerifySignalSums,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -347,6 +347,40 @@ fn browser_family(ua: Option<&str>) -> &'static str {
     }
 }
 
+/// Classify an automated User-Agent into a bot family — the finer split of
+/// `browser_family`'s single "bot/script" bucket. `None` means the UA looks
+/// like a real browser (or is absent) and belongs in no bot bucket.
+///
+/// The crawler families say "claims": a Googlebot or GPTBot UA arriving at
+/// `/v1/puzzle` is almost certainly a spoofer, because real crawlers fetch
+/// raw HTML and never execute the widget. Order matters — the crawler tokens
+/// all contain "bot", so they are checked before the generic catch-all.
+fn bot_family(ua: Option<&str>) -> Option<&'static str> {
+    let l = ua?.to_ascii_lowercase();
+    if l.contains("headless") {
+        Some("Headless browser")
+    } else if l.contains("gptbot")
+        || l.contains("claudebot")
+        || l.contains("perplexitybot")
+        || l.contains("ccbot")
+        || l.contains("bytespider")
+    {
+        Some("Claims AI crawler")
+    } else if l.contains("googlebot") || l.contains("bingbot") || l.contains("duckduckbot") {
+        Some("Claims search crawler")
+    } else if l.contains("curl") || l.contains("wget") {
+        Some("curl/wget")
+    } else if l.contains("python") {
+        Some("Python")
+    } else if l.contains("go-http") {
+        Some("Go")
+    } else if l.contains("bot") || l.contains("crawler") || l.contains("spider") {
+        Some("Other scripted")
+    } else {
+        None
+    }
+}
+
 #[allow(clippy::cast_sign_loss)]
 fn analytics_blocking(
     conn: &Connection,
@@ -484,9 +518,11 @@ fn analytics_blocking(
         },
     )?;
 
-    // 3. Browser families. Group raw UA strings in SQL (cheap dedup), then
-    // classify and merge the families in Rust.
+    // 3. Browser + bot families. Group raw UA strings in SQL (cheap dedup),
+    // then classify and merge the families in Rust — one pass feeds both
+    // breakdowns.
     let mut families: HashMap<&'static str, u64> = HashMap::new();
+    let mut bot_families: HashMap<&'static str, u64> = HashMap::new();
     let mut stmt = conn.prepare(&format!(
         "SELECT p.user_agent, COUNT(*)
          FROM puzzle_decisions p
@@ -499,6 +535,9 @@ fn analytics_blocking(
     for row in rows {
         let (ua, count) = row?;
         *families.entry(browser_family(ua.as_deref())).or_default() += count as u64;
+        if let Some(family) = bot_family(ua.as_deref()) {
+            *bot_families.entry(family).or_default() += count as u64;
+        }
     }
     let mut browsers: Vec<BrowserCount> = families
         .into_iter()
@@ -508,6 +547,14 @@ fn analytics_blocking(
         })
         .collect();
     browsers.sort_by(|a, b| b.count.cmp(&a.count).then(a.name.cmp(&b.name)));
+    let mut bots: Vec<BotCount> = bot_families
+        .into_iter()
+        .map(|(name, count)| BotCount {
+            name: name.to_string(),
+            count,
+        })
+        .collect();
+    bots.sort_by(|a, b| b.count.cmp(&a.count).then(a.name.cmp(&b.name)));
 
     // 4. Network types. The category is already a canonical label, so SQL can
     // group and order directly. NULL rows (no reputation match) are excluded —
@@ -557,6 +604,7 @@ fn analytics_blocking(
         buckets,
         bot_histogram,
         browsers,
+        bots,
         network_types,
         countries,
         signal_fires,
@@ -734,6 +782,12 @@ mod tests {
         assert_eq!(by_name.get("(none)"), Some(&1));
         assert_eq!(by_name.get("Firefox"), None);
 
+        // Bots: only the curl row is automated; Chrome and NULL contribute
+        // nothing.
+        assert_eq!(a.bots.len(), 1);
+        assert_eq!(a.bots[0].name, "curl/wget");
+        assert_eq!(a.bots[0].count, 1);
+
         // Signal fires (in-window only).
         assert_eq!(a.signal_fires.rate, 2);
         assert_eq!(a.signal_fires.header_anomaly, 2);
@@ -765,5 +819,38 @@ mod tests {
         assert_eq!(s2.countries.len(), 1);
         assert_eq!(s2.countries[0].name, "DE");
         assert_eq!(s2.countries[0].count, 1);
+    }
+
+    /// The crawler tokens all contain "bot", so ordering bugs would silently
+    /// fold every crawler into "Other scripted"; real-browser UAs must map to
+    /// no family at all.
+    #[test]
+    fn bot_family_classifies_by_specificity() {
+        let f = |ua: &str| bot_family(Some(ua));
+
+        assert_eq!(
+            f("Mozilla/5.0 HeadlessChrome/120.0"),
+            Some("Headless browser")
+        );
+        assert_eq!(
+            f("Mozilla/5.0 (compatible; GPTBot/1.0)"),
+            Some("Claims AI crawler")
+        );
+        assert_eq!(
+            f("Mozilla/5.0 (compatible; ClaudeBot/1.0)"),
+            Some("Claims AI crawler")
+        );
+        assert_eq!(
+            f("Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"),
+            Some("Claims search crawler")
+        );
+        assert_eq!(f("curl/8.4.0"), Some("curl/wget"));
+        assert_eq!(f("Wget/1.21"), Some("curl/wget"));
+        assert_eq!(f("python-requests/2.31.0"), Some("Python"));
+        assert_eq!(f("Go-http-client/2.0"), Some("Go"));
+        assert_eq!(f("SomeRandomBot/0.1"), Some("Other scripted"));
+
+        assert_eq!(f("Mozilla/5.0 Chrome/120.0 Safari/537.36"), None);
+        assert_eq!(bot_family(None), None);
     }
 }
