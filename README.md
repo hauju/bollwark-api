@@ -1,3 +1,5 @@
+<img src="static/logo.svg" alt="" width="80" align="right">
+
 # Bollwark
 
 Self-hostable proof-of-work CAPTCHA service in Rust. Clients solve a memory-hard Argon2id (or SHA-256) puzzle to prove they aren't bots; the server brackets each solve with two scoring passes that adapt difficulty — or short-circuit — based on per-request risk signals.
