@@ -313,6 +313,16 @@ pub async fn verify(
         .await?
         .ok_or(CaptchaError::Unauthorized)?;
 
+    // Fork before any challenge lookup: a failover claim has no challenge by
+    // construction, so it takes an entirely separate path with its own
+    // (much weaker, explicitly fail-open) acceptance rules.
+    let req = match req {
+        ResolvedVerify::Solved(s) => s,
+        ResolvedVerify::Failover(claim) => {
+            return verify_failover(&state, &site, claim);
+        }
+    };
+
     // Look up challenge
     let challenge = state
         .store
@@ -407,7 +417,7 @@ pub async fn verify(
                 webdriver: "n/a",
             });
         }
-        return Ok(Json(VerifyResponse { success: false }));
+        return Ok(Json(VerifyResponse::solved(false)));
     }
 
     // Consume the challenge atomically after a valid PoW. This preserves
@@ -487,8 +497,166 @@ pub async fn verify(
         });
     }
 
-    Ok(Json(VerifyResponse { success }))
+    Ok(Json(VerifyResponse::solved(success)))
 }
+
+/// Decide a failover claim — a client asserting it could not reach us at all.
+///
+/// Two independent gates, in order:
+///
+/// 1. **Attestation** ([`crate::failover`]): is there a window where *we* know
+///    we were unreachable, still within its grace tail? Without one this is
+///    just an unauthenticated request to skip the puzzle, and is refused.
+/// 2. **Local evidence**: the honeypot and behaviour blob are collected in the
+///    browser and so survive the outage. They're the only real signal left on
+///    this path, so an obviously-automated claim is refused *even inside* an
+///    attested window. This is why failover isn't a blanket free pass:
+///    a headless/driven client that trips the verify scorer still gets nothing.
+///
+/// Deliberately synchronous and allocation-light — during an outage recovery
+/// this path can see the whole site's backlog arrive at once.
+fn verify_failover(
+    state: &SharedState,
+    site: &Site,
+    claim: FailoverClaim,
+) -> Result<Json<VerifyResponse>, CaptchaError> {
+    // The claim names the site it was minted for; it must match the secret the
+    // caller authenticated with, or one tenant could spend another's budget.
+    if claim.site_key != site.site_key {
+        return Err(CaptchaError::Unauthorized);
+    }
+
+    let verdict = state.failover.evaluate(&site.site_key, claim.issued_at_ms);
+
+    // Score the browser-local evidence before honoring an accepted claim.
+    // There's no challenge, so no server-derived time-on-page — behaviour and
+    // the honeypot are all we have.
+    let honeypot_tripped = claim.honeypot.as_deref().is_some_and(|s| !s.is_empty());
+    let vctx = VerifyContext {
+        honeypot_tripped,
+        time_on_page_ms: None,
+        behavior: match claim.behavior {
+            Some(report) => BehaviorPresence::Present(report),
+            None => BehaviorPresence::Absent,
+        },
+    };
+    let vscore = state.verify_scorer.score(&vctx);
+
+    let (success, outcome) = match (verdict.accepted(), vscore.decision) {
+        (false, _) => (false, verdict.outcome()),
+        // Attested, but the client looks automated. Refuse — an outage is not
+        // a reason to stop reading the evidence we still have.
+        (true, VerifyDecision::Block) => (false, "failover_behavior_block"),
+        (true, _) => (true, verdict.outcome()),
+    };
+
+    // Every failover decision is WARN, accepted or not: an operator needs to
+    // see both that a fail-open is in progress and that someone is probing for
+    // one. This log is the audit trail for the path (same stance as
+    // ShadowFail), which is why it carries the full breakdown.
+    tracing::warn!(
+        event = "verify_decision",
+        outcome = outcome,
+        failover = true,
+        success = success,
+        site_key = %site.site_key,
+        score = vscore.total,
+        sig_honeypot = vscore.breakdown.honeypot,
+        sig_behavior = vscore.breakdown.behavior,
+        issued_at_ms = claim.issued_at_ms,
+        "Failover claim decision"
+    );
+
+    Ok(Json(VerifyResponse {
+        success,
+        failover: success,
+    }))
+}
+
+/// Declare an outage window so failover claims are honored for it.
+///
+/// The escape hatch for outages this process cannot self-observe: the
+/// heartbeat only catches gaps where the process itself was gone, so an
+/// intact server behind a broken edge (expired/self-signed TLS, DNS, CDN)
+/// leaves no trace here — the app was healthy the entire time while no browser
+/// could load the widget. `scripts/check-public-endpoint.sh` detects exactly
+/// that from outside and is the intended caller.
+///
+/// `duration_secs` declares a window ending *now* (the common case: something
+/// just broke and has been broken for N seconds). `start`/`end` declare an
+/// explicit interval, for backfilling after the fact.
+pub async fn declare_outage(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    AppJson(body): AppJson<DeclareOutageRequest>,
+) -> Result<Json<OutagesResponse>, CaptchaError> {
+    require_admin_token(&state, &headers)?;
+
+    if !state.failover.enabled() {
+        return Err(CaptchaError::BadRequest(
+            "client failover is disabled — set FAILOVER_ENABLED=1 and \
+             FAILOVER_STATE_PATH to declare outage windows"
+                .into(),
+        ));
+    }
+
+    let now = chrono::Utc::now();
+    let (start, end) = match (body.duration_secs, body.start, body.end) {
+        (Some(secs), _, _) => {
+            if secs == 0 || secs > MAX_DECLARED_OUTAGE_SECS {
+                return Err(CaptchaError::BadRequest(format!(
+                    "duration_secs must be 1..={MAX_DECLARED_OUTAGE_SECS}"
+                )));
+            }
+            (now - chrono::Duration::seconds(secs as i64), now)
+        }
+        (None, Some(start), Some(end)) => (start, end),
+        _ => {
+            return Err(CaptchaError::BadRequest(
+                "provide either duration_secs, or both start and end".into(),
+            ));
+        }
+    };
+
+    if end <= start {
+        return Err(CaptchaError::BadRequest("end must be after start".into()));
+    }
+    // An unbounded future `end` would hold the fail-open open indefinitely,
+    // which is the one mistake here that can't be noticed from the outside.
+    if (end - start).num_seconds() > MAX_DECLARED_OUTAGE_SECS as i64 {
+        return Err(CaptchaError::BadRequest(format!(
+            "declared window may not exceed {MAX_DECLARED_OUTAGE_SECS}s"
+        )));
+    }
+
+    state.failover.declare_outage(start, end);
+    Ok(Json(outages_payload(&state)))
+}
+
+/// Current attested windows plus accept/refuse counters, for operators and
+/// the monitor script to confirm a declaration landed.
+pub async fn list_outages(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<OutagesResponse>, CaptchaError> {
+    require_admin_token(&state, &headers)?;
+    Ok(Json(outages_payload(&state)))
+}
+
+fn outages_payload(state: &SharedState) -> OutagesResponse {
+    let (accepted, refused) = state.failover.counters();
+    OutagesResponse {
+        enabled: state.failover.enabled(),
+        grace_secs: state.config.failover_grace_secs,
+        windows: state.failover.active_windows(),
+        accepted_total: accepted,
+        refused_total: refused,
+    }
+}
+
+/// Upper bound on a single declared window (24h). Long enough for any real
+/// incident, short enough that a fat-fingered declaration expires on its own.
+const MAX_DECLARED_OUTAGE_SECS: u64 = 86_400;
 
 pub async fn create_site(
     State(state): State<SharedState>,

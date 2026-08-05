@@ -14,6 +14,17 @@
   const ASSET_BASE = "__BOLLWARK_ASSET_BASE__";
   const ASSET_BASE_SUBSTITUTED = ASSET_BASE.charAt(0) === "/";
 
+  // Backoff before concluding the service is unreachable and falling back to a
+  // failover claim. Two retries — enough to ride out a blip or a single failed
+  // connection, short enough that a real outage costs the visitor ~1.2s rather
+  // than a hung form.
+  const FAILOVER_RETRY_DELAYS_MS = [300, 900];
+
+  // How often a widget in failover mode re-checks whether the service is back.
+  // On success it upgrades to a real solved token in place, so a visitor who
+  // sat through the tail of an outage submits a genuine proof of work.
+  const FAILOVER_RECOVERY_POLL_MS = 15000;
+
   function inferServerUrl(scriptSrc) {
     if (!scriptSrc) return "";
     try {
@@ -229,6 +240,9 @@
       // and fired as soon as the tab becomes visible again.
       this._refreshTimer = null;
       this._refreshPending = false;
+      // True once the service has been declared unreachable and the widget is
+      // emitting a failover claim instead of a solved token.
+      this._failover = false;
       this._onVisibilityChange = () => {
         if (!document.hidden && this._refreshPending) {
           this._refreshPending = false;
@@ -284,7 +298,7 @@
     async _initFlow() {
       if (!this.siteKey) return; // testsite delays setting siteKey; reset() will retry
       try {
-        const puzzle = await this._fetchPuzzle();
+        const puzzle = await this._fetchPuzzleWithRetry();
         this.puzzle = puzzle;
         this.tier = puzzle.tier;
         this._schedulePuzzleRefresh();
@@ -305,6 +319,15 @@
           this._renderForTier();
         }
       } catch (err) {
+        // Unreachable after retries: emit a failover claim so the form the
+        // widget guards stays submittable. The claim proves nothing on its
+        // own — the server honors it only against its own attested outage
+        // record — so this is a request to fail open, not a decision to.
+        if (CaptchaWidget._isUnreachable(err)) {
+          this._enterFailover(err);
+          return;
+        }
+
         const blocked = err.status === 429;
         this.tier = blocked ? "block" : null;
         this.state = "failed";
@@ -341,6 +364,104 @@
       this.container.dispatchEvent(
         new CustomEvent("bollwark:puzzle", { detail, bubbles: true })
       );
+    }
+
+    // ── Failover ──
+    //
+    // The service is unreachable, so there is no challenge to solve and no
+    // proof of work to produce. Emit a claim saying exactly that and let the
+    // form submit; the server decides whether to honor it against its own
+    // record of having been down (see src/failover/mod.rs). If failover is
+    // disabled server-side, or no outage is attested, the submit is rejected
+    // there — the widget's job is only to stop being a silent hard blocker.
+    _enterFailover(err) {
+      this._failover = true;
+      this.tier = null;
+      // "verified" is the state the rest of the widget uses for "this form is
+      // good to submit". The distinction the embedder needs is on the event
+      // and, authoritatively, in the server's `failover: true` response — not
+      // in widget-local state.
+      this.state = "verified";
+      this._injectFailoverToken();
+
+      this._dispatchPuzzleEvent({
+        ok: false,
+        failover: true,
+        tier: null,
+        error: err && err.message,
+      });
+
+      if (this.mode !== "invisible") {
+        this._promoteToInteractiveUI();
+        this._renderForTier();
+        if (this.statusEl) {
+          this.statusEl.textContent = "Verification unavailable — continuing";
+        }
+      }
+
+      this._scheduleFailoverRecovery();
+    }
+
+    // Poll for recovery. A visitor who loaded the form during an outage may
+    // still be filling it in when the service returns; upgrading to a real
+    // token means their submit carries genuine proof of work instead of
+    // spending the site's (rate-capped) failover budget.
+    _scheduleFailoverRecovery() {
+      this._clearPuzzleRefresh();
+      this._refreshTimer = setTimeout(async () => {
+        this._refreshTimer = null;
+        if (!this._failover) return;
+        if (document.hidden) {
+          this._scheduleFailoverRecovery();
+          return;
+        }
+        try {
+          const puzzle = await this._fetchPuzzle();
+          this.puzzle = puzzle;
+          const solution = await this._solvePow(puzzle);
+          this._failover = false;
+          this._injectToken(puzzle.challenge_id, solution.nonce);
+          if (this.statusEl) this.statusEl.textContent = "";
+          this._updateUI();
+          this._schedulePuzzleRefresh();
+          this._dispatchPuzzleEvent({
+            ok: true,
+            recovered: true,
+            tier: puzzle.tier,
+            difficulty: puzzle.difficulty,
+          });
+        } catch (_) {
+          // Still down (or a fresh block-tier decision on recovery) — keep the
+          // failover token in place and check back.
+          this._scheduleFailoverRecovery();
+        }
+      }, FAILOVER_RECOVERY_POLL_MS);
+    }
+
+    // Install the hidden input carrying a failover claim. Mirrors
+    // `_injectToken`, including the submit-time refresh, so the behaviour
+    // counters in the claim reflect the visitor's actual interaction — that
+    // blob is collected locally and survives the outage, and is the only real
+    // evidence the server still gets to score on this path.
+    _injectFailoverToken() {
+      const form = this.container.closest("form");
+      if (!form) return;
+
+      let input = form.querySelector('input[name="captcha-token"]');
+      if (!input) {
+        input = document.createElement("input");
+        input.type = "hidden";
+        input.name = "captcha-token";
+        form.appendChild(input);
+      }
+      this._tokenInput = input;
+      this._refreshTokenInput();
+
+      if (!this._submitListenerInstalled) {
+        const handler = () => this._refreshTokenInput();
+        form.addEventListener("submit", handler, { capture: true });
+        this._submitListenerInstalled = true;
+      }
     }
 
     // ── UI Rendering ──
@@ -599,6 +720,44 @@
 
     // ── PoW ──
 
+    // Whether a puzzle-fetch failure means "this service is unreachable"
+    // (→ failover is appropriate) or "this service answered and said no"
+    // (→ it must not be).
+    //
+    // A 429 is a deliberate block-tier decision and a 4xx is an integration
+    // fault (unknown site_key, disallowed origin) — minting a failover claim
+    // for either would be papering over a working, correct refusal. Only a
+    // 5xx or a fetch that never got a response at all (DNS, TLS, connection
+    // refused, CORS preflight failure) counts as unreachable.
+    //
+    // Note the failure mode this cannot see: if `captcha-widget.js` itself
+    // fails to load, no widget code runs, so there is nothing here to fall
+    // back. That case is the embedder's to handle — see the `script.onerror`
+    // pattern in INTEGRATION.md.
+    static _isUnreachable(err) {
+      return !err.status || err.status >= 500;
+    }
+
+    // Fetch with a short backoff before declaring the service unreachable, so
+    // a single transient blip doesn't drop an otherwise-healthy visitor onto
+    // the fail-open path. Retries only what's worth retrying: a 429 or 4xx is
+    // returned immediately.
+    async _fetchPuzzleWithRetry() {
+      let lastErr;
+      for (let attempt = 0; attempt <= FAILOVER_RETRY_DELAYS_MS.length; attempt++) {
+        try {
+          return await this._fetchPuzzle();
+        } catch (err) {
+          lastErr = err;
+          if (!CaptchaWidget._isUnreachable(err)) throw err;
+          const delay = FAILOVER_RETRY_DELAYS_MS[attempt];
+          if (delay === undefined) break;
+          await new Promise((r) => setTimeout(r, delay));
+        }
+      }
+      throw lastErr;
+    }
+
     async _fetchPuzzle() {
       const url = `${this.serverUrl}/v1/puzzle?site_key=${this.siteKey}`;
       // Cookie-free service — no credentials to send. Omitting them keeps the
@@ -645,6 +804,11 @@
           ? this.puzzle.expires_in_secs * 1000
           : Date.parse(this.puzzle.expires_at) - Date.now();
       if (!isFinite(ttlMs) || ttlMs <= 0) ttlMs = 240000;
+      // Absolute deadline for the challenge currently in the form. If a
+      // refresh can't reach the server before this passes, the token we're
+      // holding is dead and retrying it forever just fails the submit — that's
+      // the point where failover becomes the better answer (see below).
+      this._puzzleExpiresAt = Date.now() + ttlMs;
       // 60s before expiry, but never below half the TTL (short-TTL servers)
       // and never below a 5s floor (protects against a hot refresh loop).
       const delay = Math.max(ttlMs - 60000, ttlMs / 2, 5000);
@@ -682,8 +846,21 @@
           this._injectToken(puzzle.challenge_id, solution.nonce);
         }
         this._schedulePuzzleRefresh();
-      } catch (_) {
-        // Network blip or a block-tier 429: keep the current challenge
+      } catch (err) {
+        // A visitor who was already on the page when the outage started: the
+        // challenge in their form expires mid-outage, and every retry after
+        // that submits a token the server will reject as expired. Once it's
+        // actually dead, switch to a failover claim — this is the case the
+        // server's grace tail exists for.
+        if (
+          CaptchaWidget._isUnreachable(err) &&
+          this._puzzleExpiresAt &&
+          Date.now() >= this._puzzleExpiresAt
+        ) {
+          this._enterFailover(err);
+          return;
+        }
+        // Otherwise a blip or a block-tier 429: keep the current challenge
         // (it may still be valid for a while) and retry.
         this._refreshTimer = setTimeout(() => this._refreshPuzzle(), 60000);
       }
@@ -799,11 +976,21 @@
 
     _refreshTokenInput() {
       if (!this._tokenInput) return;
-      const payload = {
-        challenge_id: this._challengeId,
-        nonce: this._nonce,
-        behavior: { ...this._behavior },
-      };
+      // In failover there is no challenge and no nonce to reference — the
+      // claim names the site and when it was minted, and carries the same
+      // browser-local evidence a normal token would.
+      const payload = this._failover
+        ? {
+            failover: true,
+            site_key: this.siteKey,
+            issued_at: Date.now(),
+            behavior: { ...this._behavior },
+          }
+        : {
+            challenge_id: this._challengeId,
+            nonce: this._nonce,
+            behavior: { ...this._behavior },
+          };
       const honeypotValue = this.honeypot ? this.honeypot.value : "";
       if (honeypotValue) payload.honeypot = honeypotValue;
       // Hex-encode the JSON so the form host treats it as an opaque token and
@@ -817,6 +1004,7 @@
       this._destroyWorker();
       this._clearPuzzleRefresh();
       this._refreshPending = false;
+      this._failover = false;
       this._teardownBehaviorListeners();
       this.state = "idle";
       this.puzzle = null;

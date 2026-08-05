@@ -31,7 +31,7 @@ pub struct VerifyRequest {
     /// precedence over the explicit fields when present.
     #[serde(default)]
     pub token: Option<String>,
-    /// Required when `token` is absent.
+    /// Required when `token` is absent (and `failover` is false).
     #[serde(default)]
     pub challenge_id: Option<Uuid>,
     /// PoW nonce.
@@ -43,33 +43,79 @@ pub struct VerifyRequest {
     /// and submit. Absent for non-widget integrations.
     #[serde(default)]
     pub behavior: Option<BehaviorReport>,
+    /// Marks this as a *failover claim* rather than a solved puzzle: the
+    /// widget could not reach `/v1/puzzle` at all, so there is no challenge and
+    /// no nonce. See [`crate::failover`] — this flag is client-authored and
+    /// proves nothing on its own; the server honors it only against its own
+    /// attested outage record.
+    #[serde(default)]
+    pub failover: bool,
+    /// Site the failover claim was minted for. Required when `failover`.
+    #[serde(default)]
+    pub site_key: Option<Uuid>,
+    /// Client-supplied mint time (unix ms). Sanity-checked only — forgeable.
+    #[serde(default)]
+    pub issued_at: Option<i64>,
 }
 
 /// Inner payload carried by the opaque `token`. The widget hex-encodes the
 /// JSON form of this so the form host treats it as an opaque blob.
+///
+/// One shape covers both a solved puzzle and a failover claim, discriminated
+/// by `failover`, so the form host forwards a single opaque string either way
+/// and needs no branching of its own.
 #[derive(Debug, Deserialize)]
 struct TokenPayload {
-    challenge_id: Uuid,
+    #[serde(default)]
+    challenge_id: Option<Uuid>,
     #[serde(default)]
     nonce: u64,
     #[serde(default)]
     honeypot: Option<String>,
     #[serde(default)]
     behavior: Option<BehaviorReport>,
+    #[serde(default)]
+    failover: bool,
+    #[serde(default)]
+    site_key: Option<Uuid>,
+    #[serde(default)]
+    issued_at: Option<i64>,
 }
 
-/// Normalised verify fields after resolving either the opaque token or the
-/// explicit body. `time_on_page_ms` is deliberately not here — it's computed
+/// A normally-solved submission: the client held a challenge and produced a
+/// nonce for it. `time_on_page_ms` is deliberately absent — it's computed
 /// server-side from the challenge's `created_at`.
-pub struct ResolvedVerify {
+pub struct SolvedVerify {
     pub challenge_id: Uuid,
     pub nonce: u64,
     pub honeypot: Option<String>,
     pub behavior: Option<BehaviorReport>,
 }
 
+/// A claim that the widget could not reach this service at all.
+///
+/// There is no challenge and no proof of work here — by construction there
+/// cannot be, since the outage is precisely that we never issued one. The
+/// honeypot and behaviour blob still ride along: the widget collects them
+/// locally regardless of connectivity, so they remain the only real evidence
+/// available on this path and are scored before the claim is honored.
+pub struct FailoverClaim {
+    pub site_key: Uuid,
+    pub issued_at_ms: i64,
+    pub honeypot: Option<String>,
+    pub behavior: Option<BehaviorReport>,
+}
+
+/// Normalised verify request. The two arms are kept distinct so the handler
+/// cannot accidentally treat an unauthenticated failover claim as a solved
+/// puzzle — the whole security question on that path is which branch you're in.
+pub enum ResolvedVerify {
+    Solved(SolvedVerify),
+    Failover(FailoverClaim),
+}
+
 impl VerifyRequest {
-    /// Resolve into the normalised fields. Decodes the opaque token when
+    /// Resolve into the normalised form. Decodes the opaque token when
     /// present, otherwise falls back to the explicit fields.
     pub fn resolve(self) -> Result<ResolvedVerify, CaptchaError> {
         // Treat an empty/whitespace token as absent so a caller that sends
@@ -85,24 +131,69 @@ impl VerifyRequest {
                 .map_err(|_| CaptchaError::BadRequest("invalid captcha token".into()))?;
             let p: TokenPayload = serde_json::from_slice(&bytes)
                 .map_err(|_| CaptchaError::BadRequest("invalid captcha token".into()))?;
-            Ok(ResolvedVerify {
-                challenge_id: p.challenge_id,
+            if p.failover {
+                return Ok(ResolvedVerify::Failover(FailoverClaim {
+                    site_key: p.site_key.ok_or_else(|| {
+                        CaptchaError::BadRequest("failover token requires site_key".into())
+                    })?,
+                    issued_at_ms: p.issued_at.unwrap_or(0),
+                    honeypot: p.honeypot,
+                    behavior: p.behavior,
+                }));
+            }
+            Ok(ResolvedVerify::Solved(SolvedVerify {
+                challenge_id: p
+                    .challenge_id
+                    .ok_or_else(|| CaptchaError::BadRequest("invalid captcha token".into()))?,
                 nonce: p.nonce,
                 honeypot: p.honeypot,
                 behavior: p.behavior,
-            })
+            }))
+        } else if self.failover {
+            Ok(ResolvedVerify::Failover(FailoverClaim {
+                site_key: self
+                    .site_key
+                    .ok_or_else(|| CaptchaError::BadRequest("failover requires site_key".into()))?,
+                issued_at_ms: self.issued_at.unwrap_or(0),
+                honeypot: self.honeypot,
+                behavior: self.behavior,
+            }))
         } else {
             let challenge_id = self.challenge_id.ok_or_else(|| {
                 CaptchaError::BadRequest("challenge_id or token is required".into())
             })?;
-            Ok(ResolvedVerify {
+            Ok(ResolvedVerify::Solved(SolvedVerify {
                 challenge_id,
                 nonce: self.nonce,
                 honeypot: self.honeypot,
                 behavior: self.behavior,
-            })
+            }))
         }
     }
+}
+
+/// Body for `POST /v1/admin/outages`. Either `duration_secs` (a window ending
+/// now) or an explicit `start`/`end` pair.
+#[derive(Debug, Deserialize)]
+pub struct DeclareOutageRequest {
+    #[serde(default)]
+    pub duration_secs: Option<u64>,
+    #[serde(default)]
+    pub start: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub end: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OutagesResponse {
+    /// False when `FAILOVER_ENABLED` is off or no state path is configured —
+    /// in which case every failover claim is refused regardless of windows.
+    pub enabled: bool,
+    pub grace_secs: u64,
+    /// Windows that can still cover a claim (open, or within their grace tail).
+    pub windows: Vec<crate::failover::OutageWindow>,
+    pub accepted_total: u64,
+    pub refused_total: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,6 +255,24 @@ pub struct BlockedResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VerifyResponse {
     pub success: bool,
+    /// True when `success` was granted on the failover path — i.e. this
+    /// visitor never solved a puzzle, because the service was attestably
+    /// unreachable when they loaded the form. Integrators who care about the
+    /// difference (accept-but-flag, extra review, tighter downstream limits)
+    /// should branch on this; those who don't can keep reading `success`
+    /// alone and get availability by default.
+    #[serde(default)]
+    pub failover: bool,
+}
+
+impl VerifyResponse {
+    /// The ordinary path: `failover` is false for every solved-puzzle verdict.
+    pub fn solved(success: bool) -> Self {
+        Self {
+            success,
+            failover: false,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -178,44 +287,137 @@ pub struct CreateSiteResponse {
 mod tests {
     use super::*;
 
-    #[test]
-    fn resolve_empty_token_falls_through_to_explicit_fields() {
-        // `"token": ""` must not shadow the explicit challenge_id/nonce.
-        let cid = Uuid::new_v4();
-        let req = VerifyRequest {
-            token: Some(String::new()),
-            challenge_id: Some(cid),
-            nonce: 42,
-            honeypot: None,
-            behavior: None,
-        };
-        let resolved = req.resolve().expect("empty token falls through");
-        assert_eq!(resolved.challenge_id, cid);
-        assert_eq!(resolved.nonce, 42);
-    }
-
-    #[test]
-    fn resolve_whitespace_token_falls_through() {
-        let cid = Uuid::new_v4();
-        let req = VerifyRequest {
-            token: Some("   ".into()),
-            challenge_id: Some(cid),
-            nonce: 7,
-            honeypot: None,
-            behavior: None,
-        };
-        assert_eq!(req.resolve().unwrap().challenge_id, cid);
-    }
-
-    #[test]
-    fn resolve_missing_token_and_challenge_id_is_bad_request() {
-        let req = VerifyRequest {
+    /// A `VerifyRequest` with everything unset, so each test only states the
+    /// fields it actually cares about.
+    fn req() -> VerifyRequest {
+        VerifyRequest {
             token: None,
             challenge_id: None,
             nonce: 0,
             honeypot: None,
             behavior: None,
-        };
-        assert!(matches!(req.resolve(), Err(CaptchaError::BadRequest(_))));
+            failover: false,
+            site_key: None,
+            issued_at: None,
+        }
+    }
+
+    fn expect_solved(r: ResolvedVerify) -> SolvedVerify {
+        match r {
+            ResolvedVerify::Solved(s) => s,
+            ResolvedVerify::Failover(_) => panic!("expected a solved verify"),
+        }
+    }
+
+    fn expect_failover(r: ResolvedVerify) -> FailoverClaim {
+        match r {
+            ResolvedVerify::Failover(f) => f,
+            ResolvedVerify::Solved(_) => panic!("expected a failover claim"),
+        }
+    }
+
+    #[test]
+    fn resolve_empty_token_falls_through_to_explicit_fields() {
+        // `"token": ""` must not shadow the explicit challenge_id/nonce.
+        let cid = Uuid::new_v4();
+        let resolved = VerifyRequest {
+            token: Some(String::new()),
+            challenge_id: Some(cid),
+            nonce: 42,
+            ..req()
+        }
+        .resolve()
+        .expect("empty token falls through");
+        let solved = expect_solved(resolved);
+        assert_eq!(solved.challenge_id, cid);
+        assert_eq!(solved.nonce, 42);
+    }
+
+    #[test]
+    fn resolve_whitespace_token_falls_through() {
+        let cid = Uuid::new_v4();
+        let resolved = VerifyRequest {
+            token: Some("   ".into()),
+            challenge_id: Some(cid),
+            nonce: 7,
+            ..req()
+        }
+        .resolve()
+        .unwrap();
+        assert_eq!(expect_solved(resolved).challenge_id, cid);
+    }
+
+    #[test]
+    fn resolve_missing_token_and_challenge_id_is_bad_request() {
+        assert!(matches!(req().resolve(), Err(CaptchaError::BadRequest(_))));
+    }
+
+    #[test]
+    fn failover_token_resolves_to_a_claim_not_a_solve() {
+        let site = Uuid::new_v4();
+        let payload = serde_json::json!({
+            "failover": true,
+            "site_key": site,
+            "issued_at": 1_700_000_000_000i64,
+        });
+        let token = hex::encode(serde_json::to_vec(&payload).unwrap());
+        let claim = expect_failover(
+            VerifyRequest {
+                token: Some(token),
+                ..req()
+            }
+            .resolve()
+            .unwrap(),
+        );
+        assert_eq!(claim.site_key, site);
+        assert_eq!(claim.issued_at_ms, 1_700_000_000_000);
+    }
+
+    #[test]
+    fn failover_token_without_site_key_is_rejected() {
+        let payload = serde_json::json!({ "failover": true, "issued_at": 1i64 });
+        let token = hex::encode(serde_json::to_vec(&payload).unwrap());
+        assert!(matches!(
+            VerifyRequest {
+                token: Some(token),
+                ..req()
+            }
+            .resolve(),
+            Err(CaptchaError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn non_failover_token_without_challenge_id_is_rejected() {
+        // `challenge_id` became Option to make room for the failover arm; a
+        // solved token that omits it must still be a hard error rather than
+        // silently resolving to a nil UUID.
+        let payload = serde_json::json!({ "nonce": 5u64 });
+        let token = hex::encode(serde_json::to_vec(&payload).unwrap());
+        assert!(matches!(
+            VerifyRequest {
+                token: Some(token),
+                ..req()
+            }
+            .resolve(),
+            Err(CaptchaError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn explicit_failover_fields_resolve_to_a_claim() {
+        let site = Uuid::new_v4();
+        let claim = expect_failover(
+            VerifyRequest {
+                failover: true,
+                site_key: Some(site),
+                issued_at: Some(42),
+                ..req()
+            }
+            .resolve()
+            .unwrap(),
+        );
+        assert_eq!(claim.site_key, site);
+        assert_eq!(claim.issued_at_ms, 42);
     }
 }

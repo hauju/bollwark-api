@@ -192,16 +192,75 @@ curl -s -X POST https://api.bollwark.eu/v1/verify \
 Successful response:
 
 ```json
-{ "success": true }
+{ "success": true, "failover": false }
 ```
 
 Failed response:
 
 ```json
-{ "success": false }
+{ "success": false, "failover": false }
 ```
 
 Challenges are single-use. A second submit with the same `challenge_id` will fail.
+
+### The `failover` field
+
+`failover: true` means `success` was granted **without a solved puzzle**, because the captcha service was attestably unreachable when the visitor loaded your form. It's off unless the operator enabled client failover (see `CONFIGURATION.md`).
+
+If you don't care, keep reading `success` alone — you get availability during outages by default. If you do, this is the hook for accept-but-flag:
+
+```js
+if (!result.success) return res.status(400).send("CAPTCHA failed");
+if (result.failover) {
+  // Verified only in the weak sense: the service was down, so no proof of
+  // work was possible. The honeypot and behavioural signals were still
+  // checked. Reasonable responses: accept but queue for review, tighten a
+  // downstream rate limit, or require email confirmation before acting.
+  logger.warn({ userId }, "captcha failover — accepted without proof of work");
+}
+```
+
+## 4b. When the captcha service is down
+
+Two failure modes the `failover` field does **not** cover, because in both of them there's no verify response to read.
+
+**The widget script never loads.** A TLS, DNS, or CDN failure on `/v1/widget.js` means no widget code runs at all — so it can't fall back on your behalf. Only your page can detect this:
+
+```html
+<script src="https://api.bollwark.eu/v1/widget.js"
+        onerror="captchaUnavailable()"></script>
+<script>
+  // Also guard the case where the script loads but never initialises.
+  const t = setTimeout(captchaUnavailable, 8000);
+  document.querySelector('.bollwark-widget')
+    ?.addEventListener('bollwark:puzzle', () => clearTimeout(t));
+
+  function captchaUnavailable() {
+    // Your call: allow the submit (and flag it server-side), or disable it
+    // with an explanation. Silently leaving the form unsubmittable is the
+    // one option to avoid.
+    document.querySelector('#signup button[type=submit]').disabled = false;
+  }
+</script>
+```
+
+**Your backend can't reach `/v1/verify`.** A connection error or timeout is not a failed verification — it's an unknown. Decide deliberately, and don't let it read as `success: false` by accident:
+
+```js
+let result;
+try {
+  result = await verifyCaptcha(token);
+} catch (err) {
+  // Fail open or closed — a real choice, not a default. Fail closed is safer
+  // for account creation or payments; fail open is usually right for a
+  // contact form, where blocking every visitor is the worse outcome.
+  logger.error({ err }, "captcha verify unreachable");
+  if (FAIL_CLOSED) return res.status(503).send("Try again shortly");
+  result = { success: true, failover: true };
+}
+```
+
+The widget also emits `bollwark:puzzle` with `detail.failover === true` when it enters failover mode, and `detail.recovered === true` if the service comes back and it upgrades to a real solved token in place.
 
 ## 5. Backend Example: Express
 

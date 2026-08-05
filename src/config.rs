@@ -136,6 +136,36 @@ pub struct AppConfig {
     /// Unset → the `country` column stays NULL and the Countries panel is empty.
     /// Nothing leaves the box; a /24-truncated IP still resolves country-level.
     pub geoip_db_path: Option<String>,
+    /// Client failover: honor a widget-minted "I couldn't reach you" claim at
+    /// `/v1/verify` while an outage is attested, so our downtime doesn't take
+    /// every embedding form down with it. **Off by default** — honoring such a
+    /// claim is a deliberate, bounded fail-open (see [`crate::failover`]), and
+    /// that trade is the operator's to make. Requires `FAILOVER_STATE_PATH`.
+    pub failover_enabled: bool,
+    /// Where the failover heartbeat + attested outage windows are persisted.
+    /// Unset disables failover outright: without durable state a heartbeat gap
+    /// can't be detected across the restart that caused it, and a declared
+    /// window would evaporate on the very restart it exists to cover.
+    pub failover_state_path: Option<String>,
+    /// Cadence of the liveness heartbeat written to `FAILOVER_STATE_PATH`.
+    /// Bounds how much of a real outage goes unattested — the window starts at
+    /// the *last* heartbeat, so a coarse cadence under-reports the outage's
+    /// leading edge. Coerced to ≥1s (`tokio::time::interval` panics on zero).
+    pub failover_heartbeat_interval_secs: u64,
+    /// Minimum heartbeat gap treated as an outage. Below this, a restart is
+    /// assumed routine (deploy, config reload) rather than downtime worth
+    /// opening a fail-open window for. Default 60s.
+    pub failover_min_gap_secs: u64,
+    /// How long after an outage window closes a failover claim is still
+    /// honored. Covers the visitor who loaded the form *during* the outage and
+    /// submits it minutes later, once we're already back. This is also the
+    /// blast radius: it's exactly how long the fail-open stays open after
+    /// recovery. Default 300s.
+    pub failover_grace_secs: u64,
+    /// Per-site cap on *accepted* failover claims per rolling minute. Bounds
+    /// how much traffic an attacker who catches a genuine outage can push
+    /// through it. Default 600; `0` disables the cap.
+    pub failover_max_per_min: u32,
 }
 
 impl AppConfig {
@@ -230,6 +260,25 @@ impl AppConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(72),
             geoip_db_path: env::var("GEOIP_DB_PATH").ok(),
+            failover_enabled: parse_truthy(env::var("FAILOVER_ENABLED").ok().as_deref()),
+            failover_state_path: env::var("FAILOVER_STATE_PATH").ok(),
+            failover_heartbeat_interval_secs: env::var("FAILOVER_HEARTBEAT_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(15)
+                .max(1),
+            failover_min_gap_secs: env::var("FAILOVER_MIN_GAP_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60),
+            failover_grace_secs: env::var("FAILOVER_GRACE_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300),
+            failover_max_per_min: env::var("FAILOVER_MAX_PER_MIN")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(600),
         }
         .validated()
     }
@@ -307,7 +356,33 @@ impl AppConfig {
             );
         }
 
+        // Failover without durable state is inert: a heartbeat gap can only be
+        // detected by comparing against a timestamp that survived the restart,
+        // and a declared window would be lost on the very restart it covers.
+        // Warn rather than panic — the safe direction is "no failover", which
+        // is exactly what happens, and refusing to boot would make an
+        // availability feature into an availability risk.
+        if self.failover_enabled && self.failover_state_path.is_none() {
+            tracing::warn!(
+                "FAILOVER_ENABLED is set but FAILOVER_STATE_PATH is not — client \
+                 failover stays OFF. Outage attestation needs state that outlives \
+                 a restart; without it every failover claim is refused."
+            );
+        }
+
         self
+    }
+
+    /// Project the failover knobs into the guard's own config type.
+    pub fn failover_config(&self) -> crate::failover::FailoverConfig {
+        crate::failover::FailoverConfig {
+            enabled: self.failover_enabled,
+            state_path: self.failover_state_path.as_ref().map(Into::into),
+            heartbeat_interval_secs: self.failover_heartbeat_interval_secs,
+            min_gap_secs: self.failover_min_gap_secs,
+            grace_secs: self.failover_grace_secs,
+            max_per_min: self.failover_max_per_min,
+        }
     }
 }
 
@@ -404,6 +479,12 @@ impl Default for AppConfig {
             anonymize_log_ip: true,
             log_retention_hours: 72,
             geoip_db_path: None,
+            failover_enabled: false,
+            failover_state_path: None,
+            failover_heartbeat_interval_secs: 15,
+            failover_min_gap_secs: 60,
+            failover_grace_secs: 300,
+            failover_max_per_min: 600,
         }
     }
 }

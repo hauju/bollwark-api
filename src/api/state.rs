@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::api::types::InfoUrls;
 use crate::config::AppConfig;
 use crate::dashboard::DecisionLog;
+use crate::failover::FailoverGuard;
 use crate::puzzle::challenge::PuzzleEngine;
 use crate::risk::{RiskScorer, TierThresholds, TrustedProxies, VerifyScorer, VerifyThresholds};
 use crate::storage::memory::InMemoryStore;
@@ -39,6 +40,10 @@ pub struct AppState {
     /// a permit rather than being refused; the global request timeout is what
     /// bounds the queue, so overload degrades into timeouts instead of an OOM.
     pub verify_permits: Arc<tokio::sync::Semaphore>,
+    /// Outage attestation + the accept/refuse decision for client failover
+    /// claims. Always present; a guard built from a default (disabled) config
+    /// refuses every claim, so the verify path needs no `Option` handling.
+    pub failover: Arc<FailoverGuard>,
     pub config: AppConfig,
 }
 

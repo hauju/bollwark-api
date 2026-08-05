@@ -10,6 +10,7 @@ use bollwark::api::state::{
 };
 use bollwark::config::AppConfig;
 use bollwark::dashboard::{DecisionLog, GeoIp, Sessions, routes::AdminState};
+use bollwark::failover::FailoverGuard;
 use bollwark::puzzle::challenge::PuzzleEngine;
 use bollwark::puzzle::types::{Algorithm, PuzzleConfig};
 use bollwark::risk::{
@@ -364,6 +365,37 @@ async fn main() {
         );
     }
 
+    // Load failover state and, if the heartbeat shows the process was gone
+    // longer than FAILOVER_MIN_GAP_SECS, attest an outage window for the gap.
+    // This must happen before the listener binds: the window's grace tail is
+    // what lets visitors who loaded a form during the outage still submit it,
+    // and they start arriving the moment we're reachable again.
+    let failover = Arc::new(FailoverGuard::load(config.failover_config()));
+    if failover.enabled() {
+        tracing::info!(
+            heartbeat_secs = failover.heartbeat_interval_secs(),
+            min_gap_secs = config.failover_min_gap_secs,
+            grace_secs = config.failover_grace_secs,
+            max_per_min = config.failover_max_per_min,
+            active_windows = failover.active_windows().len(),
+            "Client failover enabled — verify will honor widget failover claims \
+             during attested outages"
+        );
+
+        // Heartbeat: the gap between the last of these and the next boot is
+        // the whole basis for automatic outage attestation, so it runs for the
+        // life of the process and is never gated on request traffic.
+        let hb = failover.clone();
+        let hb_secs = failover.heartbeat_interval_secs();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(hb_secs));
+            loop {
+                interval.tick().await;
+                hb.heartbeat();
+            }
+        });
+    }
+
     let state = Arc::new(AppState {
         store,
         engine: PuzzleEngine::new(puzzle_config),
@@ -382,6 +414,7 @@ async fn main() {
         admin_token,
         info_urls,
         verify_permits: Arc::new(tokio::sync::Semaphore::new(verify_permits)),
+        failover,
         config: config.clone(),
     });
 

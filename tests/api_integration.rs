@@ -78,6 +78,9 @@ struct TestAppBuilder {
     /// Set to `Some(None)` to disable the token entirely (so `/v1/sites`
     /// returns 404).
     admin_token: Option<Option<&'static str>>,
+    /// Enable client failover (`FAILOVER_ENABLED` + `FAILOVER_STATE_PATH`),
+    /// backed by a temp state file unique to this app instance.
+    enable_failover: bool,
     /// Override the Argon2id verify-concurrency permit count. Default is the
     /// production `verify_permits()` (cores * 2); tests that assert on permit
     /// accounting set it to 1 so the numbers are unambiguous.
@@ -128,6 +131,10 @@ impl TestAppBuilder {
             max_active_challenges: self
                 .max_active_challenges
                 .unwrap_or(AppConfig::default().max_active_challenges),
+            failover_enabled: self.enable_failover,
+            failover_state_path: self
+                .enable_failover
+                .then(|| temp_failover_path().to_string_lossy().into_owned()),
             ..AppConfig::default()
         };
         let puzzle_config = PuzzleConfig {
@@ -181,6 +188,10 @@ impl TestAppBuilder {
             (None, None)
         };
 
+        let failover = Arc::new(bollwark::failover::FailoverGuard::load(
+            config.failover_config(),
+        ));
+
         let state = Arc::new(AppState {
             store: store.clone(),
             engine: PuzzleEngine::new(puzzle_config),
@@ -195,10 +206,23 @@ impl TestAppBuilder {
                 self.verify_permits
                     .unwrap_or_else(bollwark::api::state::verify_permits),
             )),
+            failover,
             config,
         });
         (api::router(state.clone(), admin), store, state)
     }
+}
+
+/// Unique temp path for a failover state file, so each test app attests
+/// independently and a leftover file can't leak a window between tests.
+fn temp_failover_path() -> std::path::PathBuf {
+    let mut dir = std::env::temp_dir();
+    dir.push(format!(
+        "bollwark-failover-test-{}-{}.json",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    dir
 }
 
 /// Unique temp path for an admin decision-log SQLite file.
@@ -2077,6 +2101,322 @@ async fn legacy_static_widget_path_still_serves() {
         "public, max-age=300",
         "unversioned assets must not be cached beyond the entry point's window"
     );
+}
+
+// ── Client failover ───────────────────────────────────────────────────────
+//
+// A failover claim asserts "I could not reach you at all", so it carries no
+// challenge and no proof of work. These tests pin the two things that keep it
+// from being a free bypass: it is refused unless the server itself attests an
+// outage, and the browser-local evidence is still scored when it is honored.
+
+/// Mint the token the widget produces when `/v1/puzzle` is unreachable.
+fn failover_token(site_key: uuid::Uuid, issued_at_ms: i64) -> String {
+    failover_token_with(site_key, issued_at_ms, serde_json::Map::new())
+}
+
+/// As above, plus any extra fields the widget would have collected locally
+/// (honeypot, behaviour blob) — they go inside the token, not beside it.
+fn failover_token_with(
+    site_key: uuid::Uuid,
+    issued_at_ms: i64,
+    extras: serde_json::Map<String, serde_json::Value>,
+) -> String {
+    let mut payload = serde_json::json!({
+        "failover": true,
+        "site_key": site_key,
+        "issued_at": issued_at_ms,
+    });
+    let obj = payload.as_object_mut().unwrap();
+    obj.extend(extras);
+    hex::encode(serde_json::to_vec(&payload).unwrap())
+}
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+/// POST a failover token to `/v1/verify` and return the decoded response.
+///
+/// Everything the claim carries lives *inside* the token, as the widget emits
+/// it — `resolve()` gives the token precedence, so a behaviour blob passed
+/// alongside it at the top level would be silently ignored.
+async fn post_failover(
+    app: &axum::Router,
+    secret: &str,
+    token: String,
+) -> (StatusCode, Option<VerifyResponse>) {
+    let body = serde_json::json!({ "token": token });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/verify")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {secret}"))
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&bytes).ok())
+}
+
+/// Declare an outage window ending now, as the external monitor would.
+async fn declare_outage(app: &axum::Router, duration_secs: u64) -> StatusCode {
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/admin/outages")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({ "duration_secs": duration_secs })).unwrap(),
+        ))
+        .unwrap();
+    app.clone()
+        .oneshot(with_connect_info(req))
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+async fn test_failover_claim_refused_without_an_attested_outage() {
+    // The whole point: "the captcha was down" is not self-certifying. With
+    // failover enabled but nothing attested, the claim must still fail.
+    let app = test_app_with(|b| b.enable_failover = true);
+    let site = create_test_site(&app).await;
+
+    let (status, body) = post_failover(
+        &app,
+        &site.secret_key,
+        failover_token(site.site_key, now_ms()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body.unwrap();
+    assert!(
+        !body.success,
+        "an unattested failover claim must not pass — otherwise the flag is \
+         just an unauthenticated skip-the-puzzle switch"
+    );
+    assert!(!body.failover);
+}
+
+#[tokio::test]
+async fn test_failover_claim_honored_inside_a_declared_outage() {
+    let app = test_app_with(|b| b.enable_failover = true);
+    let site = create_test_site(&app).await;
+    assert_eq!(declare_outage(&app, 120).await, StatusCode::OK);
+
+    let (status, body) = post_failover(
+        &app,
+        &site.secret_key,
+        failover_token(site.site_key, now_ms()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body.unwrap();
+    assert!(body.success, "attested outage should honor the claim");
+    assert!(
+        body.failover,
+        "an acceptance must be marked so integrators can accept-but-flag \
+         instead of treating it as a clean pass"
+    );
+}
+
+#[tokio::test]
+async fn test_failover_disabled_by_default() {
+    // Existing deployments must not silently gain a fail-open path on upgrade.
+    let app = test_app();
+    let site = create_test_site(&app).await;
+
+    let (_, body) = post_failover(
+        &app,
+        &site.secret_key,
+        failover_token(site.site_key, now_ms()),
+    )
+    .await;
+    assert!(!body.unwrap().success);
+}
+
+#[tokio::test]
+async fn test_failover_claim_for_another_site_is_unauthorized() {
+    // The claim names its own site_key; spending another tenant's failover
+    // budget with your own secret must not be possible.
+    let app = test_app_with(|b| b.enable_failover = true);
+    let site = create_test_site(&app).await;
+    declare_outage(&app, 120).await;
+
+    let (status, _) = post_failover(
+        &app,
+        &site.secret_key,
+        failover_token(uuid::Uuid::new_v4(), now_ms()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_failover_still_scores_browser_local_evidence() {
+    // An outage is not a reason to stop reading the evidence that survives it.
+    // A flatline + webdriver blob blocks at verify-time normally; it must also
+    // block on the failover path, inside an attested window.
+    let app = test_app_with(|b| b.enable_failover = true);
+    let site = create_test_site(&app).await;
+    declare_outage(&app, 120).await;
+
+    let mut extras = serde_json::Map::new();
+    extras.insert(
+        "behavior".into(),
+        serde_json::json!({
+            "mouse_moves": 0,
+            "touches": 0,
+            "interactions": 0,
+            "webdriver": true,
+        }),
+    );
+    let (_, body) = post_failover(
+        &app,
+        &site.secret_key,
+        failover_token_with(site.site_key, now_ms(), extras),
+    )
+    .await;
+    let body = body.unwrap();
+    assert!(
+        !body.success,
+        "an attested outage must not launder an obviously-automated client"
+    );
+}
+
+#[tokio::test]
+async fn test_failover_honeypot_still_blocks() {
+    let app = test_app_with(|b| b.enable_failover = true);
+    let site = create_test_site(&app).await;
+    declare_outage(&app, 120).await;
+
+    let token = hex::encode(
+        serde_json::to_vec(&serde_json::json!({
+            "failover": true,
+            "site_key": site.site_key,
+            "issued_at": now_ms(),
+            "honeypot": "filled-by-a-bot",
+        }))
+        .unwrap(),
+    );
+    let (_, body) = post_failover(&app, &site.secret_key, token).await;
+    assert!(!body.unwrap().success, "honeypot must block on any path");
+}
+
+#[tokio::test]
+async fn test_failover_backdated_claim_cannot_reopen_a_stale_window() {
+    // Declare a window that closed well outside the grace tail, then claim
+    // with a timestamp from inside it. Acceptance keys on *now*, not on the
+    // client's forgeable `issued_at`, so this must fail.
+    let app = test_app_with(|b| b.enable_failover = true);
+    let site = create_test_site(&app).await;
+
+    let old_end = chrono::Utc::now() - chrono::Duration::hours(6);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/admin/outages")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "start": old_end - chrono::Duration::minutes(10),
+                "end": old_end,
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(
+        app.clone()
+            .oneshot(with_connect_info(req))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    let (_, body) = post_failover(
+        &app,
+        &site.secret_key,
+        failover_token(site.site_key, old_end.timestamp_millis()),
+    )
+    .await;
+    assert!(
+        !body.unwrap().success,
+        "a closed window must not be reopenable by backdating a claim"
+    );
+}
+
+#[tokio::test]
+async fn test_declare_outage_requires_admin_token() {
+    let app = test_app_with(|b| b.enable_failover = true);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/admin/outages")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({ "duration_secs": 60 })).unwrap(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_declare_outage_rejects_an_unbounded_window() {
+    // A window far in the future would hold the fail-open open indefinitely —
+    // the one mistake here that isn't visible from outside.
+    let app = test_app_with(|b| b.enable_failover = true);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/admin/outages")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({ "duration_secs": 60 * 60 * 24 * 30u64 }))
+                .unwrap(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_declare_outage_refused_when_failover_is_off() {
+    let app = test_app();
+    assert_eq!(declare_outage(&app, 60).await, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_solved_verify_is_never_marked_failover() {
+    // The response field must distinguish a real solve from a fail-open, or
+    // an integrator branching on it learns nothing.
+    let (app, store) = test_app_with_store(|b| b.enable_failover = true);
+    let site = create_test_site(&app).await;
+    let (_, puzzle) = get_test_puzzle(&app, &site.site_key.to_string()).await;
+    let puzzle = puzzle.unwrap();
+    let nonce = solve_challenge(&puzzle.prefix, puzzle.difficulty);
+    backdate_challenge(&store, puzzle.challenge_id, 5).await;
+
+    let verify_body = serde_json::json!({ "challenge_id": puzzle.challenge_id, "nonce": nonce });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/verify")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", site.secret_key))
+        .body(Body::from(serde_json::to_vec(&verify_body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: VerifyResponse = serde_json::from_slice(&bytes).unwrap();
+    assert!(body.success);
+    assert!(!body.failover, "a real solve must never be marked failover");
 }
 
 /// Give a stored challenge a deliberately expensive Argon2id cost so the

@@ -324,6 +324,67 @@ The server installs SIGINT (Ctrl-C) and SIGTERM handlers and shuts down via `axu
 
 ---
 
+## Client failover
+
+**Off by default.** The widget is a hard dependency of every form it guards: if `GET /v1/puzzle` fails, the visitor gets no token and the integrator's backend rejects the submit — so this service's downtime becomes theirs, on every embedding site at once.
+
+With failover enabled, a widget that can't reach the service (after a short retry backoff) mints a *failover claim* instead of a solved token, and the form still submits. `POST /v1/verify` honors that claim **only while this service independently attests it was down**.
+
+### What a failover claim proves
+
+Nothing, on its own. During an outage we cannot have signed anything, so the claim is plain client-authored JSON that anyone can fabricate. Honoring one is a deliberate fail-open. What bounds it:
+
+| Bound | Effect |
+|---|---|
+| **Attestation** | Refused unless there's an outage window this service recorded itself. No window → refused, always. |
+| **Recency** | Acceptance keys on *now* falling inside a window or its grace tail — never on the claim's `issued_at`, which is forgeable. A closed window can't be reopened by backdating. |
+| **Rate cap** | `FAILOVER_MAX_PER_MIN` per site, so catching a real outage still doesn't buy unbounded fail-open traffic. |
+| **Local evidence** | The honeypot and behaviour blob are collected in the browser and survive the outage, so they're still scored. A flatline + `webdriver` blob is refused *inside* an attested window. |
+| **Marking** | Acceptance returns `failover: true` on the verify response and emits a `WARN` with `outcome=failover_pass`. |
+
+Inside an attested window a determined attacker does get through. That's the trade: a bounded, observable fail-open instead of taking every embedding form down. Enable it only if you'd rather your integrators' signup forms keep working than have them hard-fail during your outage.
+
+Pair it with **`VERIFY_REQUIRE_BEHAVIOR=true`** if every legitimate client is the bundled widget — the widget always sends a behaviour blob even in failover, so requiring one keeps a direct-API caller from minting an evidence-free claim.
+
+### How outages get attested
+
+Two sources, covering two different failure modes:
+
+1. **Heartbeat gap** (automatic). The process writes a liveness timestamp to `FAILOVER_STATE_PATH` every `FAILOVER_HEARTBEAT_INTERVAL_SECS`. On boot, a gap larger than `FAILOVER_MIN_GAP_SECS` is recorded as an outage window covering it. Catches crashes, OOM kills, deploys, host reboots.
+2. **Operator-declared** (`POST /v1/admin/outages`). Catches what a heartbeat structurally *cannot* see: the process healthy the entire time while something in front of it — TLS, DNS, CDN, reverse proxy — made the widget unreachable to browsers. This is the Traefik self-signed-cert failure mode `scripts/check-public-endpoint.sh` exists for; set `MONITOR_ADMIN_TOKEN` and that script declares the window itself when a check fails.
+
+### `FAILOVER_ENABLED` (default `false`)
+Master switch. Requires `FAILOVER_STATE_PATH`; without it, failover stays off and a `WARN` is logged at boot.
+
+### `FAILOVER_STATE_PATH` (default _unset_)
+JSON file holding the heartbeat and attested windows. Must be on a volume that **survives restarts** — a heartbeat gap can only be detected by comparing against a timestamp that outlived the restart, and a declared window would be lost on the very restart it covers. A missing or corrupt file degrades to "nothing attested" (all claims refused), never a boot failure.
+
+### `FAILOVER_HEARTBEAT_INTERVAL_SECS` (default `15`)
+Heartbeat cadence. Bounds how much of a real outage goes unattested: the window starts at the *last* heartbeat, so a coarse cadence under-reports the outage's leading edge.
+
+### `FAILOVER_MIN_GAP_SECS` (default `60`)
+Minimum heartbeat gap treated as an outage. Below this a restart is assumed routine (deploy, config reload) rather than downtime worth opening a fail-open window for.
+
+### `FAILOVER_GRACE_SECS` (default `300`)
+How long after a window closes a claim is still honored. Covers the visitor who loaded the form *during* the outage and submits minutes later, once you're already back — without it, failover would only help visitors who submitted before recovery, i.e. almost nobody. This is also the blast radius: exactly how long the fail-open stays open after recovery.
+
+### `FAILOVER_MAX_PER_MIN` (default `600`)
+Per-site cap on **accepted** claims per rolling minute. `0` disables the cap.
+
+### `POST /v1/admin/outages` (bearer `ADMIN_TOKEN`)
+Declare a window. Either `{"duration_secs": 900}` (a window ending now) or `{"start": "...", "end": "..."}` (RFC 3339, for backfilling). Capped at 24h per window so a fat-fingered declaration expires on its own. Returns the current window list and counters.
+
+### `GET /v1/admin/outages` (bearer `ADMIN_TOKEN`)
+Active windows plus `accepted_total` / `refused_total` since boot. Use it to confirm a declaration landed and to see whether anyone is probing for a fail-open.
+
+### What failover cannot cover
+
+If **`captcha-widget.js` itself fails to load** — the exact symptom of the TLS breakage above — no widget code runs, so there is nothing to fall back to. That case is the embedder's to handle with a `script.onerror` / load-timeout fallback; see `INTEGRATION.md`.
+
+Likewise, if this service is *fully* unreachable, the integrator's backend can't reach `/v1/verify` either. That decision (fail open or closed on a connection error) is theirs, and also documented in `INTEGRATION.md`.
+
+---
+
 ## Validation dashboard
 
 A self-hosted dashboard that lets you inspect every puzzle and verify decision in a browser. Persists to SQLite so history survives restarts.

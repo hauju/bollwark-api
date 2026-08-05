@@ -56,6 +56,15 @@ pub fn router(state: SharedState, admin: Option<AdminState>) -> Router {
                 .layer(DefaultBodyLimit::max(VERIFY_BODY_LIMIT_BYTES)),
         )
         .route("/v1/sites", post(handlers::create_site))
+        // Outage attestation lives on the main router, not the dashboard's:
+        // failover must work without ADMIN_DB_PATH. This is how an operator
+        // (or the external monitor) records an outage the process could not
+        // self-observe — it was healthy the whole time while TLS, DNS, or the
+        // reverse proxy in front of it made the widget unreachable.
+        .route(
+            "/v1/admin/outages",
+            post(handlers::declare_outage).get(handlers::list_outages),
+        )
         .with_state(state);
 
     let mut app = Router::new()
