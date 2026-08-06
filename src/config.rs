@@ -388,7 +388,7 @@ impl AppConfig {
 
 /// Lowest difficulty that still requires real work. At 0 the PoW predicate is
 /// a tautology, so the challenge is free to "solve".
-const MIN_DIFFICULTY: u32 = 1;
+pub const MIN_DIFFICULTY: u32 = 1;
 
 /// Upper bound on `CHALLENGE_TTL_SECS` (365 days). Far above any sane challenge
 /// lifetime, and far below the point where `now + ttl` overflows.

@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::error::CaptchaError;
 use crate::puzzle::types::Challenge;
-use crate::site::types::Site;
+use crate::site::types::{Site, SitePolicy};
 
 pub trait Store: Send + Sync + 'static {
     fn store_challenge(
@@ -70,6 +70,16 @@ pub trait Store: Send + Sync + 'static {
         &self,
         site_key: &Uuid,
         origins: Vec<String>,
+    ) -> impl Future<Output = Result<(), CaptchaError>> + Send;
+
+    /// Replace the site's scoring policy (already validated by the caller
+    /// against the process config). Returns `NotFound` if the site doesn't
+    /// exist. Takes effect on the next request — challenges already issued
+    /// keep the difficulty they were stamped with.
+    fn update_site_policy(
+        &self,
+        site_key: &Uuid,
+        policy: SitePolicy,
     ) -> impl Future<Output = Result<(), CaptchaError>> + Send;
 
     /// Delete a site. Returns `NotFound` if the site doesn't exist.

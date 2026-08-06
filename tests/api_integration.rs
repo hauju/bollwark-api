@@ -6,7 +6,7 @@ use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
 use bollwark::api;
-use bollwark::api::state::{AppState, tier_thresholds_from_config, verify_thresholds_from_config};
+use bollwark::api::state::AppState;
 use bollwark::api::types::{CreateSiteResponse, PuzzleResponse, VerifyResponse};
 use bollwark::config::AppConfig;
 use bollwark::dashboard::{DecisionLog, Sessions, routes::AdminState};
@@ -154,15 +154,8 @@ impl TestAppBuilder {
             Some(spec) => TrustedProxies::parse(spec).unwrap(),
             None => TrustedProxies::empty(),
         });
-        let risk = RiskScorer::new(
-            tier_thresholds_from_config(&config),
-            reputation,
-            tls_blocklist,
-        );
-        let verify_scorer = VerifyScorer::new(
-            verify_thresholds_from_config(&config),
-            self.verify_require_behavior,
-        );
+        let risk = RiskScorer::new(reputation, tls_blocklist);
+        let verify_scorer = VerifyScorer::new(self.verify_require_behavior);
         let admin_token = match self.admin_token {
             Some(None) => None,
             Some(Some(t)) => Some(Arc::new(t.to_string())),
@@ -182,6 +175,7 @@ impl TestAppBuilder {
                 log: log.clone(),
                 token: Arc::new(TEST_ADMIN_TOKEN.to_string()),
                 store: store.clone(),
+                config: config.clone(),
             };
             (Some(log), Some(admin))
         } else {
@@ -2517,4 +2511,326 @@ async fn cancelled_verify_holds_its_permit_until_the_hash_finishes() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     assert_eq!(state.verify_permits.available_permits(), 1);
+}
+
+// --- Per-site policy (SitePolicy) ---
+
+/// Register a site carrying a policy. Returns the provisioning response so a
+/// test can assert on the echoed policy as well as use the keys.
+async fn create_test_site_with_policy(
+    app: &axum::Router,
+    policy: serde_json::Value,
+) -> CreateSiteResponse {
+    let body = serde_json::json!({ "name": "policy site", "policy": policy });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/sites")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+/// A request missing only the User-Agent header: scores exactly +30 on header
+/// anomaly, which is Checkbox under the default bands. Every tier test below
+/// works from this fixed score so the policy is the only variable.
+fn no_ua_puzzle_request(site_key: &str) -> Request<Body> {
+    puzzle_request(site_key, None, Some(CLEAN_LANG), Some(CLEAN_ENC))
+}
+
+async fn puzzle_status_and_tier(
+    app: &axum::Router,
+    req: Request<Body>,
+) -> (StatusCode, Option<PuzzleResponse>) {
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&bytes).ok())
+}
+
+#[tokio::test]
+async fn test_site_policy_shifts_the_puzzle_tier() {
+    let app = test_app();
+
+    // Same score (+30 header anomaly), two sites, two outcomes.
+    let default_site = create_test_site(&app).await;
+    let strict_site = create_test_site_with_policy(
+        &app,
+        serde_json::json!({
+            "tier_checkbox_min": 5,
+            "tier_hard_pow_min": 10,
+            "tier_block_min": 20,
+        }),
+    )
+    .await;
+
+    let (status, puzzle) = puzzle_status_and_tier(
+        &app,
+        no_ua_puzzle_request(&default_site.site_key.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(puzzle.unwrap().tier, EscalationTier::Checkbox);
+
+    // The strict site's block band starts at 20, so the same +30 is a 429.
+    let (status, _) = puzzle_status_and_tier(
+        &app,
+        no_ua_puzzle_request(&strict_site.site_key.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn test_site_policy_overrides_difficulty() {
+    let app = test_app();
+    let site = create_test_site_with_policy(
+        &app,
+        // Test config is default 8 / max 16; ask for a distinguishable value.
+        serde_json::json!({ "default_difficulty": 12, "max_difficulty": 14 }),
+    )
+    .await;
+
+    let (status, puzzle) = get_test_puzzle(&app, &site.site_key.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    // Clean request → InvisiblePass → no tier bump, so the base value lands.
+    assert_eq!(puzzle.unwrap().difficulty, 12);
+}
+
+#[tokio::test]
+async fn test_site_policy_max_difficulty_clamps_the_tier_bump() {
+    let app = test_app();
+    let site = create_test_site_with_policy(
+        &app,
+        serde_json::json!({ "default_difficulty": 10, "max_difficulty": 11 }),
+    )
+    .await;
+
+    // +30 header anomaly → Checkbox → +2 bump → 12, clamped to the site's 11.
+    let (status, puzzle) =
+        puzzle_status_and_tier(&app, no_ua_puzzle_request(&site.site_key.to_string())).await;
+    assert_eq!(status, StatusCode::OK);
+    let puzzle = puzzle.unwrap();
+    assert_eq!(puzzle.tier, EscalationTier::Checkbox);
+    assert_eq!(puzzle.difficulty, 11);
+}
+
+#[tokio::test]
+async fn test_site_policy_overrides_verify_thresholds() {
+    let app = test_app();
+    // A same-instant submit scores +50 on time-on-page: ShadowFail under the
+    // default 30/60 bands (success stays true), Block once the site pulls
+    // verify_block_min down to 40.
+    let lenient = create_test_site(&app).await;
+    let strict =
+        create_test_site_with_policy(&app, serde_json::json!({ "verify_block_min": 40 })).await;
+
+    for (site, expected_success) in [(&lenient, true), (&strict, false)] {
+        let (_, puzzle) = get_test_puzzle(&app, &site.site_key.to_string()).await;
+        let puzzle = puzzle.unwrap();
+        let nonce = solve_challenge(&puzzle.prefix, puzzle.difficulty);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/verify")
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", site.secret_key))
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "challenge_id": puzzle.challenge_id,
+                    "nonce": nonce,
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let result: VerifyResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result.success, expected_success);
+    }
+}
+
+#[tokio::test]
+async fn test_site_without_policy_is_unchanged() {
+    // The regression guard for every pre-existing deployment: a site that
+    // omits `policy` must score exactly as it did before policies existed.
+    let app = test_app();
+    let site = create_test_site(&app).await;
+    assert_eq!(
+        serde_json::to_value(site.policy).unwrap(),
+        serde_json::json!({})
+    );
+
+    let (status, puzzle) = get_test_puzzle(&app, &site.site_key.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    let puzzle = puzzle.unwrap();
+    assert_eq!(puzzle.tier, EscalationTier::InvisiblePass);
+    assert_eq!(puzzle.difficulty, 8); // the test config's DEFAULT_DIFFICULTY
+}
+
+#[tokio::test]
+async fn test_create_site_rejects_invalid_policy() {
+    let app = test_app();
+    // Zero difficulty would accept any nonce — every visitor passes the PoW.
+    let body = serde_json::json!({
+        "name": "bad site",
+        "policy": { "default_difficulty": 0 },
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/sites")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_create_site_rejects_policy_that_only_breaks_against_globals() {
+    // block_min=10 is fine on its own but sits below the global
+    // TIER_CHECKBOX_MIN=20 once merged, making two bands unreachable.
+    let app = test_app();
+    let body = serde_json::json!({
+        "name": "bad site",
+        "policy": { "tier_block_min": 10 },
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/sites")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_admin_update_policy_happy_path_and_clear() {
+    let (app, store) = test_app_with_store(|b| b.enable_admin = true);
+    let site = create_test_site(&app).await;
+    let uri = format!("/v1/admin/sites/{}/policy", site.site_key);
+
+    let (status, resp) = admin_req(
+        &app,
+        "PUT",
+        &uri,
+        Some(TEST_ADMIN_TOKEN),
+        Some(serde_json::json!({ "tier_block_min": 60 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp["policy"]["tier_block_min"], 60);
+    let reloaded = store
+        .get_site_by_key(&site.site_key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reloaded.policy.tier_block_min, Some(60));
+
+    // An empty body replaces wholesale, so it clears every override.
+    let (status, resp) = admin_req(
+        &app,
+        "PUT",
+        &uri,
+        Some(TEST_ADMIN_TOKEN),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp["policy"], serde_json::json!({}));
+    let reloaded = store
+        .get_site_by_key(&site.site_key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(reloaded.policy.is_empty());
+}
+
+#[tokio::test]
+async fn test_admin_update_policy_validates_and_404s() {
+    let (app, _store) = test_app_with_store(|b| b.enable_admin = true);
+    let site = create_test_site(&app).await;
+
+    let (status, _) = admin_req(
+        &app,
+        "PUT",
+        &format!("/v1/admin/sites/{}/policy", site.site_key),
+        Some(TEST_ADMIN_TOKEN),
+        Some(serde_json::json!({ "verify_block_min": 0 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, _) = admin_req(
+        &app,
+        "PUT",
+        &format!("/v1/admin/sites/{}/policy", uuid::Uuid::new_v4()),
+        Some(TEST_ADMIN_TOKEN),
+        Some(serde_json::json!({ "tier_block_min": 60 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _) = admin_req(
+        &app,
+        "PUT",
+        &format!("/v1/admin/sites/{}/policy", site.site_key),
+        None,
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_admin_list_sites_includes_policy() {
+    let (app, _store) = test_app_with_store(|b| b.enable_admin = true);
+    create_test_site_with_policy(&app, serde_json::json!({ "tier_block_min": 60 })).await;
+
+    let (status, body) =
+        admin_req(&app, "GET", "/v1/admin/sites", Some(TEST_ADMIN_TOKEN), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["sites"][0]["policy"]["tier_block_min"], 60);
+}
+
+#[tokio::test]
+async fn test_admin_update_policy_takes_effect_immediately() {
+    // The knob has to bite on the next request, not on restart — otherwise
+    // tuning a live site under attack is useless.
+    let (app, _store) = test_app_with_store(|b| b.enable_admin = true);
+    let site = create_test_site(&app).await;
+    let key = site.site_key.to_string();
+
+    let (status, _) = puzzle_status_and_tier(&app, no_ua_puzzle_request(&key)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = admin_req(
+        &app,
+        "PUT",
+        &format!("/v1/admin/sites/{}/policy", site.site_key),
+        Some(TEST_ADMIN_TOKEN),
+        Some(serde_json::json!({
+            "tier_checkbox_min": 5,
+            "tier_hard_pow_min": 10,
+            "tier_block_min": 20,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = puzzle_status_and_tier(&app, no_ua_puzzle_request(&key)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
 }

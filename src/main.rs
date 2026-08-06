@@ -4,10 +4,7 @@ use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
 use bollwark::api;
-use bollwark::api::state::{
-    AppState, info_urls_from_config, tier_thresholds_from_config, verify_permits,
-    verify_thresholds_from_config,
-};
+use bollwark::api::state::{AppState, info_urls_from_config, verify_permits};
 use bollwark::config::AppConfig;
 use bollwark::dashboard::{DecisionLog, GeoIp, Sessions, routes::AdminState};
 use bollwark::failover::FailoverGuard;
@@ -252,6 +249,7 @@ async fn main() {
                     log,
                     token: Arc::new(token.clone()),
                     store: Arc::clone(&store),
+                    config: config.clone(),
                 },
             ))
         }
@@ -399,15 +397,8 @@ async fn main() {
     let state = Arc::new(AppState {
         store,
         engine: PuzzleEngine::new(puzzle_config),
-        risk: RiskScorer::new(
-            tier_thresholds_from_config(&config),
-            reputation,
-            tls_blocklist,
-        ),
-        verify_scorer: VerifyScorer::new(
-            verify_thresholds_from_config(&config),
-            config.verify_require_behavior,
-        ),
+        risk: RiskScorer::new(reputation, tls_blocklist),
+        verify_scorer: VerifyScorer::new(config.verify_require_behavior),
         tls_fingerprint_header: config.tls_fingerprint_header.clone(),
         trusted_proxies,
         decision_log,

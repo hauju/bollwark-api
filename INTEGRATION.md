@@ -47,7 +47,8 @@ Response:
 {
   "site_key": "00000000-0000-0000-0000-000000000000",
   "secret_key": "hex-encoded-secret",
-  "allowed_origins": []
+  "allowed_origins": [],
+  "policy": {}
 }
 ```
 
@@ -84,6 +85,29 @@ polluting your stats. It is *not* a security control — a non-browser client ca
 forge the `Origin` header, so the real trust boundary stays the `secret_key` at
 `/v1/verify`. Change the list later without rotating the secret via
 `PUT /v1/admin/sites/{site_key}/origins` with the same `allowed_origins` body.
+
+### Optional: tune the thresholds for this site
+
+By default every site is scored with the server's env-var thresholds. Pass a
+`policy` to override any of them for this `site_key` alone — useful when one
+instance protects forms with different risk profiles (a contact form and a
+login endpoint want very different bands):
+
+```bash
+curl -s -X POST http://localhost:3000/v1/sites \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "name":"login",
+        "policy":{"tier_hard_pow_min":25,"tier_block_min":60,"verify_block_min":30}
+      }' | jq
+```
+
+Omitted fields inherit the server value (and keep tracking it if the operator
+changes it later), so a policy only ever states what differs. Change it later
+with `PUT /v1/admin/sites/{site_key}/policy` — the body replaces the stored
+policy wholesale, so `{}` clears every override. See **Per-site policy** in
+`CONFIGURATION.md` for the full field list and the validation rules.
 
 ## 3. Embed the Widget
 

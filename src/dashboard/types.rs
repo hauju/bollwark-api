@@ -249,6 +249,9 @@ pub struct SiteSummary {
     pub created_at: String,
     /// Browser-origin allowlist (empty = any origin allowed).
     pub allowed_origins: Vec<String>,
+    /// Per-site scoring overrides. `{}` means the site inherits every
+    /// process default.
+    pub policy: crate::site::types::SitePolicy,
     pub puzzle_count: u64,
     pub verify_count: u64,
     pub last_seen: Option<String>,

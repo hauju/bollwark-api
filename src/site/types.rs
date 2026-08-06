@@ -2,6 +2,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::config::{AppConfig, MIN_DIFFICULTY};
+use crate::risk::{TierThresholds, VerifyThresholds};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Site {
     pub site_key: Uuid,
@@ -18,6 +21,162 @@ pub struct Site {
     /// `/v1/verify`.
     #[serde(default)]
     pub allowed_origins: Vec<String>,
+    /// Per-site scoring overrides. Every field inside is optional and falls
+    /// back to the process-wide env config, so `SitePolicy::default()` (the
+    /// value every pre-existing site loads with) reproduces exactly the
+    /// behaviour this service had before policies existed.
+    #[serde(default)]
+    pub policy: SitePolicy,
+}
+
+/// Per-site overrides for the knobs that are otherwise process-global env
+/// vars. Exists because the thresholds that are right for a low-traffic
+/// contact form are wrong for a login endpoint under credential-stuffing, and
+/// one instance serves both — an operator running several tenants (or one
+/// tenant with several very different forms) previously had to pick a single
+/// setting for all of them, or run a second instance.
+///
+/// Every field is `Option`, and `None` means *inherit the env default* rather
+/// than *use the type's zero*. That distinction is the whole point: a site
+/// that overrides only `tier_block_min` keeps tracking the global values for
+/// everything else, including later changes to them. [`SitePolicy::resolve`]
+/// is the single place the overlay happens.
+///
+/// Field names deliberately mirror the env vars they shadow
+/// (`TIER_BLOCK_MIN` → `tier_block_min`) so `CONFIGURATION.md` documents both.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SitePolicy {
+    /// Overrides `TIER_CHECKBOX_MIN`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_checkbox_min: Option<u32>,
+    /// Overrides `TIER_HARD_POW_MIN`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_hard_pow_min: Option<u32>,
+    /// Overrides `TIER_BLOCK_MIN`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_block_min: Option<u32>,
+    /// Overrides `VERIFY_SHADOW_MIN`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_shadow_min: Option<u32>,
+    /// Overrides `VERIFY_BLOCK_MIN`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_block_min: Option<u32>,
+    /// Overrides `DEFAULT_DIFFICULTY`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_difficulty: Option<u32>,
+    /// Overrides `MAX_DIFFICULTY` — the per-site clamp on every issued
+    /// difficulty, so raising it is what lets a site escalate past the global
+    /// ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_difficulty: Option<u32>,
+}
+
+/// A [`SitePolicy`] overlaid on the process config — every knob resolved to a
+/// concrete value. Handlers work with this, never with the raw `Option`s, so
+/// there is exactly one place the inheritance rule lives.
+#[derive(Debug, Clone, Copy)]
+pub struct EffectivePolicy {
+    pub tiers: TierThresholds,
+    pub verify: VerifyThresholds,
+    pub default_difficulty: u32,
+    pub max_difficulty: u32,
+}
+
+impl SitePolicy {
+    /// True when no field is overridden. Used by the storage layer to write
+    /// SQL NULL instead of `{}`, so an untouched site stays visibly untouched
+    /// in the database.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Overlay this policy on the process config.
+    pub fn resolve(&self, config: &AppConfig) -> EffectivePolicy {
+        EffectivePolicy {
+            tiers: TierThresholds {
+                checkbox: self.tier_checkbox_min.unwrap_or(config.tier_checkbox_min),
+                hard_pow: self.tier_hard_pow_min.unwrap_or(config.tier_hard_pow_min),
+                block: self.tier_block_min.unwrap_or(config.tier_block_min),
+            },
+            verify: VerifyThresholds {
+                shadow_min: self.verify_shadow_min.unwrap_or(config.verify_shadow_min),
+                block_min: self.verify_block_min.unwrap_or(config.verify_block_min),
+            },
+            default_difficulty: self.default_difficulty.unwrap_or(config.default_difficulty),
+            max_difficulty: self.max_difficulty.unwrap_or(config.max_difficulty),
+        }
+    }
+
+    /// Validate the policy *as it would actually take effect*, i.e. after the
+    /// overlay. Checking the resolved values rather than the supplied subset is
+    /// what catches a partial override that only breaks in combination with the
+    /// globals — setting `tier_block_min: 10` alone is fine in isolation but
+    /// puts Block below the global `TIER_CHECKBOX_MIN=20`, making two tiers
+    /// unreachable.
+    ///
+    /// Returns a message ready to drop into a 400 body. Each rejected case
+    /// silently disables protection for the site rather than erroring at
+    /// request time, which is exactly the class of mistake `AppConfig::validated`
+    /// panics on for the global equivalents — a write-time 400 is the same
+    /// stance for something we can't panic on.
+    pub fn validate(&self, config: &AppConfig) -> Result<(), String> {
+        let e = self.resolve(config);
+
+        if e.default_difficulty < MIN_DIFFICULTY || e.max_difficulty < MIN_DIFFICULTY {
+            return Err(format!(
+                "default_difficulty={} / max_difficulty={} — both must be at least \
+                 {MIN_DIFFICULTY} once merged with the server defaults. A difficulty of 0 \
+                 accepts any nonce without computing a hash, so every visitor to this site \
+                 passes the proof-of-work.",
+                e.default_difficulty, e.max_difficulty
+            ));
+        }
+        if e.default_difficulty > e.max_difficulty {
+            return Err(format!(
+                "default_difficulty={} exceeds max_difficulty={} once merged with the server \
+                 defaults. max_difficulty clamps every issued puzzle, so the base difficulty \
+                 would silently be the lower value and no tier could escalate.",
+                e.default_difficulty, e.max_difficulty
+            ));
+        }
+        // `TierThresholds::classify` tests block → hard_pow → checkbox in that
+        // order, so an out-of-order set doesn't error — it makes the middle
+        // bands unreachable and quietly changes what every score maps to.
+        if !(e.tiers.checkbox <= e.tiers.hard_pow && e.tiers.hard_pow <= e.tiers.block) {
+            return Err(format!(
+                "tier thresholds must be non-decreasing once merged with the server defaults, \
+                 got checkbox={} hard_pow={} block={}. Out of order, the higher tier wins every \
+                 comparison and the bands in between are never reachable.",
+                e.tiers.checkbox, e.tiers.hard_pow, e.tiers.block
+            ));
+        }
+        if e.verify.shadow_min > e.verify.block_min {
+            return Err(format!(
+                "verify_shadow_min={} must not exceed verify_block_min={} once merged with the \
+                 server defaults — the shadow band would be empty and every flagged submission \
+                 would hard-block instead of being logged for review.",
+                e.verify.shadow_min, e.verify.block_min
+            ));
+        }
+        // A zero block threshold matches *every* score, humans included: the
+        // puzzle side 429s the whole site, the verify side fails every
+        // submission. Both look like an outage, not a policy.
+        if e.tiers.block == 0 {
+            return Err(
+                "tier_block_min must be at least 1 — 0 blocks every visitor to this \
+                        site, including humans, before a puzzle is ever issued."
+                    .to_string(),
+            );
+        }
+        if e.verify.block_min == 0 {
+            return Err(
+                "verify_block_min must be at least 1 — 0 fails every submission for \
+                        this site, including correctly solved ones."
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Cap on allowed-origins entries per site. Generous for real tenants while
@@ -140,5 +299,183 @@ mod tests {
                 .unwrap_err()
                 .contains("too many")
         );
+    }
+
+    // --- SitePolicy ---
+
+    /// Config with the documented defaults, so each policy test states only
+    /// the override it cares about.
+    fn cfg() -> AppConfig {
+        AppConfig::default()
+    }
+
+    #[test]
+    fn empty_policy_resolves_to_the_global_config() {
+        let c = cfg();
+        let e = SitePolicy::default().resolve(&c);
+        assert_eq!(e.tiers.checkbox, c.tier_checkbox_min);
+        assert_eq!(e.tiers.hard_pow, c.tier_hard_pow_min);
+        assert_eq!(e.tiers.block, c.tier_block_min);
+        assert_eq!(e.verify.shadow_min, c.verify_shadow_min);
+        assert_eq!(e.verify.block_min, c.verify_block_min);
+        assert_eq!(e.default_difficulty, c.default_difficulty);
+        assert_eq!(e.max_difficulty, c.max_difficulty);
+    }
+
+    #[test]
+    fn partial_override_keeps_inheriting_the_rest() {
+        let c = cfg();
+        let p = SitePolicy {
+            tier_block_min: Some(70),
+            ..Default::default()
+        };
+        let e = p.resolve(&c);
+        assert_eq!(e.tiers.block, 70);
+        // Untouched fields still track the global values.
+        assert_eq!(e.tiers.checkbox, c.tier_checkbox_min);
+        assert_eq!(e.default_difficulty, c.default_difficulty);
+    }
+
+    #[test]
+    fn default_policy_is_empty_and_serializes_to_an_empty_object() {
+        assert!(SitePolicy::default().is_empty());
+        assert_eq!(serde_json::to_string(&SitePolicy::default()).unwrap(), "{}");
+        assert!(
+            !SitePolicy {
+                tier_block_min: Some(70),
+                ..Default::default()
+            }
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn policy_round_trips_through_json() {
+        let p = SitePolicy {
+            tier_checkbox_min: Some(10),
+            verify_block_min: Some(30),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        assert_eq!(serde_json::from_str::<SitePolicy>(&json).unwrap(), p);
+    }
+
+    #[test]
+    fn empty_policy_validates() {
+        assert!(SitePolicy::default().validate(&cfg()).is_ok());
+    }
+
+    #[test]
+    fn rejects_zero_difficulty() {
+        // 0 leading zero bits means every nonce verifies — the PoW is off.
+        let err = SitePolicy {
+            default_difficulty: Some(0),
+            ..Default::default()
+        }
+        .validate(&cfg())
+        .unwrap_err();
+        assert!(err.contains("at least 1"), "{err}");
+
+        assert!(
+            SitePolicy {
+                max_difficulty: Some(0),
+                ..Default::default()
+            }
+            .validate(&cfg())
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_default_difficulty_above_max() {
+        let err = SitePolicy {
+            default_difficulty: Some(20),
+            max_difficulty: Some(10),
+            ..Default::default()
+        }
+        .validate(&cfg())
+        .unwrap_err();
+        assert!(err.contains("exceeds max_difficulty"), "{err}");
+    }
+
+    #[test]
+    fn rejects_out_of_order_tier_thresholds() {
+        let err = SitePolicy {
+            tier_checkbox_min: Some(50),
+            tier_hard_pow_min: Some(40),
+            ..Default::default()
+        }
+        .validate(&cfg())
+        .unwrap_err();
+        assert!(err.contains("non-decreasing"), "{err}");
+    }
+
+    #[test]
+    fn rejects_partial_override_that_only_breaks_against_the_globals() {
+        // block_min alone looks fine; merged with the global checkbox=20 /
+        // hard_pow=40 it puts Block underneath both. This is the case that
+        // validating the *supplied* fields instead of the resolved ones
+        // would let through.
+        let c = cfg();
+        assert!(c.tier_checkbox_min > 10);
+        let err = SitePolicy {
+            tier_block_min: Some(10),
+            ..Default::default()
+        }
+        .validate(&c)
+        .unwrap_err();
+        assert!(err.contains("non-decreasing"), "{err}");
+    }
+
+    #[test]
+    fn rejects_shadow_above_block_on_the_verify_side() {
+        let err = SitePolicy {
+            verify_shadow_min: Some(90),
+            verify_block_min: Some(60),
+            ..Default::default()
+        }
+        .validate(&cfg())
+        .unwrap_err();
+        assert!(err.contains("verify_shadow_min"), "{err}");
+    }
+
+    #[test]
+    fn rejects_zero_block_thresholds() {
+        // Both of these match every score, so the site is fully down rather
+        // than strictly policed.
+        let err = SitePolicy {
+            tier_checkbox_min: Some(0),
+            tier_hard_pow_min: Some(0),
+            tier_block_min: Some(0),
+            ..Default::default()
+        }
+        .validate(&cfg())
+        .unwrap_err();
+        assert!(err.contains("tier_block_min"), "{err}");
+
+        let err = SitePolicy {
+            verify_shadow_min: Some(0),
+            verify_block_min: Some(0),
+            ..Default::default()
+        }
+        .validate(&cfg())
+        .unwrap_err();
+        assert!(err.contains("verify_block_min"), "{err}");
+    }
+
+    #[test]
+    fn accepts_a_realistic_stricter_login_policy() {
+        // The motivating case: a login form that should escalate sooner and
+        // hard-block on any behavioural flag.
+        let p = SitePolicy {
+            tier_checkbox_min: Some(10),
+            tier_hard_pow_min: Some(25),
+            tier_block_min: Some(60),
+            verify_shadow_min: Some(20),
+            verify_block_min: Some(30),
+            ..Default::default()
+        };
+        assert!(p.validate(&cfg()).is_ok());
+        assert_eq!(p.resolve(&cfg()).tiers.hard_pow, 25);
     }
 }

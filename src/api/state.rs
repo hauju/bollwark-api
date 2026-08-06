@@ -5,7 +5,7 @@ use crate::config::AppConfig;
 use crate::dashboard::DecisionLog;
 use crate::failover::FailoverGuard;
 use crate::puzzle::challenge::PuzzleEngine;
-use crate::risk::{RiskScorer, TierThresholds, TrustedProxies, VerifyScorer, VerifyThresholds};
+use crate::risk::{RiskScorer, TrustedProxies, VerifyScorer};
 use crate::storage::memory::InMemoryStore;
 
 pub type SharedState = Arc<AppState>;
@@ -73,19 +73,4 @@ pub fn info_urls_from_config(config: &AppConfig) -> Option<InfoUrls> {
         terms: config.info_terms_url.clone(),
     };
     if urls.is_empty() { None } else { Some(urls) }
-}
-
-pub fn tier_thresholds_from_config(config: &AppConfig) -> TierThresholds {
-    TierThresholds {
-        checkbox: config.tier_checkbox_min,
-        hard_pow: config.tier_hard_pow_min,
-        block: config.tier_block_min,
-    }
-}
-
-pub fn verify_thresholds_from_config(config: &AppConfig) -> VerifyThresholds {
-    VerifyThresholds {
-        shadow_min: config.verify_shadow_min,
-        block_min: config.verify_block_min,
-    }
 }

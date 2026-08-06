@@ -4,6 +4,7 @@ use uuid::Uuid;
 use crate::error::CaptchaError;
 use crate::puzzle::types::Algorithm;
 use crate::risk::{BehaviorReport, EscalationTier};
+use crate::site::types::SitePolicy;
 
 // --- Requests ---
 
@@ -203,6 +204,10 @@ pub struct CreateSiteRequest {
     /// Empty/omitted = allow any origin. Validated + normalized in the handler.
     #[serde(default)]
     pub allowed_origins: Vec<String>,
+    /// Optional per-site scoring overrides. Omitted = inherit every env
+    /// default. Validated against the running config in the handler.
+    #[serde(default)]
+    pub policy: SitePolicy,
 }
 
 // --- Responses ---
@@ -281,6 +286,10 @@ pub struct CreateSiteResponse {
     pub secret_key: String,
     /// Echoes back the normalized origin allowlist (empty = any origin).
     pub allowed_origins: Vec<String>,
+    /// Echoes back the accepted policy. Serializes to `{}` when the site
+    /// inherits everything, so the caller can see exactly what was stored.
+    #[serde(default)]
+    pub policy: SitePolicy,
 }
 
 #[cfg(test)]

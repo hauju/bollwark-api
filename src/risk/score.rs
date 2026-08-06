@@ -36,19 +36,13 @@ pub struct RiskScore {
 }
 
 pub struct RiskScorer {
-    thresholds: TierThresholds,
     reputation: Arc<ReputationStore>,
     tls_blocklist: Arc<FingerprintBlocklist>,
 }
 
 impl RiskScorer {
-    pub fn new(
-        thresholds: TierThresholds,
-        reputation: Arc<ReputationStore>,
-        tls_blocklist: Arc<FingerprintBlocklist>,
-    ) -> Self {
+    pub fn new(reputation: Arc<ReputationStore>, tls_blocklist: Arc<FingerprintBlocklist>) -> Self {
         Self {
-            thresholds,
             reputation,
             tls_blocklist,
         }
@@ -59,7 +53,13 @@ impl RiskScorer {
     /// `IP_REPUTATION_FILE` is loaded; TLS fingerprint contributes 0 unless a
     /// trusted proxy supplied the header. So the privacy-invasive signals only
     /// fire when the operator has explicitly enabled their inputs.
-    pub fn score(&self, ctx: &SignalContext<'_>) -> RiskScore {
+    ///
+    /// `thresholds` is a per-request input rather than scorer state because
+    /// the signal weights are a property of this service while the score →
+    /// tier mapping is a property of the *site* being protected — a site's
+    /// [`crate::site::types::SitePolicy`] can shift the bands without changing
+    /// what any signal is worth.
+    pub fn score(&self, ctx: &SignalContext<'_>, thresholds: TierThresholds) -> RiskScore {
         let ip_category = self.reputation.lookup(ctx.ip);
         let breakdown = SignalBreakdown {
             rate: score_rate(ctx.ip_count, ctx.site_count),
@@ -71,7 +71,7 @@ impl RiskScorer {
             + breakdown.header_anomaly
             + breakdown.ip_reputation
             + breakdown.tls_fingerprint;
-        let tier = self.thresholds.classify(total);
+        let tier = thresholds.classify(total);
         RiskScore {
             total,
             breakdown,
@@ -90,7 +90,6 @@ mod tests {
 
     fn scorer() -> RiskScorer {
         RiskScorer::new(
-            TierThresholds::default(),
             Arc::new(ReputationStore::empty()),
             Arc::new(FingerprintBlocklist::empty()),
         )
@@ -98,7 +97,6 @@ mod tests {
 
     fn scorer_with_reputation(content: &str) -> RiskScorer {
         RiskScorer::new(
-            TierThresholds::default(),
             Arc::new(ReputationStore::new(
                 CidrListReputation::parse(content).unwrap(),
             )),
@@ -108,7 +106,6 @@ mod tests {
 
     fn scorer_with_tls_blocklist(content: &str) -> RiskScorer {
         RiskScorer::new(
-            TierThresholds::default(),
             Arc::new(ReputationStore::empty()),
             Arc::new(FingerprintBlocklist::parse(content).unwrap()),
         )
@@ -148,7 +145,7 @@ mod tests {
     #[test]
     fn clean_request_yields_invisible_pass() {
         let headers = clean_headers();
-        let result = scorer().score(&ctx(&headers, "127.0.0.1", 1, 1));
+        let result = scorer().score(&ctx(&headers, "127.0.0.1", 1, 1), TierThresholds::default());
         assert_eq!(result.total, 0);
         assert_eq!(result.tier, EscalationTier::InvisiblePass);
     }
@@ -156,7 +153,10 @@ mod tests {
     #[test]
     fn high_rate_alone_reaches_hard_pow() {
         let headers = clean_headers();
-        let result = scorer().score(&ctx(&headers, "127.0.0.1", 55, 600));
+        let result = scorer().score(
+            &ctx(&headers, "127.0.0.1", 55, 600),
+            TierThresholds::default(),
+        );
         assert_eq!(result.breakdown.rate, 45);
         assert_eq!(result.tier, EscalationTier::HardPow);
     }
@@ -165,7 +165,7 @@ mod tests {
     fn missing_ua_alone_reaches_checkbox() {
         let mut headers = clean_headers();
         headers.remove(USER_AGENT);
-        let result = scorer().score(&ctx(&headers, "127.0.0.1", 1, 1));
+        let result = scorer().score(&ctx(&headers, "127.0.0.1", 1, 1), TierThresholds::default());
         assert_eq!(result.breakdown.header_anomaly, 30);
         assert_eq!(result.tier, EscalationTier::Checkbox);
     }
@@ -176,7 +176,10 @@ mod tests {
         headers.insert(USER_AGENT, HeaderValue::from_static("curl/8.0"));
         headers.remove(ACCEPT_LANGUAGE);
         headers.remove(ACCEPT_ENCODING);
-        let result = scorer().score(&ctx(&headers, "127.0.0.1", 55, 600));
+        let result = scorer().score(
+            &ctx(&headers, "127.0.0.1", 55, 600),
+            TierThresholds::default(),
+        );
         assert_eq!(result.total, 90);
         assert_eq!(result.tier, EscalationTier::Block);
     }
@@ -187,7 +190,7 @@ mod tests {
         // It lands in Checkbox.
         let headers = clean_headers();
         let s = scorer_with_reputation("10.0.0.0/8 datacenter\n");
-        let result = s.score(&ctx(&headers, "10.5.6.7", 1, 1));
+        let result = s.score(&ctx(&headers, "10.5.6.7", 1, 1), TierThresholds::default());
         assert_eq!(result.breakdown.ip_reputation, 30);
         assert_eq!(result.tier, EscalationTier::Checkbox);
     }
@@ -197,7 +200,10 @@ mod tests {
         // Tor = 40 → HardPow exactly at threshold
         let headers = clean_headers();
         let s = scorer_with_reputation("198.51.100.0/24 tor\n");
-        let result = s.score(&ctx(&headers, "198.51.100.42", 1, 1));
+        let result = s.score(
+            &ctx(&headers, "198.51.100.42", 1, 1),
+            TierThresholds::default(),
+        );
         assert_eq!(result.breakdown.ip_reputation, 40);
         assert_eq!(result.tier, EscalationTier::HardPow);
     }
@@ -208,8 +214,34 @@ mod tests {
         let s = scorer_with_tls_blocklist("badfp\n");
         let mut c = ctx(&headers, "127.0.0.1", 1, 1);
         c.tls_fingerprint = TlsFingerprint::Provided("badfp");
-        let result = s.score(&c);
+        let result = s.score(&c, TierThresholds::default());
         assert_eq!(result.breakdown.tls_fingerprint, 35);
+    }
+
+    #[test]
+    fn thresholds_are_per_call_so_a_site_policy_can_shift_the_tier() {
+        // Same signals, same total — only the site's bands differ. A datacenter
+        // IP is Checkbox under the defaults and Block under a login-form policy.
+        let headers = clean_headers();
+        let s = scorer_with_reputation("10.0.0.0/8 datacenter\n");
+        let c = ctx(&headers, "10.5.6.7", 1, 1);
+
+        assert_eq!(
+            s.score(&c, TierThresholds::default()).tier,
+            EscalationTier::Checkbox
+        );
+        assert_eq!(
+            s.score(
+                &c,
+                TierThresholds {
+                    checkbox: 10,
+                    hard_pow: 20,
+                    block: 30,
+                }
+            )
+            .tier,
+            EscalationTier::Block
+        );
     }
 
     #[test]
@@ -218,7 +250,7 @@ mod tests {
         let s = scorer_with_tls_blocklist("badfp\n");
         let mut c = ctx(&headers, "127.0.0.1", 1, 1);
         c.tls_fingerprint = TlsFingerprint::Provided("legit-chrome-fp");
-        let result = s.score(&c);
+        let result = s.score(&c, TierThresholds::default());
         assert_eq!(result.breakdown.tls_fingerprint, 0);
     }
 }

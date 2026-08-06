@@ -14,6 +14,8 @@ use serde_json::json;
 
 use super::types::SiteSummary;
 use super::{DecisionLog, Sessions};
+use crate::config::AppConfig;
+use crate::site::types::SitePolicy;
 use crate::storage::Store;
 use crate::storage::memory::InMemoryStore;
 
@@ -23,6 +25,10 @@ pub struct AdminState {
     pub log: DecisionLog,
     pub token: Arc<String>,
     pub store: Arc<InMemoryStore>,
+    /// Needed to validate a submitted [`SitePolicy`] against the values it
+    /// will actually be merged with at request time — a partial override is
+    /// only checkable in combination with the process config.
+    pub config: AppConfig,
 }
 
 pub fn router(state: AdminState) -> Router {
@@ -43,6 +49,10 @@ pub fn router(state: AdminState) -> Router {
         .route(
             "/v1/admin/sites/{id}/origins",
             axum::routing::put(update_site_origins),
+        )
+        .route(
+            "/v1/admin/sites/{id}/policy",
+            axum::routing::put(update_site_policy),
         )
         .with_state(state)
 }
@@ -189,6 +199,7 @@ async fn list_sites(State(state): State<AdminState>, headers: HeaderMap) -> impl
                 name: s.name,
                 created_at: s.created_at.to_rfc3339(),
                 allowed_origins: s.allowed_origins,
+                policy: s.policy,
                 puzzle_count: act.puzzle_count,
                 verify_count: act.verify_count,
                 last_seen: act.last_seen,
@@ -237,6 +248,48 @@ async fn rotate_site(
 struct UpdateOriginsRequest {
     #[serde(default)]
     allowed_origins: Vec<String>,
+}
+
+/// Replace a site's scoring policy. The body *is* the policy object, and it
+/// replaces the stored one wholesale rather than merging — `{}` clears every
+/// override and returns the site to the process defaults. Partial merge would
+/// make "unset this override" unexpressible, since `null` and "absent" both
+/// have to mean inherit for the type to work at all.
+async fn update_site_policy(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(policy): Json<SitePolicy>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_auth(&state, &headers) {
+        return resp;
+    }
+    let site_key = match uuid::Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid site_key").into_response(),
+    };
+    // Same validation as POST /v1/sites: reject anything that would silently
+    // disable this site's protection or make a tier band unreachable.
+    if let Err(msg) = policy.validate(&state.config) {
+        return (StatusCode::BAD_REQUEST, msg).into_response();
+    }
+    match state.store.update_site_policy(&site_key, policy).await {
+        Ok(()) => {
+            tracing::info!(
+                site_key = %site_key,
+                cleared = policy.is_empty(),
+                "admin: updated site policy"
+            );
+            Json(json!({ "site_key": site_key.to_string(), "policy": policy })).into_response()
+        }
+        Err(crate::error::CaptchaError::NotFound) => {
+            (StatusCode::NOT_FOUND, "site not found").into_response()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "admin update_site_policy failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "update failed").into_response()
+        }
+    }
 }
 
 /// Replace a site's origin allowlist without rotating its secret. Validates +

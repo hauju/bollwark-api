@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::error::CaptchaError;
 use crate::puzzle::types::Challenge;
-use crate::site::types::Site;
+use crate::site::types::{Site, SitePolicy};
 
 use super::Store;
 
@@ -95,7 +95,8 @@ CREATE TABLE IF NOT EXISTS sites (
     secret_key      TEXT NOT NULL UNIQUE,
     name            TEXT NOT NULL,
     created_at      TEXT NOT NULL,
-    allowed_origins TEXT NOT NULL DEFAULT ''
+    allowed_origins TEXT NOT NULL DEFAULT '',
+    policy          TEXT
 );
 ";
 
@@ -119,7 +120,10 @@ impl InMemoryStore {
             .map_err(|e| CaptchaError::Storage(format!("open site db: {e}")))?;
         conn.execute_batch(SITES_SCHEMA)
             .map_err(|e| CaptchaError::Storage(format!("init site schema: {e}")))?;
-        migrate_add_allowed_origins(&conn)?;
+        migrate_add_site_column(&conn, "allowed_origins", "TEXT NOT NULL DEFAULT ''")?;
+        // Nullable: NULL means "no overrides", which is what every site
+        // predating per-site policy has and what an emptied policy writes back.
+        migrate_add_site_column(&conn, "policy", "TEXT")?;
 
         let sites = load_all_sites(&conn)?;
 
@@ -165,30 +169,38 @@ impl InMemoryStore {
     }
 }
 
-/// Add the `allowed_origins` column to a `sites` table created before this
-/// feature shipped. SQLite has no `ADD COLUMN IF NOT EXISTS`, so probe
-/// `pragma_table_info` first and only ALTER when the column is absent — a
-/// fresh database created from the current `SITES_SCHEMA` already has it, so
-/// this is a no-op there. Mirrors the in-place migration pattern in
+/// Add a column to the `sites` table when a database created by an older
+/// build doesn't have it yet. SQLite has no `ADD COLUMN IF NOT EXISTS`, so
+/// probe `pragma_table_info` first and only ALTER when the column is absent —
+/// a fresh database created from the current `SITES_SCHEMA` already has every
+/// column, so this is a no-op there. Mirrors the in-place migration pattern in
 /// `dashboard/log.rs`.
-fn migrate_add_allowed_origins(conn: &Connection) -> Result<(), CaptchaError> {
+fn migrate_add_site_column(
+    conn: &Connection,
+    column: &str,
+    definition: &str,
+) -> Result<(), CaptchaError> {
     let has_column: bool = conn
-        .prepare("SELECT 1 FROM pragma_table_info('sites') WHERE name = 'allowed_origins'")
-        .and_then(|mut stmt| stmt.exists([]))
+        .prepare("SELECT 1 FROM pragma_table_info('sites') WHERE name = ?1")
+        .and_then(|mut stmt| stmt.exists([column]))
         .map_err(|e| CaptchaError::Storage(format!("probe sites schema: {e}")))?;
     if !has_column {
+        // `column`/`definition` are compile-time literals from the call sites
+        // below, never user input — SQLite can't bind an identifier anyway.
         conn.execute(
-            "ALTER TABLE sites ADD COLUMN allowed_origins TEXT NOT NULL DEFAULT ''",
+            &format!("ALTER TABLE sites ADD COLUMN {column} {definition}"),
             [],
         )
-        .map_err(|e| CaptchaError::Storage(format!("add allowed_origins column: {e}")))?;
+        .map_err(|e| CaptchaError::Storage(format!("add {column} column: {e}")))?;
     }
     Ok(())
 }
 
 fn load_all_sites(conn: &Connection) -> Result<Vec<Site>, CaptchaError> {
     let mut stmt = conn
-        .prepare("SELECT site_key, secret_key, name, created_at, allowed_origins FROM sites")
+        .prepare(
+            "SELECT site_key, secret_key, name, created_at, allowed_origins, policy FROM sites",
+        )
         .map_err(|e| CaptchaError::Storage(format!("prepare load sites: {e}")))?;
     let rows = stmt
         .query_map([], |row| {
@@ -197,19 +209,30 @@ fn load_all_sites(conn: &Connection) -> Result<Vec<Site>, CaptchaError> {
             let name: String = row.get(2)?;
             let created_str: String = row.get(3)?;
             let origins_str: String = row.get(4)?;
-            Ok((key_str, secret, name, created_str, origins_str))
+            let policy_json: Option<String> = row.get(5)?;
+            Ok((key_str, secret, name, created_str, origins_str, policy_json))
         })
         .map_err(|e| CaptchaError::Storage(format!("query sites: {e}")))?;
 
     let mut out = Vec::new();
     for row in rows {
-        let (key_str, secret_key, name, created_str, origins_str) =
+        let (key_str, secret_key, name, created_str, origins_str, policy_json) =
             row.map_err(|e| CaptchaError::Storage(format!("read site row: {e}")))?;
         let site_key = Uuid::parse_str(&key_str)
             .map_err(|e| CaptchaError::Storage(format!("bad site_key in db: {e}")))?;
         let created_at = DateTime::parse_from_rfc3339(&created_str)
             .map_err(|e| CaptchaError::Storage(format!("bad created_at in db: {e}")))?
             .with_timezone(&Utc);
+        // A policy row we can't parse must not be silently downgraded to
+        // "no overrides": that would quietly restore the global (looser)
+        // thresholds for a site whose operator deliberately tightened them.
+        // Refuse to boot instead, the same stance `AppConfig::validated` takes.
+        let policy = match policy_json {
+            Some(json) => serde_json::from_str(&json).map_err(|e| {
+                CaptchaError::Storage(format!("bad policy for site {key_str} in db: {e}"))
+            })?,
+            None => SitePolicy::default(),
+        };
         out.push(Site {
             site_key,
             secret_key,
@@ -218,20 +241,34 @@ fn load_all_sites(conn: &Connection) -> Result<Vec<Site>, CaptchaError> {
             // Space-joined; entries never contain whitespace (normalized at
             // provisioning time), so splitting on whitespace is lossless.
             allowed_origins: origins_str.split_whitespace().map(String::from).collect(),
+            policy,
         });
     }
     Ok(out)
 }
 
+/// Serialize a policy for the `policy` column: `None` (SQL NULL) when nothing
+/// is overridden, so an untouched site stays visibly untouched on disk and the
+/// column reads the same as it does for sites created before policies existed.
+fn policy_column(policy: &SitePolicy) -> Result<Option<String>, CaptchaError> {
+    if policy.is_empty() {
+        return Ok(None);
+    }
+    serde_json::to_string(policy)
+        .map(Some)
+        .map_err(|e| CaptchaError::Storage(format!("serialize site policy: {e}")))
+}
+
 fn persist_site(conn: &Connection, site: &Site) -> Result<(), CaptchaError> {
     conn.execute(
-        "INSERT INTO sites (site_key, secret_key, name, created_at, allowed_origins) VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO sites (site_key, secret_key, name, created_at, allowed_origins, policy) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             site.site_key.to_string(),
             site.secret_key,
             site.name,
             site.created_at.to_rfc3339(),
             site.allowed_origins.join(" "),
+            policy_column(&site.policy)?,
         ],
     )
     .map_err(|e| CaptchaError::Storage(format!("insert site: {e}")))?;
@@ -392,6 +429,35 @@ impl Store for InMemoryStore {
         Ok(())
     }
 
+    async fn update_site_policy(
+        &self,
+        site_key: &Uuid,
+        policy: SitePolicy,
+    ) -> Result<(), CaptchaError> {
+        // One critical section (see store_site): resolve NotFound from memory,
+        // persist inside the lock, then swap in-memory.
+        let mut by_key = self.sites_by_key.write().map_err(lock_err)?;
+        let Some(site) = by_key.get_mut(site_key) else {
+            return Err(CaptchaError::NotFound);
+        };
+        if let Some(persist) = &self.site_persistence {
+            let conn = persist.lock().map_err(lock_err)?;
+            let updated = conn
+                .execute(
+                    "UPDATE sites SET policy = ?1 WHERE site_key = ?2",
+                    params![policy_column(&policy)?, site_key.to_string()],
+                )
+                .map_err(|e| CaptchaError::Storage(format!("update site policy: {e}")))?;
+            if updated == 0 {
+                return Err(CaptchaError::Storage(
+                    "site in memory but missing from db".into(),
+                ));
+            }
+        }
+        site.policy = policy;
+        Ok(())
+    }
+
     async fn delete_site(&self, site_key: &Uuid) -> Result<(), CaptchaError> {
         // One critical section (see store_site): resolve NotFound from memory,
         // delete from disk inside the lock, then remove from memory.
@@ -481,6 +547,7 @@ mod tests {
             name: "Test Site".into(),
             created_at: Utc::now(),
             allowed_origins: Vec::new(),
+            policy: SitePolicy::default(),
         }
     }
 
@@ -881,6 +948,135 @@ mod tests {
             .update_site_origins(&reloaded.site_key, vec!["https://new.example".to_string()])
             .await
             .unwrap();
+
+        // The same legacy row must also gain the `policy` column, and load
+        // with no overrides — a site provisioned before policies existed keeps
+        // tracking the global config exactly as it did.
+        assert!(reloaded.policy.is_empty());
+        store
+            .update_site_policy(
+                &reloaded.site_key,
+                SitePolicy {
+                    tier_block_min: Some(70),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_policy_round_trips_through_persistence() {
+        let dir = tempdir();
+        let path = dir.join("sites.db");
+
+        let policy = SitePolicy {
+            tier_checkbox_min: Some(10),
+            tier_hard_pow_min: Some(25),
+            tier_block_min: Some(60),
+            ..Default::default()
+        };
+
+        let site_key = {
+            let store = InMemoryStore::with_site_persistence(&path).unwrap();
+            let mut site = make_site();
+            site.policy = policy;
+            store.store_site(&site).await.unwrap();
+            site.site_key
+        };
+
+        // Reopen: the policy must come back byte-identical, or a restart
+        // silently reverts a tenant to the looser global thresholds.
+        let store = InMemoryStore::with_site_persistence(&path).unwrap();
+        let reloaded = store.get_site_by_key(&site_key).await.unwrap().unwrap();
+        assert_eq!(reloaded.policy, policy);
+    }
+
+    #[tokio::test]
+    async fn test_update_site_policy_persists_and_clears() {
+        let dir = tempdir();
+        let path = dir.join("sites.db");
+
+        let site = make_site();
+        {
+            let store = InMemoryStore::with_site_persistence(&path).unwrap();
+            store.store_site(&site).await.unwrap();
+            store
+                .update_site_policy(
+                    &site.site_key,
+                    SitePolicy {
+                        verify_block_min: Some(30),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        {
+            let store = InMemoryStore::with_site_persistence(&path).unwrap();
+            let reloaded = store
+                .get_site_by_key(&site.site_key)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(reloaded.policy.verify_block_min, Some(30));
+
+            // Clearing writes SQL NULL back, not "{}" — an emptied policy must
+            // be indistinguishable from a site that never had one.
+            store
+                .update_site_policy(&site.site_key, SitePolicy::default())
+                .await
+                .unwrap();
+        }
+        let store = InMemoryStore::with_site_persistence(&path).unwrap();
+        let reloaded = store
+            .get_site_by_key(&site.site_key)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(reloaded.policy.is_empty());
+
+        let conn = Connection::open(&path).unwrap();
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT policy FROM sites WHERE site_key = ?1",
+                params![site.site_key.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, None);
+    }
+
+    #[tokio::test]
+    async fn test_update_site_policy_unknown_site_is_not_found() {
+        let store = InMemoryStore::new();
+        let result = store
+            .update_site_policy(&Uuid::new_v4(), SitePolicy::default())
+            .await;
+        assert!(matches!(result, Err(CaptchaError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn test_unparseable_policy_column_refuses_to_load() {
+        // A corrupt policy must not degrade to "no overrides" — that would
+        // silently restore the looser global thresholds for a site whose
+        // operator deliberately tightened them.
+        let dir = tempdir();
+        let path = dir.join("sites.db");
+        let site = make_site();
+        {
+            let store = InMemoryStore::with_site_persistence(&path).unwrap();
+            store.store_site(&site).await.unwrap();
+        }
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE sites SET policy = ?1 WHERE site_key = ?2",
+            params!["not json", site.site_key.to_string()],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert!(InMemoryStore::with_site_persistence(&path).is_err());
     }
 
     fn tempdir() -> std::path::PathBuf {

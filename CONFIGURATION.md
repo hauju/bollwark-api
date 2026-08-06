@@ -288,9 +288,67 @@ curl -X POST http://localhost:3000/v1/sites \
 The same token also gates `/v1/admin/*` (validation dashboard).
 
 ### `SITE_DB_PATH`
-Path to a SQLite file that persists site rows. When unset, sites live only in `Arc<RwLock<HashMap>>` and are lost on restart — meaning every integrator's stored `secret_key` becomes invalid. **Set this for any deployment beyond local dev.** Created on first run, schema is `(site_key TEXT PRIMARY KEY, secret_key TEXT UNIQUE, name TEXT, created_at TEXT, allowed_origins TEXT)`. Databases from before `allowed_origins` shipped are migrated in place on open.
+Path to a SQLite file that persists site rows. When unset, sites live only in `Arc<RwLock<HashMap>>` and are lost on restart — meaning every integrator's stored `secret_key` becomes invalid. **Set this for any deployment beyond local dev.** Created on first run, schema is `(site_key TEXT PRIMARY KEY, secret_key TEXT UNIQUE, name TEXT, created_at TEXT, allowed_origins TEXT, policy TEXT)`. Databases from before `allowed_origins` or `policy` shipped are migrated in place on open.
 
 Challenges and rate-window counters intentionally stay in-memory: they're cheap to lose and a fresh start is fine.
+
+---
+
+## Per-site policy
+
+Every scoring knob below is a process-global env var, which is the right default for a single-tenant appliance. It stops being right the moment one instance protects forms with genuinely different risk profiles — a low-traffic contact form and a login endpoint under credential-stuffing want different bands, and previously you had to pick one or run a second instance.
+
+A **site policy** overrides those globals for one site. Every field is optional and an omitted field *inherits the env value*, including later changes to it — a policy is a sparse overlay, never a full copy. A site with no policy behaves exactly as it did before policies existed.
+
+| Policy field | Overrides |
+|---|---|
+| `tier_checkbox_min` | `TIER_CHECKBOX_MIN` |
+| `tier_hard_pow_min` | `TIER_HARD_POW_MIN` |
+| `tier_block_min` | `TIER_BLOCK_MIN` |
+| `verify_shadow_min` | `VERIFY_SHADOW_MIN` |
+| `verify_block_min` | `VERIFY_BLOCK_MIN` |
+| `default_difficulty` | `DEFAULT_DIFFICULTY` |
+| `max_difficulty` | `MAX_DIFFICULTY` |
+
+Set it at provisioning time:
+
+```bash
+curl -X POST http://localhost:3000/v1/sites \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "name": "login",
+        "policy": {
+          "tier_checkbox_min": 10,
+          "tier_hard_pow_min": 25,
+          "tier_block_min": 60,
+          "verify_block_min": 30
+        }
+      }'
+```
+
+or change it later without rotating the secret:
+
+```bash
+curl -X PUT http://localhost:3000/v1/admin/sites/$SITE_KEY/policy \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"tier_block_min": 60}'
+```
+
+The body **replaces** the stored policy rather than merging into it, so `{}` clears every override and returns the site to the env defaults. A merge would make "unset this override" inexpressible, since both `null` and *absent* have to mean *inherit* for the type to work at all. Changes take effect on the next request; challenges already issued keep the difficulty they were stamped with.
+
+**Validation.** A submitted policy is checked *after* being merged with the running config, because a partial override is only meaningful in combination with the globals — `{"tier_block_min": 10}` is unremarkable on its own but puts Block underneath the default `TIER_CHECKBOX_MIN=20`, leaving two bands unreachable. Rejected with `400`:
+
+- a difficulty of `0` (accepts any nonce — the PoW is off for that site)
+- `default_difficulty` above `max_difficulty` (the clamp would silently win)
+- tier thresholds not non-decreasing (`classify` tests block → hard_pow → checkbox, so out of order the higher tier swallows the lower bands)
+- `verify_shadow_min` above `verify_block_min` (empty shadow band)
+- `tier_block_min` or `verify_block_min` of `0` (matches every score, so the site is down rather than strictly policed)
+
+This mirrors the fail-loud stance `AppConfig::validated` takes for the global equivalents — a write-time `400` is the closest thing to a boot panic for something that arrives over HTTP.
+
+`GET /v1/admin/sites` returns each site's policy, and the `puzzle_decision` log line carries `site_policy=true|false` so a tier that looks wrong against the documented defaults is distinguishable from a bug.
 
 ---
 

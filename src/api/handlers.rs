@@ -14,7 +14,7 @@ use crate::risk::{
     BehaviorPresence, EscalationTier, SignalContext, TlsFingerprint, VerifyContext, VerifyDecision,
     anonymize_ip, client_ip, difficulty_for, rate_key,
 };
-use crate::site::types::Site;
+use crate::site::types::{EffectivePolicy, Site};
 use crate::storage::Store;
 
 use super::extract::{AppJson, AppQuery};
@@ -59,6 +59,12 @@ pub async fn get_puzzle(
         }
     }
 
+    // Overlay this site's policy on the process config. Every knob below —
+    // tier bands, base difficulty, the difficulty clamp — reads from here
+    // rather than from `state.config`, so a site that overrides nothing is
+    // scored exactly as it was before policies existed.
+    let policy = site.policy.resolve(&state.config);
+
     // Resolve the client IP. Behind a reverse proxy in TRUSTED_PROXIES we
     // walk X-Forwarded-For; otherwise the TCP peer is authoritative.
     let peer: IpAddr = addr.ip();
@@ -94,7 +100,7 @@ pub async fn get_puzzle(
         site_count,
         tls_fingerprint,
     };
-    let score = state.risk.score(&ctx);
+    let score = state.risk.score(&ctx, policy.tiers);
 
     // Hard per-IP issuance cap (IP_HARD_LIMIT): a flood with clean browser
     // headers never reaches TIER_BLOCK_MIN through scoring (the rate signal
@@ -153,20 +159,16 @@ pub async fn get_puzzle(
     // Block is the only tier that doesn't issue a PoW puzzle (it rejects with
     // 429 below). Every other tier maps to a difficulty here; a hard-capped IP
     // is floored to MAX so the throttle bites without blocking.
-    let maybe_difficulty = difficulty_for(
-        tier,
-        state.config.default_difficulty,
-        state.config.max_difficulty,
-    )
-    .map(|d| {
-        let floored = d.max(load_floor);
-        let floored = if hard_capped {
-            floored.max(state.config.max_difficulty)
-        } else {
-            floored
-        };
-        floored.min(state.config.max_difficulty)
-    });
+    let maybe_difficulty = difficulty_for(tier, policy.default_difficulty, policy.max_difficulty)
+        .map(|d| {
+            let floored = d.max(load_floor);
+            let floored = if hard_capped {
+                floored.max(policy.max_difficulty)
+            } else {
+                floored
+            };
+            floored.min(policy.max_difficulty)
+        });
     let outcome = match tier {
         EscalationTier::Block => "rejected",
         _ => "issued",
@@ -203,6 +205,10 @@ pub async fn get_puzzle(
         shed_flooder,
         difficulty = maybe_difficulty.unwrap_or(0),
         load_floor,
+        // Whether this site's own policy (rather than the process config)
+        // produced the bands above. Without it, a tier that looks wrong against
+        // the documented env defaults is indistinguishable from a bug.
+        site_policy = !site.policy.is_empty(),
         sig_rate = score.breakdown.rate,
         sig_header_anomaly = score.breakdown.header_anomaly,
         sig_ip_reputation = score.breakdown.ip_reputation,
@@ -313,13 +319,18 @@ pub async fn verify(
         .await?
         .ok_or(CaptchaError::Unauthorized)?;
 
+    // Overlay this site's policy on the process config, exactly as the puzzle
+    // handler does — the verify-time bands are per-site for the same reason
+    // the puzzle-time ones are.
+    let policy = site.policy.resolve(&state.config);
+
     // Fork before any challenge lookup: a failover claim has no challenge by
     // construction, so it takes an entirely separate path with its own
     // (much weaker, explicitly fail-open) acceptance rules.
     let req = match req {
         ResolvedVerify::Solved(s) => s,
         ResolvedVerify::Failover(claim) => {
-            return verify_failover(&state, &site, claim);
+            return verify_failover(&state, &site, &policy, claim);
         }
     };
 
@@ -438,7 +449,7 @@ pub async fn verify(
         time_on_page_ms: Some(time_on_page_ms),
         behavior,
     };
-    let vscore = state.verify_scorer.score(&vctx);
+    let vscore = state.verify_scorer.score(&vctx, policy.verify);
 
     let (success, outcome) = match vscore.decision {
         VerifyDecision::Pass => (true, "pass"),
@@ -518,6 +529,7 @@ pub async fn verify(
 fn verify_failover(
     state: &SharedState,
     site: &Site,
+    policy: &EffectivePolicy,
     claim: FailoverClaim,
 ) -> Result<Json<VerifyResponse>, CaptchaError> {
     // The claim names the site it was minted for; it must match the secret the
@@ -540,7 +552,7 @@ fn verify_failover(
             None => BehaviorPresence::Absent,
         },
     };
-    let vscore = state.verify_scorer.score(&vctx);
+    let vscore = state.verify_scorer.score(&vctx, policy.verify);
 
     let (success, outcome) = match (verdict.accepted(), vscore.decision) {
         (false, _) => (false, verdict.outcome()),
@@ -680,6 +692,14 @@ pub async fn create_site(
     let allowed_origins = crate::site::types::normalize_origins(&body.allowed_origins)
         .map_err(CaptchaError::BadRequest)?;
 
+    // Validate the policy against *this server's* config, since that's what it
+    // will be merged with at request time. Rejecting here means a site can
+    // never be stored in a state that silently disables its own protection.
+    let policy = body.policy;
+    policy
+        .validate(&state.config)
+        .map_err(CaptchaError::BadRequest)?;
+
     let site_key = uuid::Uuid::new_v4();
     let secret_key = hex::encode(rand::random::<[u8; 32]>());
 
@@ -689,6 +709,7 @@ pub async fn create_site(
         name: name.to_string(),
         created_at: chrono::Utc::now(),
         allowed_origins: allowed_origins.clone(),
+        policy,
     };
 
     state.store.store_site(&site).await?;
@@ -697,6 +718,7 @@ pub async fn create_site(
         site_key,
         secret_key,
         allowed_origins,
+        policy,
     }))
 }
 
