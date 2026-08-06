@@ -1,5 +1,5 @@
 use argon2::{Algorithm as Argon2Algorithm, Argon2, Params, Version};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use rand::RngExt;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -13,6 +13,22 @@ pub struct PuzzleEngine {
 impl PuzzleEngine {
     pub fn new(config: PuzzleConfig) -> Self {
         Self { config }
+    }
+
+    /// Mint a challenge. `dwell_since` carries the visitor's original arrival
+    /// time when this issuance replaces an expiring challenge; `None` (a first
+    /// issuance) anchors it to now. See `Challenge::dwell_since`.
+    pub fn generate_with_dwell(
+        &self,
+        site_key: Uuid,
+        difficulty: u32,
+        dwell_since: Option<DateTime<Utc>>,
+    ) -> Challenge {
+        let mut challenge = self.generate(site_key, difficulty);
+        if let Some(since) = dwell_since {
+            challenge.dwell_since = since;
+        }
+        challenge
     }
 
     pub fn generate(&self, site_key: Uuid, difficulty: u32) -> Challenge {
@@ -31,6 +47,7 @@ impl PuzzleEngine {
             prefix,
             difficulty,
             created_at: now,
+            dwell_since: now,
             expires_at,
             attempts: 0,
         }

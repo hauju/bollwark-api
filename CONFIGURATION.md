@@ -158,6 +158,8 @@ Every signal self-gates on its own input: header anomaly always computes, IP rep
 
 After a PoW solution is verified, a second scoring pass runs against verify-time-only signals (time-on-page, honeypot, behavioral telemetry). The result is one of three decisions:
 
+> **Time-on-page** is measured from the visitor's arrival, not from the challenge they happen to be holding. The widget silently refreshes its challenge shortly before expiry, and that refresh carries the original anchor forward (via `refresh_of` on `GET /v1/puzzle`), so a visitor who has had the form open for five minutes is not scored as having just arrived. It is always derived server-side — a client cannot claim a longer dwell than it actually had.
+
 | Score range | Decision | Response | Side effect |
 |---|---|---|---|
 | `0` — `VERIFY_SHADOW_MIN-1` | `Pass` | `success: true` | DEBUG log |
@@ -180,6 +182,7 @@ By default, a verify request with no `behavior` blob at all contributes 0 — a 
 | Honeypot field non-empty | +100 (always blocks) |
 | Time-on-page < 500ms | +50 |
 | Time-on-page < 2000ms | +25 |
+
 | Behavior: flatline (zero events) | +30 |
 | Behavior: blob absent (only with `VERIFY_REQUIRE_BEHAVIOR`) | +30 |
 | Behavior: isolated click without pointer movement (≤1 interaction) | +15 |

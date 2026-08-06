@@ -11,6 +11,19 @@ use crate::site::types::SitePolicy;
 #[derive(Debug, Deserialize)]
 pub struct GetPuzzleParams {
     pub site_key: Uuid,
+    /// Id of the challenge this request replaces, sent by the widget when it
+    /// refreshes shortly before expiry. Purely an optimisation for dwell
+    /// accounting: the new challenge inherits the cited one's `dwell_since`,
+    /// so a visitor who has had the form open for five minutes isn't scored
+    /// as having arrived at the moment of the refresh.
+    ///
+    /// Honoured only if the cited challenge exists and belongs to the same
+    /// site; anything else is ignored silently rather than erroring, so a
+    /// stale, consumed or forged id degrades to a normal first issuance.
+    /// Nothing here is trusted — the id proves possession of a live
+    /// same-site challenge, and that's the whole of what it grants.
+    #[serde(default)]
+    pub refresh_of: Option<Uuid>,
 }
 
 /// Verify request. Two shapes are accepted:

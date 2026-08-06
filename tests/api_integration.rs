@@ -44,13 +44,20 @@ fn test_app_with_store(
     builder.build_with_store()
 }
 
-/// Move a stored challenge's `created_at` back by `secs` so the verify-time
-/// time-on-page signal sees a realistic elapsed time instead of the ~0ms gap
-/// between issuing and verifying in a test.
+/// Move a stored challenge back by `secs` so the verify-time time-on-page
+/// signal sees a realistic elapsed time instead of the ~0ms gap between
+/// issuing and verifying in a test.
+///
+/// Moves `dwell_since` as well as `created_at`: the handler derives dwell from
+/// the former (it survives pre-expiry refreshes), so backdating only
+/// `created_at` would leave the signal reading ~0ms and quietly defeat every
+/// caller's intent.
 async fn backdate_challenge(store: &InMemoryStore, id: uuid::Uuid, secs: i64) {
     use bollwark::storage::Store;
     let mut challenge = store.get_challenge(&id).await.unwrap().unwrap();
-    challenge.created_at -= chrono::Duration::seconds(secs);
+    let shift = chrono::Duration::seconds(secs);
+    challenge.created_at -= shift;
+    challenge.dwell_since -= shift;
     store.store_challenge(&challenge).await.unwrap();
 }
 
@@ -2993,4 +3000,171 @@ async fn test_monitor_mode_can_be_toggled_without_rotating_the_secret() {
 
     let (status, _) = puzzle_status_and_tier(&app, no_ua_puzzle_request(&key)).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+// --- Dwell anchor across a pre-expiry refresh (`refresh_of`) ---
+
+/// Fetch a puzzle citing a prior challenge, as the widget's pre-expiry
+/// refresh does.
+async fn get_refreshed_puzzle(
+    app: &axum::Router,
+    site_key: &str,
+    refresh_of: uuid::Uuid,
+) -> (StatusCode, Option<PuzzleResponse>) {
+    let uri = format!("/v1/puzzle?site_key={site_key}&refresh_of={refresh_of}");
+    let req = Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("User-Agent", CLEAN_UA)
+        .header("Accept-Language", CLEAN_LANG)
+        .header("Accept-Encoding", CLEAN_ENC)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&bytes).ok())
+}
+
+/// Solve a puzzle and verify it immediately, returning `success`.
+async fn solve_and_verify_now(
+    app: &axum::Router,
+    site: &CreateSiteResponse,
+    puzzle: &PuzzleResponse,
+) -> bool {
+    let nonce = solve_challenge(&puzzle.prefix, puzzle.difficulty);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/verify")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", site.secret_key))
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "challenge_id": puzzle.challenge_id,
+                "nonce": nonce,
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice::<VerifyResponse>(&bytes)
+        .unwrap()
+        .success
+}
+
+#[tokio::test]
+async fn test_refresh_carries_the_dwell_anchor() {
+    // The load-bearing pair. A site strict enough that the <500ms band alone
+    // decides the outcome, so the only variable is where dwell is anchored.
+    let (app, store) = test_app_with_store(|_| {});
+    let site =
+        create_test_site_with_policy(&app, serde_json::json!({ "verify_block_min": 50 })).await;
+    let key = site.site_key.to_string();
+
+    // Without a refresh: fresh challenge, immediate submit → +50 → blocked.
+    let (_, fresh) = get_test_puzzle(&app, &key).await;
+    let fresh = fresh.unwrap();
+    assert!(
+        !solve_and_verify_now(&app, &site, &fresh).await,
+        "an immediate submit on a fresh challenge must still trip the fast-submit band"
+    );
+
+    // With a refresh: the visitor has been on the form for 10s, the widget
+    // refreshes, they submit at once. The dwell is theirs, not the refresh's.
+    let (_, original) = get_test_puzzle(&app, &key).await;
+    let original = original.unwrap();
+    backdate_challenge(&store, original.challenge_id, 10).await;
+
+    let (status, refreshed) = get_refreshed_puzzle(&app, &key, original.challenge_id).await;
+    assert_eq!(status, StatusCode::OK);
+    let refreshed = refreshed.unwrap();
+    assert_ne!(refreshed.challenge_id, original.challenge_id);
+    assert!(
+        solve_and_verify_now(&app, &site, &refreshed).await,
+        "a refresh must not reset the visitor's dwell clock"
+    );
+}
+
+#[tokio::test]
+async fn test_refresh_of_another_sites_challenge_is_ignored() {
+    // The citation is a proof of possession scoped to one site. Honouring a
+    // cross-site id would let any tenant mint aged anchors from another's.
+    let (app, store) = test_app_with_store(|_| {});
+    let victim = create_test_site(&app).await;
+    let attacker =
+        create_test_site_with_policy(&app, serde_json::json!({ "verify_block_min": 50 })).await;
+
+    let (_, aged) = get_test_puzzle(&app, &victim.site_key.to_string()).await;
+    let aged = aged.unwrap();
+    backdate_challenge(&store, aged.challenge_id, 60).await;
+
+    let (status, puzzle) =
+        get_refreshed_puzzle(&app, &attacker.site_key.to_string(), aged.challenge_id).await;
+    // Still issued — a bad citation is ignored, never an error.
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !solve_and_verify_now(&app, &attacker, &puzzle.unwrap()).await,
+        "a cross-site citation must not confer a backdated dwell anchor"
+    );
+}
+
+#[tokio::test]
+async fn test_unknown_refresh_of_is_ignored_not_an_error() {
+    // Stale or already-consumed ids are routine: a visitor whose challenge
+    // expired between refreshes must get a normal puzzle, not a failure.
+    let app = test_app();
+    let site = create_test_site(&app).await;
+    let (status, puzzle) =
+        get_refreshed_puzzle(&app, &site.site_key.to_string(), uuid::Uuid::new_v4()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(puzzle.is_some());
+}
+
+#[tokio::test]
+async fn test_refresh_chain_keeps_the_original_anchor() {
+    // A long-lived form refreshes repeatedly. Propagating `dwell_since` (not
+    // `created_at`) is what keeps every link pointing at the visitor's
+    // arrival rather than at the previous refresh.
+    let (app, store) = test_app_with_store(|_| {});
+    let site =
+        create_test_site_with_policy(&app, serde_json::json!({ "verify_block_min": 50 })).await;
+    let key = site.site_key.to_string();
+
+    let (_, first) = get_test_puzzle(&app, &key).await;
+    let first = first.unwrap();
+    backdate_challenge(&store, first.challenge_id, 30).await;
+
+    let (_, second) = get_refreshed_puzzle(&app, &key, first.challenge_id).await;
+    let second = second.unwrap();
+    let (_, third) = get_refreshed_puzzle(&app, &key, second.challenge_id).await;
+    let third = third.unwrap();
+
+    assert!(
+        solve_and_verify_now(&app, &site, &third).await,
+        "the anchor must survive a chain of refreshes, not just one"
+    );
+}
+
+#[tokio::test]
+async fn test_refresh_does_not_consume_the_cited_challenge() {
+    // A submit can race the refresh: the widget refreshes 60s before expiry
+    // while the visitor is mid-submit. If the citation deleted the old
+    // challenge, that honest verification would 404.
+    let app = test_app();
+    let site = create_test_site(&app).await;
+    let key = site.site_key.to_string();
+
+    let (_, original) = get_test_puzzle(&app, &key).await;
+    let original = original.unwrap();
+    let (status, _) = get_refreshed_puzzle(&app, &key, original.challenge_id).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The cited challenge is still solvable.
+    assert!(solve_and_verify_now(&app, &site, &original).await);
 }

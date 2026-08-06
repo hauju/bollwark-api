@@ -971,8 +971,13 @@
       throw lastErr;
     }
 
-    async _fetchPuzzle() {
-      const url = `${this.serverUrl}/v1/puzzle?site_key=${this.siteKey}`;
+    // `refreshOf` names the challenge this fetch replaces, so the server can
+    // carry the visitor's dwell anchor across a pre-expiry refresh instead of
+    // restarting their clock. Only sent on refresh — a first fetch has nothing
+    // to cite, and citing a challenge the server can't match is simply ignored.
+    async _fetchPuzzle(refreshOf) {
+      let url = `${this.serverUrl}/v1/puzzle?site_key=${this.siteKey}`;
+      if (refreshOf) url += `&refresh_of=${encodeURIComponent(refreshOf)}`;
       // Cookie-free service — no credentials to send. Omitting them keeps the
       // request non-credentialed so the server's wildcard `Access-Control-
       // Allow-Origin: *` (the default when CORS_ALLOWED_ORIGINS is unset) is
@@ -1049,7 +1054,9 @@
         return;
       }
       try {
-        const puzzle = await this._fetchPuzzle();
+        const puzzle = await this._fetchPuzzle(
+          this.puzzle && this.puzzle.challenge_id
+        );
         this.puzzle = puzzle;
         if (this.state === "verified") {
           // The token in the form references the old, about-to-expire

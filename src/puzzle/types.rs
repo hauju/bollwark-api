@@ -48,6 +48,18 @@ pub struct Challenge {
     pub prefix: String,
     pub difficulty: u32,
     pub created_at: DateTime<Utc>,
+    /// Anchor for the verify-time dwell calculation. Equals `created_at` for a
+    /// first issuance, and is *inherited* when this challenge was minted to
+    /// replace one about to expire (see `refresh_of` on `GET /v1/puzzle`).
+    ///
+    /// Separate from `created_at` because the two answer different questions
+    /// and only one of them may move: `created_at` anchors `expires_at` and
+    /// the decision log, while this anchors "how long has the visitor had this
+    /// form open". Without it, the widget's pre-expiry refresh silently reset
+    /// dwell to zero, so a visitor who spent five minutes on a form and
+    /// submitted just after a background refresh was scored — and logged — as
+    /// having submitted in 400ms.
+    pub dwell_since: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     /// Failed PoW verify attempts against this challenge. A wrong nonce
     /// deliberately leaves the challenge live for retry, so without a cap one

@@ -296,7 +296,34 @@ pub async fn get_puzzle(
     // Build the PoW challenge at the tier's difficulty (every non-Block tier
     // issues a PoW; Block already returned above).
     let difficulty = maybe_difficulty.expect("non-Block tiers must have a difficulty");
-    let challenge = state.engine.generate(params.site_key, difficulty);
+
+    // Carry the dwell anchor across a pre-expiry refresh. The widget cites the
+    // challenge it is replacing; we honour it only after confirming the cited
+    // challenge exists and belongs to *this* site, so the citation is a proof
+    // of possession rather than an assertion. A miss is silently ignored — a
+    // stale or consumed id must degrade to a normal issuance, never to an
+    // error, since the visitor did nothing wrong.
+    //
+    // This grants a backdated anchor only to a client that actually held a
+    // live challenge for that long, which is the same capability as simply
+    // keeping the original challenge to its TTL. It is deliberately not a
+    // client-reported dwell or an "I refreshed" flag: those cost a liar
+    // nothing, and this must not become a way to skip the fast-submit band.
+    // `dwell_since` (not `created_at`) is propagated so a chain of refreshes
+    // keeps pointing at the visitor's original arrival.
+    let inherited_dwell = match params.refresh_of {
+        Some(prior_id) => state
+            .store
+            .get_challenge(&prior_id)
+            .await?
+            .filter(|prior| prior.site_key == params.site_key)
+            .map(|prior| prior.dwell_since),
+        None => None,
+    };
+
+    let challenge = state
+        .engine
+        .generate_with_dwell(params.site_key, difficulty, inherited_dwell);
 
     if let Some(log) = &state.decision_log {
         log.record_puzzle(PuzzleRecord {
@@ -388,11 +415,18 @@ pub async fn verify(
         return Err(CaptchaError::ChallengeExpired);
     }
 
-    // Server-authoritative time-on-page: elapsed since the challenge was
-    // issued (≈ widget mount, or the widget's most recent pre-expiry refresh).
+    // Server-authoritative time-on-page: elapsed since the visitor arrived —
+    // `dwell_since`, which equals `created_at` for a first issuance and is
+    // inherited across the widget's pre-expiry refreshes. Anchoring on
+    // `created_at` instead would restart the clock every refresh, so a
+    // five-minute dwell that happened to submit just after one would score
+    // (and log) as a 400ms submission.
+    //
     // Derived here rather than trusted from the client, so a bot can't claim
     // a longer dwell than actually elapsed to dodge the fast-submit penalty.
-    let time_on_page_ms = (verify_at - challenge.created_at).num_milliseconds().max(0) as u64;
+    let time_on_page_ms = (verify_at - challenge.dwell_since)
+        .num_milliseconds()
+        .max(0) as u64;
 
     // Verify the PoW: check the nonce against the hash target. SHA-256 is a
     // single hash (microseconds), so run it inline. Argon2id is memory-hard

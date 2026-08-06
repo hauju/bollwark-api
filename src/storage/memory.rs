@@ -532,6 +532,7 @@ mod tests {
             prefix: "deadbeef".into(),
             difficulty: 8,
             created_at: now,
+            dwell_since: now,
             expires_at: now + Duration::seconds(ttl_secs),
             attempts: 0,
         }
