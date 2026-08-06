@@ -304,4 +304,35 @@ mod tests {
         assert_eq!(s.decision, VerifyDecision::ShadowFail);
         assert_ne!(s.decision, VerifyDecision::Block);
     }
+
+    /// The second half of the same disparate-impact story. A keyboard user who
+    /// was already typing when a late-loading widget mounted registers an
+    /// instant first interaction — before the gate that was +20 on top of the
+    /// pointer-free +15, i.e. 35, ShadowFail at defaults and a hard block under
+    /// the tightened policy this project documents. Neither term is a
+    /// judgement about what they did, only about how they navigate.
+    #[test]
+    fn keyboard_visitor_typing_at_mount_passes_under_a_tight_policy() {
+        let typing_at_mount = BehaviorReport {
+            mouse_moves: 0,
+            touches: 0,
+            interactions: 8,
+            first_interaction_ms: Some(10),
+            ..Default::default()
+        };
+        let c = VerifyContext {
+            honeypot_tripped: false,
+            time_on_page_ms: Some(1_500),
+            behavior: BehaviorPresence::Present(typing_at_mount),
+        };
+        let tight = VerifyThresholds {
+            shadow_min: 20,
+            block_min: 30,
+        };
+        let s = scorer().score(&c, tight);
+
+        assert_eq!(s.breakdown.behavior, 0, "navigation style is not a penalty");
+        assert_eq!(s.total, 25, "only the short-dwell band should contribute");
+        assert_ne!(s.decision, VerifyDecision::Block);
+    }
 }

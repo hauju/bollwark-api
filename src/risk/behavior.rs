@@ -10,11 +10,14 @@
 //! fetches a puzzle and submits will report a flatline.
 //!
 //! Note what is deliberately *not* inferred: that a real user must have moved
-//! a mouse. Keyboard and screen-reader visitors are pointer-free by
-//! definition, so pointer absence alone is scored only when it comes with
-//! essentially no interaction at all (see `BEHAVIOR_ISOLATED_INTERACTION_MAX`).
-//! Scoring it unconditionally penalised people for how they navigate, which
-//! is both wrong and, for an accessible widget, self-defeating.
+//! a mouse, or must have paused before touching the page. Keyboard and
+//! screen-reader visitors are pointer-free by definition, and anyone already
+//! typing or scrolling when a late-loading widget mounts registers an instant
+//! first interaction. Both signals are therefore scored only alongside an
+//! *isolated* interaction count (`BEHAVIOR_ISOLATED_INTERACTION_MAX`) — the
+//! lone synthetic event they were written to catch. Scoring them
+//! unconditionally penalised people for how they navigate, which is both wrong
+//! and, for a deliberately keyboard-operable widget, self-defeating.
 //!
 //! A sophisticated bot can fake these counters trivially. The point is to
 //! raise the floor — we are not trying to catch determined attackers, we
@@ -85,24 +88,35 @@ pub const BEHAVIOR_FLATLINE_SCORE: u32 = 30;
 // synthesises a `mouseMoved` first — so this targets the cheaper
 // `dispatchEvent` / injected-script tail.)
 pub const BEHAVIOR_NO_POINTER_SCORE: u32 = 15;
-// Interaction count above which "no pointer" stops being evidence of a
-// driver. A visitor navigating by keyboard or screen reader is pointer-free
-// by definition, and previously scored the same as a synthetic click — a
-// penalty for how someone navigates rather than for anything they did. But
-// they cannot reach submit in one event: every Tab, keystroke and scroll is
-// counted in `interactions`, so the minimum real path (Tab, activate, Tab,
-// submit) is already four, and filling any field is dozens. The bot this
-// signal was written for is, by construction, exactly one.
+// Interaction count above which an isolated-burst signal stops being evidence
+// of a driver. Gates both `BEHAVIOR_NO_POINTER_SCORE` and
+// `BEHAVIOR_INSTANT_INTERACTION_SCORE`, because both express the same shape:
+// a lone synthetic event at mount, versus a trail of organic activity.
 //
-// A bot can of course report two interactions instead of one and shed the
-// penalty. That costs it nothing today either — `mouse_moves: 1` already
-// does it — which is the module-level stance above: raise the floor against
-// the cheap tail, don't pretend the counters are unforgeable.
+// A visitor navigating by keyboard or screen reader is pointer-free by
+// definition, and one who was already typing or scrolling when a late-loading
+// widget mounted has a sub-50ms first interaction. Both used to score — a
+// penalty for how someone navigates rather than for anything they did. Neither
+// can reach submit in one event: every Tab, keystroke and scroll is counted in
+// `interactions`, so the minimum real path (Tab, activate, Tab, submit) is
+// already four, and filling any field is dozens. The bot these signals were
+// written for is, by construction, exactly one.
+//
+// A bot can of course report two interactions instead of one and shed both
+// penalties. That costs it nothing today either — `mouse_moves: 1` and
+// `first_interaction_ms: 800` already do it — which is the module-level stance
+// above: raise the floor against the cheap tail, don't pretend the counters
+// are unforgeable.
 pub const BEHAVIOR_ISOLATED_INTERACTION_MAX: u32 = 1;
 // First interaction landing <50ms after the widget mounted is implausibly
-// fast for a deliberate one — a human has not read the form yet. Note this
+// fast for a *deliberate* one — a human has not read the form yet. Note this
 // measures mount → first interaction (see `first_interaction_ms`), not
 // first-interaction → submit.
+//
+// Only scored for an isolated interaction (see above). Note the population
+// this misfired on was never only keyboard users: `mousemove` doesn't set
+// `first_interaction_ms` but `scroll` does, so anyone mid-scroll when the
+// widget mounted was penalised too.
 pub const BEHAVIOR_INSTANT_INTERACTION_MS: u64 = 50;
 pub const BEHAVIOR_INSTANT_INTERACTION_SCORE: u32 = 20;
 // The browser is driven — `navigator.webdriver === true` and/or driver
@@ -124,18 +138,25 @@ pub fn score_behavior(presence: BehaviorPresence) -> u32 {
 
     let no_pointer = b.mouse_moves == 0 && b.touches == 0;
     let no_interaction = b.interactions == 0;
+    // "At most one event happened all session" — the shape both isolated-burst
+    // signals below are actually looking for.
+    let isolated = b.interactions <= BEHAVIOR_ISOLATED_INTERACTION_MAX;
 
     let mut score = 0;
     if no_pointer && no_interaction {
         score += BEHAVIOR_FLATLINE_SCORE;
-    } else if no_pointer && b.interactions <= BEHAVIOR_ISOLATED_INTERACTION_MAX {
+    } else if no_pointer && isolated {
         // Pointer-free *and* barely any interaction at all. Pointer-free with
         // a real interaction trail is a keyboard or screen-reader visitor and
         // scores nothing here — see BEHAVIOR_ISOLATED_INTERACTION_MAX.
         score += BEHAVIOR_NO_POINTER_SCORE;
     }
 
-    if matches!(b.first_interaction_ms, Some(t) if t < BEHAVIOR_INSTANT_INTERACTION_MS) {
+    // Same gate: an instant first interaction is only driver-shaped when it's
+    // the *only* interaction. Someone already typing or scrolling when the
+    // widget mounted trips the timing but has a trail behind it.
+    if isolated && matches!(b.first_interaction_ms, Some(t) if t < BEHAVIOR_INSTANT_INTERACTION_MS)
+    {
         score += BEHAVIOR_INSTANT_INTERACTION_SCORE;
     }
 
@@ -282,6 +303,45 @@ mod tests {
             score_behavior(BehaviorPresence::Present(r)),
             BEHAVIOR_NO_POINTER_SCORE + BEHAVIOR_INSTANT_INTERACTION_SCORE
         );
+    }
+
+    #[test]
+    fn instant_first_interaction_with_organic_trail_scores_zero() {
+        // Already typing when a late-loading widget mounts: the first
+        // interaction lands instantly, but the trail behind it is not
+        // driver-shaped. Pointer-free too, so before the gate this was 35 —
+        // straight into the shadow band, and a block under a tight policy.
+        let r = BehaviorReport {
+            mouse_moves: 0,
+            touches: 0,
+            interactions: 8,
+            first_interaction_ms: Some(10),
+            ..Default::default()
+        };
+        assert_eq!(score_behavior(BehaviorPresence::Present(r)), 0);
+    }
+
+    #[test]
+    fn instant_interaction_penalty_stops_at_the_isolated_boundary() {
+        // Mid-scroll at mount is the non-keyboard version of the same
+        // misfire: `scroll` sets first_interaction_ms, `mousemove` does not.
+        let at_boundary = BehaviorReport {
+            mouse_moves: 5,
+            touches: 0,
+            interactions: BEHAVIOR_ISOLATED_INTERACTION_MAX,
+            first_interaction_ms: Some(10),
+            ..Default::default()
+        };
+        let past_boundary = BehaviorReport {
+            interactions: BEHAVIOR_ISOLATED_INTERACTION_MAX + 1,
+            ..at_boundary
+        };
+        // Pointer present, so this isolates the instant-interaction term.
+        assert_eq!(
+            score_behavior(BehaviorPresence::Present(at_boundary)),
+            BEHAVIOR_INSTANT_INTERACTION_SCORE
+        );
+        assert_eq!(score_behavior(BehaviorPresence::Present(past_boundary)), 0);
     }
 
     #[test]
