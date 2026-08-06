@@ -202,6 +202,14 @@ The widget's appearance follows `data-theme`:
 <div data-sitekey="<SITE_KEY>" data-theme="dark"></div>
 ```
 
+### Accessibility
+
+The widget is operable without a mouse. The checkbox is reachable by <kbd>Tab</kbd> and activated with <kbd>Space</kbd> or <kbd>Enter</kbd>, carries `role="checkbox"` with an `aria-checked` value that tracks verification, and shows a focus outline. State changes ("Solving challenge…", "Verified", "Verification failed") and the block/failover messages are announced through live regions rather than being visual-only, and the widget's container is tagged with the resolved `lang` so translated text is pronounced correctly.
+
+Nothing is required of you to get this — but if you restyle the widget, keep a visible `:focus` indicator on `.rc-captcha-checkbox`. `e2e/tests/a11y.spec.ts` covers the whole keyboard path, including a full form submission with no mouse events at all.
+
+> One thing to know when tuning: the behavioural signal adds **+15** for a submission with no mouse movement and no touches, which describes a keyboard-only visitor as well as a synthetic-click bot. That is below `VERIFY_SHADOW_MIN` on its own, but it does stack with the fast-submit band — so a very tight `verify_block_min` can reject keyboard users that a mouse user would sail past. Worth checking against your own traffic in monitor mode before enforcing an aggressive policy.
+
 ### Language
 
 The widget ships translated. Bundled locales: **en, de, fr, es, it, nl**. English is the fallback, applied per string — a locale that is missing one entry falls back for that entry alone.

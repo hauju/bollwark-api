@@ -378,6 +378,29 @@
       return tk;
     }
 
+    // Pin this site's tier bands so a test gets the tier it is about,
+    // independent of how much traffic earlier tests already sent. The per-IP
+    // rate signal is global and window-based: past ~10 puzzle requests in 60s
+    // from one address it adds +8, which is the whole of the e2e server's
+    // TIER_CHECKBOX_MIN — so without pinning, an unrelated test added anywhere
+    // in the suite silently changes which tier this one sees.
+    //
+    //   ?forceclick=1 → bands start at zero, so every visitor is hard_pow and
+    //     the widget waits for an explicit activation. The only way to reach
+    //     the click/keyboard path: a clean browser scores 0 on its own.
+    //   ?forcepass=1  → bands sit above any reachable score, pinning the site
+    //     to invisible_pass.
+    function sitePolicy() {
+      const q = new URLSearchParams(location.search);
+      if (q.get("forceclick")) {
+        return { tier_checkbox_min: 0, tier_hard_pow_min: 0, tier_block_min: 1 };
+      }
+      if (q.get("forcepass")) {
+        return { tier_checkbox_min: 200, tier_hard_pow_min: 220, tier_block_min: 250 };
+      }
+      return undefined;
+    }
+
     async function autoSetup() {
       const btn = document.getElementById("setup-btn");
       const info = document.getElementById("site-info");
@@ -391,7 +414,7 @@
         let resp = await fetch("/v1/sites", {
           method: "POST",
           headers,
-          body: JSON.stringify({ name: "test-site" }),
+          body: JSON.stringify({ name: "test-site", policy: sitePolicy() }),
         });
         if (resp.status === 401 || resp.status === 404) {
           // Stored token is wrong or rotated — drop it and re-prompt once.
@@ -404,7 +427,7 @@
               "Content-Type": "application/json",
               "Authorization": "Bearer " + token,
             },
-            body: JSON.stringify({ name: "test-site" }),
+            body: JSON.stringify({ name: "test-site", policy: sitePolicy() }),
           });
         }
         if (!resp.ok) throw new Error("Failed: " + resp.status);

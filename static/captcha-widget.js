@@ -676,13 +676,48 @@
       this.row = document.createElement("div");
       this.row.className = "rc-captcha-row";
 
+      // The checkbox is a styled div, not an <input>, so every affordance a
+      // real control gets for free has to be declared. Without these a
+      // keyboard or screen-reader user cannot complete a challenge at all:
+      // the escalated tiers (checkbox / hard_pow) are gated on activating
+      // this element, and a bare div is neither focusable nor announced.
+      //
+      // `tabindex="0"` puts it in the tab order, `role="checkbox"` +
+      // `aria-checked` give it a name/role/value, and the keydown handler
+      // below restores Space/Enter activation.
+      //
+      // The name is a fixed `aria-label` rather than `aria-labelledby` on the
+      // adjacent label, because that label's text tracks the widget state
+      // ("Solving challenge…", "Verified"). An ARIA name states what the
+      // control *asks*; its state belongs in `aria-checked`. Pointing the name
+      // at the state text would report "Verified" as the question.
       this.checkbox = document.createElement("div");
       this.checkbox.className = "rc-captcha-checkbox";
+      this.checkbox.setAttribute("role", "checkbox");
+      this.checkbox.setAttribute("tabindex", "0");
+      this.checkbox.setAttribute("aria-checked", "false");
+      this.checkbox.setAttribute("aria-label", this._t("not_robot"));
       this.checkbox.addEventListener("click", () => this._onCheckboxClick());
+      this.checkbox.addEventListener("keydown", (e) => {
+        // Space is the checkbox activation key; Enter is accepted too because
+        // visitors reach for it and this control is never inside a form's
+        // default-submit path (the widget owns its own container).
+        if (e.key === " " || e.key === "Spacebar" || e.key === "Enter") {
+          // Space would otherwise scroll the page out from under the widget.
+          e.preventDefault();
+          this._onCheckboxClick();
+        }
+      });
 
       this.label = document.createElement("span");
       this.label.className = "rc-captcha-label";
       this.label.textContent = this._t("not_robot");
+      // The label is where the state is written ("Solving challenge…",
+      // "Verified", "Verification failed"), so it's the live region — a
+      // sighted user sees it change, and this is what makes the same
+      // transition audible. A name change on a focused element is announced
+      // inconsistently across screen readers; a live region is not.
+      this.label.setAttribute("aria-live", "polite");
 
       this.row.appendChild(this.checkbox);
       this.row.appendChild(this.label);
@@ -692,6 +727,11 @@
 
       this.statusEl = document.createElement("div");
       this.statusEl.className = "rc-captcha-status";
+      // Announce status changes without stealing focus. This is the only
+      // channel that carries "Verification failed", the block message and the
+      // failover notice — silent, they are visual-only information.
+      this.statusEl.setAttribute("role", "status");
+      this.statusEl.setAttribute("aria-live", "polite");
       this.container.appendChild(this.statusEl);
 
       if (this.debug) {
@@ -796,6 +836,30 @@
       this.label.textContent = labelKeys[this.state]
         ? this._t(labelKeys[this.state])
         : "";
+
+      // Keep the exposed value in step with the paint. The check mark and the
+      // colour change are the sighted user's confirmation; `aria-checked` is
+      // everyone else's, and a stale one would report the wrong answer rather
+      // than merely omit it.
+      this.checkbox.setAttribute(
+        "aria-checked",
+        this.state === "verified" ? "true" : "false"
+      );
+      // The solve can take seconds. `aria-busy` is what tells a screen reader
+      // the control is working rather than simply unresponsive.
+      //
+      // Deliberately NOT `aria-disabled`. Busy is not disabled, and the
+      // verified state is already carried by `aria-checked` plus the announced
+      // "Verified" — adding a disabled state would claim something stronger
+      // than is true (`_onCheckboxClick` is inert in those states, but the
+      // control is still there), and it changes the element's actionability
+      // for anything that reads ARIA, which would be a behaviour change for
+      // existing integrations rather than an accessibility fix.
+      if (this.state === "solving") {
+        this.checkbox.setAttribute("aria-busy", "true");
+      } else {
+        this.checkbox.removeAttribute("aria-busy");
+      }
 
       if (this.state === "idle") {
         this.statusEl.textContent = this._t("click_to_verify");

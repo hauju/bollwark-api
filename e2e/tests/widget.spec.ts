@@ -58,7 +58,11 @@ test("happy path: widget solves PoW and verify returns success=true", async ({
 test("invisible mode: invisible_pass tier renders no visible UI but verifies", async ({
   page,
 }) => {
-  await page.goto("/static/testsite.html?invisible=1");
+  // `forcepass=1` pins this site to invisible_pass. Without it the test
+  // depends on the suite's cumulative per-IP rate staying low enough that a
+  // clean visitor still scores below TIER_CHECKBOX_MIN — which any test added
+  // earlier in the run can break.
+  await page.goto("/static/testsite.html?invisible=1&forcepass=1");
   await page.click("#setup-btn");
   await expect(page.locator("#setup-btn")).toHaveText("Site Created", {
     timeout: 30_000,

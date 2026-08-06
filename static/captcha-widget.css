@@ -92,6 +92,26 @@
   border-color: var(--rc-accent);
 }
 
+/* The checkbox is keyboard-operable, so it needs a visible focus indicator.
+   Drawn as an offset outline rather than a border change because the
+   verified/failed states already own the border colour — an outline can't be
+   swallowed by them.
+
+   The `:focus` rule is the one that guarantees an indicator; the
+   `:not(:focus-visible)` rule then withdraws it for pointer users, who would
+   otherwise get a ring on every click. Browsers too old for `:focus-visible`
+   fail to parse that second selector and skip it, so they keep the outline
+   always — the degraded behaviour is "focus is always visible", which is the
+   safe direction for the requirement this exists to meet. */
+.rc-captcha-checkbox:focus {
+  outline: 2px solid var(--rc-accent);
+  outline-offset: 2px;
+}
+
+.rc-captcha-checkbox:focus:not(:focus-visible) {
+  outline: none;
+}
+
 .rc-captcha-checkbox.verified {
   background: #00a651;
   border-color: #00a651;
