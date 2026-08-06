@@ -7,6 +7,13 @@
   <link rel="icon" type="image/svg+xml" href="/static/logo.svg">
   <!-- No stylesheet link on purpose: /v1/widget.js injects it from the
        versioned bundle, and this harness is what proves that path works. -->
+  <!-- `?lang=xx` retags the document so the widget's locale resolution can be
+       exercised end-to-end. Must run before /v1/widget.js, which reads
+       `<html lang>` when it mounts. -->
+  <script>
+    const langParam = new URLSearchParams(location.search).get("lang");
+    if (langParam) document.documentElement.lang = langParam;
+  </script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {

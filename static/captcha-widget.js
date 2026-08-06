@@ -66,6 +66,135 @@
     return "/static";
   }
 
+  // ── Translations ──
+  //
+  // Bundled rather than served, so a translated widget costs no extra request
+  // and no operator configuration — the strings ship with the script and are
+  // version-locked to it by the content-addressed bundle (see api/assets.rs).
+  //
+  // `en` is the reference and the only complete-by-definition locale: `t()`
+  // falls back per *key*, so a locale may omit any string and still render,
+  // and adding a language is a dict entry with no other code change.
+  //
+  // Not translated on purpose: the brand name, and the `data-debug` panel
+  // (Tier / Difficulty / PoW hashes / PoW time), which is a developer tool.
+  //
+  // TRANSLATION STATUS: `de` is maintained by the project; `fr`/`es`/`it`/`nl`
+  // follow the conventional phrasing established by other CAPTCHA widgets but
+  // have not had a native review. Corrections welcome — one dict entry each.
+  const TRANSLATIONS = {
+    en: {
+      not_robot: "I'm not a robot",
+      solving: "Solving challenge…",
+      verified: "Verified",
+      failed: "Verification failed",
+      click_to_verify: "Click to verify",
+      unavailable: "Verification unavailable",
+      unavailable_continuing: "Verification unavailable — continuing",
+      no_puzzle: "Error: no puzzle available",
+      error_prefix: "Error: ",
+      privacy: "Privacy",
+      terms: "Terms",
+    },
+    de: {
+      not_robot: "Ich bin kein Roboter",
+      solving: "Prüfung läuft…",
+      verified: "Bestätigt",
+      failed: "Überprüfung fehlgeschlagen",
+      click_to_verify: "Zum Bestätigen klicken",
+      unavailable: "Überprüfung nicht verfügbar",
+      unavailable_continuing: "Überprüfung nicht verfügbar — wird fortgesetzt",
+      no_puzzle: "Fehler: keine Aufgabe verfügbar",
+      error_prefix: "Fehler: ",
+      privacy: "Datenschutz",
+      terms: "AGB",
+    },
+    fr: {
+      not_robot: "Je ne suis pas un robot",
+      solving: "Vérification en cours…",
+      verified: "Vérifié",
+      failed: "Échec de la vérification",
+      click_to_verify: "Cliquez pour vérifier",
+      unavailable: "Vérification indisponible",
+      unavailable_continuing: "Vérification indisponible — poursuite",
+      no_puzzle: "Erreur : aucune énigme disponible",
+      error_prefix: "Erreur : ",
+      privacy: "Confidentialité",
+      terms: "Conditions",
+    },
+    es: {
+      not_robot: "No soy un robot",
+      solving: "Verificando…",
+      verified: "Verificado",
+      failed: "Error de verificación",
+      click_to_verify: "Haz clic para verificar",
+      unavailable: "Verificación no disponible",
+      unavailable_continuing: "Verificación no disponible — continuando",
+      no_puzzle: "Error: no hay ningún desafío disponible",
+      error_prefix: "Error: ",
+      privacy: "Privacidad",
+      terms: "Términos",
+    },
+    it: {
+      not_robot: "Non sono un robot",
+      solving: "Verifica in corso…",
+      verified: "Verificato",
+      failed: "Verifica non riuscita",
+      click_to_verify: "Fai clic per verificare",
+      unavailable: "Verifica non disponibile",
+      unavailable_continuing: "Verifica non disponibile — si prosegue",
+      no_puzzle: "Errore: nessuna sfida disponibile",
+      error_prefix: "Errore: ",
+      privacy: "Privacy",
+      terms: "Termini",
+    },
+    nl: {
+      not_robot: "Ik ben geen robot",
+      solving: "Bezig met verifiëren…",
+      verified: "Geverifieerd",
+      failed: "Verificatie mislukt",
+      click_to_verify: "Klik om te verifiëren",
+      unavailable: "Verificatie niet beschikbaar",
+      unavailable_continuing: "Verificatie niet beschikbaar — doorgaan",
+      no_puzzle: "Fout: geen puzzel beschikbaar",
+      error_prefix: "Fout: ",
+      privacy: "Privacy",
+      terms: "Voorwaarden",
+    },
+  };
+
+  const DEFAULT_LOCALE = "en";
+
+  // Pick the locale for one widget, most explicit source first:
+  //
+  //   1. `data-lang` — the embedder said so outright. Also the only way to
+  //      pin a locale that differs from the document's.
+  //   2. `<html lang>` — the page already declares what language it is in,
+  //      and a widget sitting inside a German form should read German even
+  //      for a visitor whose browser is set to English. Preferring this over
+  //      `navigator.language` is deliberate: matching the surrounding form
+  //      beats matching the browser chrome.
+  //   3. `navigator.language` — the visitor's own preference, for pages that
+  //      never declared one.
+  //
+  // Each candidate is tried as-is (`pt-br`) then as its primary subtag
+  // (`pt`), so a regional tag still resolves to a base translation, and an
+  // unknown tag falls through to the next source rather than to English —
+  // `<html lang="x-klingon">` shouldn't override a usable browser locale.
+  function resolveLocale(explicit) {
+    const docLang =
+      document.documentElement && document.documentElement.getAttribute("lang");
+    const candidates = [explicit, docLang, navigator.language];
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      const tag = String(candidate).trim().toLowerCase();
+      if (TRANSLATIONS[tag]) return tag;
+      const primary = tag.split(/[-_]/)[0];
+      if (TRANSLATIONS[primary]) return primary;
+    }
+    return DEFAULT_LOCALE;
+  }
+
   function isCrossOrigin(url) {
     try {
       return new URL(url, window.location.href).origin !== window.location.origin;
@@ -212,6 +341,10 @@
       this.theme = options.theme === "light" || options.theme === "dark"
         ? options.theme
         : "auto";
+      // Resolved once at construction: the surrounding page's language does
+      // not change under a mounted widget, and re-resolving per render would
+      // let a late `<html lang>` swap re-label a widget mid-verification.
+      this.locale = resolveLocale(options.lang);
       this.onVerify = options.onVerify || null;
 
       this.state = "idle";
@@ -356,7 +489,7 @@
         // URLs even when rejecting — surface them now so the brand corner
         // points at the right Privacy/Terms even in block-tier.
         if (err.infoUrls) this._applyInfoUrls(err.infoUrls);
-        this._renderBlocked(blocked ? "Verification unavailable" : err.message);
+        this._renderBlocked(blocked ? this._t("unavailable") : err.message);
       }
     }
 
@@ -395,7 +528,7 @@
         this._promoteToInteractiveUI();
         this._renderForTier();
         if (this.statusEl) {
-          this.statusEl.textContent = "Verification unavailable — continuing";
+          this.statusEl.textContent = this._t("unavailable_continuing");
         }
       }
 
@@ -464,6 +597,14 @@
       }
     }
 
+    // Look up a UI string in this widget's locale, falling back to English
+    // per key so a partially-translated locale renders rather than showing
+    // blanks for whatever it hasn't covered.
+    _t(key) {
+      const table = TRANSLATIONS[this.locale];
+      return (table && table[key]) || TRANSLATIONS[DEFAULT_LOCALE][key] || "";
+    }
+
     // ── UI Rendering ──
 
     // Honeypot + (optionally) the visible UI. In invisible mode the visible
@@ -527,6 +668,10 @@
 
       this.container.classList.add("rc-captcha");
       this.container.setAttribute("data-rc-theme", this.theme);
+      // Tell assistive tech which language the chrome below is in — without
+      // it a screen reader pronounces "Ich bin kein Roboter" with the
+      // document's voice, which is the whole point of translating it.
+      this.container.setAttribute("lang", this.locale);
 
       this.row = document.createElement("div");
       this.row.className = "rc-captcha-row";
@@ -537,7 +682,7 @@
 
       this.label = document.createElement("span");
       this.label.className = "rc-captcha-label";
-      this.label.textContent = "I'm not a robot";
+      this.label.textContent = this._t("not_robot");
 
       this.row.appendChild(this.checkbox);
       this.row.appendChild(this.label);
@@ -580,8 +725,8 @@
       const brandLinks = document.createElement("span");
       brandLinks.className = "rc-captcha-brand-links";
       [
-        ["Privacy", "/static/privacy.html", "privacy"],
-        ["Terms", "/static/terms.html", "terms"],
+        [this._t("privacy"), "/static/privacy.html", "privacy"],
+        [this._t("terms"), "/static/terms.html", "terms"],
       ].forEach(([text, path, key], i) => {
         if (i > 0) brandLinks.appendChild(document.createTextNode(" · "));
         const a = document.createElement("a");
@@ -642,16 +787,18 @@
       else if (this.state === "failed") this.checkbox.classList.add("failed");
       else if (this.state === "solving") this.checkbox.classList.add("solving");
 
-      const labels = {
-        idle: "I'm not a robot",
-        solving: "Solving challenge...",
-        verified: "Verified",
-        failed: "Verification failed",
+      const labelKeys = {
+        idle: "not_robot",
+        solving: "solving",
+        verified: "verified",
+        failed: "failed",
       };
-      this.label.textContent = labels[this.state] || "";
+      this.label.textContent = labelKeys[this.state]
+        ? this._t(labelKeys[this.state])
+        : "";
 
       if (this.state === "idle") {
-        this.statusEl.textContent = "Click to verify";
+        this.statusEl.textContent = this._t("click_to_verify");
       } else if (this.state === "solving") {
         this.statusEl.textContent = "";
       } else {
@@ -688,7 +835,7 @@
 
     async _runVerify() {
       if (!this.puzzle) {
-        if (this.statusEl) this.statusEl.textContent = "Error: no puzzle available";
+        if (this.statusEl) this.statusEl.textContent = this._t("no_puzzle");
         return;
       }
       try {
@@ -713,7 +860,9 @@
       } catch (err) {
         console.error("Bollwark error:", err);
         this.state = "failed";
-        if (this.statusEl) this.statusEl.textContent = "Error: " + err.message;
+        if (this.statusEl) {
+          this.statusEl.textContent = this._t("error_prefix") + err.message;
+        }
         this._updateUI();
       }
     }
@@ -1054,6 +1203,7 @@
         debug: el.dataset.debug,
         mode: el.dataset.mode,
         theme: el.dataset.theme,
+        lang: el.dataset.lang,
       });
       el.dataset.bollwarkMounted = "1";
       window.Bollwark._instances.push(widget);

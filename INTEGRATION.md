@@ -186,6 +186,28 @@ The widget's appearance follows `data-theme`:
 <div data-sitekey="<SITE_KEY>" data-theme="dark"></div>
 ```
 
+### Language
+
+The widget ships translated. Bundled locales: **en, de, fr, es, it, nl**. English is the fallback, applied per string — a locale that is missing one entry falls back for that entry alone.
+
+The locale is picked from the first source that names a bundled language, most explicit first:
+
+1. **`data-lang`** on the widget container — an explicit override, and the only way to pin a language different from the page's.
+2. **`<html lang>`** — the page already declares what language it's in.
+3. **`navigator.language`** — the visitor's browser preference, for pages that declare no language.
+
+`<html lang>` deliberately outranks the browser: a widget sitting inside a German form should read German even for a visitor whose browser is set to English. Regional tags resolve to their base language (`de-AT` → `de`), and an unrecognised tag falls through to the next source rather than straight to English.
+
+Most integrations need nothing — a page with `<html lang="de">` gets a German widget automatically. Override only when the widget's language should differ from the document's:
+
+```html
+<div data-sitekey="<SITE_KEY>" data-lang="fr"></div>
+```
+
+The widget also sets `lang` on its own container so screen readers pronounce the translated text correctly.
+
+**Adding a language:** the strings live in one `TRANSLATIONS` table at the top of `static/captcha-widget.js` — eleven entries, no build step. `de` is maintained by the project; `fr`/`es`/`it`/`nl` follow the conventional phrasing other CAPTCHA widgets established but have not had a native review, so corrections are welcome. The `data-debug` panel is intentionally English — it's a developer tool.
+
 The widget writes a hidden form field named `captcha-token` whose value is a single **opaque token** (a hex string). It already carries everything `/v1/verify` needs — the challenge id, the PoW nonce, the honeypot, and behavioural telemetry. Your backend treats it as a black box: read the field and forward it verbatim. There is nothing to parse.
 
 ```
