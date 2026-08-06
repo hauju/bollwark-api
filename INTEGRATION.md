@@ -109,6 +109,22 @@ with `PUT /v1/admin/sites/{site_key}/policy` — the body replaces the stored
 policy wholesale, so `{}` clears every override. See **Per-site policy** in
 `CONFIGURATION.md` for the full field list and the validation rules.
 
+### Optional: start in monitor mode
+
+If you're putting this in front of an existing form and want to see what it
+would do before it does it, register the site with `"mode": "monitor"`. Every
+verdict is scored and logged as usual, but no visitor is ever refused — a
+Block-tier request gets a max-difficulty puzzle instead of a `429`, and a
+verify-time block returns `success: true`.
+
+```bash
+-d '{"name":"contact-form","policy":{"mode":"monitor"}}'
+```
+
+Watch `GET /v1/admin/stats` (`outcomes.verify_monitored`) for a week, then
+`PUT .../policy` with `{"mode":"enforce"}`. The scoring is identical in both
+modes, so nothing about the numbers changes when you flip it.
+
 ## 3. Embed the Widget
 
 Add the widget container and one script tag to the form you want to protect.

@@ -149,6 +149,30 @@ pub async fn get_puzzle(
         score.tier
     };
 
+    // Monitor mode: record the risk verdict, don't act on it. Only a Block
+    // that came from *scoring* is downgraded — the two load sheds above are
+    // deliberately excluded, because they protect the whole instance rather
+    // than judge this visitor, and a monitored tenant that could exhaust the
+    // challenge map would take every other site down with it.
+    //
+    // The downgrade target is HardPow rather than the raw score tier: the
+    // visitor still gets through, at the most expensive puzzle we issue. So a
+    // monitored site is not unprotected, it just never hands out a hard no.
+    //
+    // `tier` below stays the *risk verdict* so the dashboard's tier breakdown
+    // answers "how many would I have blocked?" — which is the entire reason to
+    // run in this mode. The `monitored` flag on the record is what says the
+    // verdict wasn't acted on.
+    let monitored_block = policy.mode.is_monitor()
+        && tier == EscalationTier::Block
+        && !over_capacity
+        && !shed_flooder;
+    let enforced_tier = if monitored_block {
+        EscalationTier::HardPow
+    } else {
+        tier
+    };
+
     // Aggregate site-load floor: when the whole site is under load, raise PoW
     // difficulty for every visitor regardless of their individual risk score.
     // It composes with the per-request tier via max() and never blocks — Block
@@ -159,17 +183,24 @@ pub async fn get_puzzle(
     // Block is the only tier that doesn't issue a PoW puzzle (it rejects with
     // 429 below). Every other tier maps to a difficulty here; a hard-capped IP
     // is floored to MAX so the throttle bites without blocking.
-    let maybe_difficulty = difficulty_for(tier, policy.default_difficulty, policy.max_difficulty)
-        .map(|d| {
-            let floored = d.max(load_floor);
-            let floored = if hard_capped {
-                floored.max(policy.max_difficulty)
-            } else {
-                floored
-            };
-            floored.min(policy.max_difficulty)
-        });
-    let outcome = match tier {
+    let maybe_difficulty = difficulty_for(
+        enforced_tier,
+        policy.default_difficulty,
+        policy.max_difficulty,
+    )
+    .map(|d| {
+        let floored = d.max(load_floor);
+        // A monitored Block gets the same max-difficulty floor as a hard-capped
+        // IP: it's the strongest response available that still lets the visitor
+        // through, which is what "observe, don't refuse" has to mean here.
+        let floored = if hard_capped || monitored_block {
+            floored.max(policy.max_difficulty)
+        } else {
+            floored
+        };
+        floored.min(policy.max_difficulty)
+    });
+    let outcome = match enforced_tier {
         EscalationTier::Block => "rejected",
         _ => "issued",
     };
@@ -205,6 +236,9 @@ pub async fn get_puzzle(
         shed_flooder,
         difficulty = maybe_difficulty.unwrap_or(0),
         load_floor,
+        // True when `tier` below says Block but we issued anyway. Without it
+        // a monitored site's log reads as a contradiction.
+        monitored = monitored_block,
         // Whether this site's own policy (rather than the process config)
         // produced the bands above. Without it, a tier that looks wrong against
         // the documented env defaults is indistinguishable from a bug.
@@ -229,10 +263,11 @@ pub async fn get_puzzle(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    if tier == EscalationTier::Block {
+    if enforced_tier == EscalationTier::Block {
         if let Some(log) = &state.decision_log {
             log.record_puzzle(PuzzleRecord {
                 challenge_id: None,
+                monitored: false,
                 site_key: params.site_key,
                 ip: logged_ip,
                 ip_count,
@@ -266,6 +301,7 @@ pub async fn get_puzzle(
     if let Some(log) = &state.decision_log {
         log.record_puzzle(PuzzleRecord {
             challenge_id: Some(challenge.id),
+            monitored: monitored_block,
             site_key: params.site_key,
             ip: logged_ip,
             ip_count,
@@ -288,7 +324,7 @@ pub async fn get_puzzle(
         difficulty: challenge.difficulty,
         expires_at: challenge.expires_at.to_rfc3339(),
         expires_in_secs: state.config.challenge_ttl_secs,
-        tier,
+        tier: enforced_tier,
         info_urls: state.info_urls.clone(),
     };
 
@@ -422,6 +458,7 @@ pub async fn verify(
                 challenge_id: challenge.id,
                 success: false,
                 outcome: invalid_outcome,
+                monitored: false,
                 score: 0,
                 breakdown: Default::default(),
                 time_on_page_ms: Some(time_on_page_ms),
@@ -451,10 +488,17 @@ pub async fn verify(
     };
     let vscore = state.verify_scorer.score(&vctx, policy.verify);
 
+    // Monitor mode turns the refusal off, not the verdict: `outcome` stays
+    // "block" so the dashboard keeps counting what would have been blocked,
+    // and `success` disagreeing with it is precisely the signal — the pair
+    // reads as "this one would have been refused, and wasn't". An invalid
+    // proof of work is untouched (handled above and already returned): that's
+    // a failed proof, not a judgement about the visitor.
+    let monitored = policy.mode.is_monitor() && vscore.decision == VerifyDecision::Block;
     let (success, outcome) = match vscore.decision {
         VerifyDecision::Pass => (true, "pass"),
         VerifyDecision::ShadowFail => (true, "shadow_fail"),
-        VerifyDecision::Block => (false, "block"),
+        VerifyDecision::Block => (monitored, "block"),
     };
 
     // Surface the raw environment probes for log analysis: the aggregate
@@ -487,12 +531,15 @@ pub async fn verify(
                 automation = automation_flag,
                 headless = headless_flag,
                 time_on_page_ms = time_on_page_ms,
+                monitored = monitored,
                 "Verify decision"
             )
         };
     }
     match vscore.decision {
-        VerifyDecision::ShadowFail => emit_decision!(tracing::Level::WARN),
+        VerifyDecision::ShadowFail | VerifyDecision::Block => {
+            emit_decision!(tracing::Level::WARN)
+        }
         _ => emit_decision!(tracing::Level::INFO),
     }
 
@@ -501,6 +548,7 @@ pub async fn verify(
             challenge_id: challenge.id,
             success,
             outcome,
+            monitored,
             score: vscore.total,
             breakdown: vscore.breakdown,
             time_on_page_ms: Some(time_on_page_ms),
@@ -554,11 +602,16 @@ fn verify_failover(
     };
     let vscore = state.verify_scorer.score(&vctx, policy.verify);
 
+    let monitored = policy.mode.is_monitor();
     let (success, outcome) = match (verdict.accepted(), vscore.decision) {
+        // Not attested, or over the per-site cap. Monitor mode does not reach
+        // this arm: refusing an unattested claim is not a risk verdict about
+        // the visitor, it's "you asserted an outage that never happened".
         (false, _) => (false, verdict.outcome()),
         // Attested, but the client looks automated. Refuse — an outage is not
-        // a reason to stop reading the evidence we still have.
-        (true, VerifyDecision::Block) => (false, "failover_behavior_block"),
+        // a reason to stop reading the evidence we still have. This *is* a
+        // risk verdict, so a monitored site records it and lets it through.
+        (true, VerifyDecision::Block) => (monitored, "failover_behavior_block"),
         (true, _) => (true, verdict.outcome()),
     };
 
@@ -576,6 +629,7 @@ fn verify_failover(
         sig_honeypot = vscore.breakdown.honeypot,
         sig_behavior = vscore.breakdown.behavior,
         issued_at_ms = claim.issued_at_ms,
+        monitored = monitored,
         "Failover claim decision"
     );
 

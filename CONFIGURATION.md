@@ -309,6 +309,7 @@ A **site policy** overrides those globals for one site. Every field is optional 
 | `verify_block_min` | `VERIFY_BLOCK_MIN` |
 | `default_difficulty` | `DEFAULT_DIFFICULTY` |
 | `max_difficulty` | `MAX_DIFFICULTY` |
+| `mode` | *(no env equivalent)* — `"enforce"` (default) or `"monitor"`, see below |
 
 Set it at provisioning time:
 
@@ -349,6 +350,42 @@ The body **replaces** the stored policy rather than merging into it, so `{}` cle
 This mirrors the fail-loud stance `AppConfig::validated` takes for the global equivalents — a write-time `400` is the closest thing to a boot panic for something that arrives over HTTP.
 
 `GET /v1/admin/sites` returns each site's policy, and the `puzzle_decision` log line carries `site_policy=true|false` so a tier that looks wrong against the documented defaults is distinguishable from a bug.
+
+### Monitor mode
+
+Pointing a live form at a new CAPTCHA is a leap of faith. `"mode": "monitor"` makes it not one: the full pipeline runs against real traffic and every verdict is scored and logged exactly as it would be when enforcing — but no visitor is ever refused. Run a site there for a week, read what it *would* have blocked, then flip to `"enforce"`. No arithmetic changes when you do, so the numbers you saw are the numbers you get.
+
+```bash
+curl -X PUT http://localhost:3000/v1/admin/sites/$SITE_KEY/policy \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "monitor"}'
+```
+
+What changes while monitoring:
+
+| Situation | Enforcing | Monitoring |
+|---|---|---|
+| Puzzle-time `Block` tier | `429` | Puzzle issued at `max_difficulty` |
+| Verify-time `Block` decision | `{"success": false}` | `{"success": true}` |
+| Attested-outage failover claim refused on behaviour | `{"success": false}` | `{"success": true}` |
+
+What does **not** change — monitor mode is scoped to *risk verdicts about a visitor*, and these are not that:
+
+- **The load sheds.** `MAX_ACTIVE_CHALLENGES` and the flooder shed protect the whole instance, not one visitor. A monitored tenant still gets `429` when the challenge map is full, or one customer parked in observe mode could exhaust memory for every other site on the box.
+- **An invalid proof of work.** A wrong nonce is a failed proof, not a judgement.
+- **An unattested failover claim.** Refusing it means "you asserted an outage that didn't happen", which isn't a risk score.
+- **The origin allowlist.** That's configuration the operator set deliberately.
+
+**Reading the results.** Blocks that were observed rather than enforced stay in the ordinary `block` / `rejected` counts, so the dashboard keeps answering "what would I block?" without you having to look anywhere new. What marks them is a separate `monitored` flag:
+
+- `GET /v1/admin/stats` → `outcomes.puzzle_monitored` / `outcomes.verify_monitored`. Subtract these to get what was actually refused.
+- `GET /v1/admin/sessions` → `monitored` on the session and on its `verify` section; the dashboard renders a `monitor` pill beside the tier and outcome.
+- `puzzle_decision` / `verify_decision` log lines carry `monitored=true`.
+
+A monitored verify row is the one place `outcome` and `success` disagree on purpose: `outcome: "block"` with `success: true` reads as *this one would have been refused, and wasn't*.
+
+> Monitor mode is not "off". A Block-tier visitor still has to solve a max-difficulty proof of work — the strongest response available that doesn't refuse anyone. A monitored site is weakened, not unprotected.
 
 ---
 

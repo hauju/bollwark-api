@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS puzzle_decisions (
     tier            TEXT    NOT NULL,
     difficulty      INTEGER NOT NULL,
     outcome         TEXT    NOT NULL,
+    monitored       INTEGER NOT NULL DEFAULT 0,
     sig_rate              INTEGER NOT NULL,
     sig_header_anomaly    INTEGER NOT NULL,
     sig_ip_reputation     INTEGER NOT NULL,
@@ -67,7 +68,8 @@ CREATE TABLE IF NOT EXISTS verify_decisions (
     sig_time_on_page   INTEGER NOT NULL,
     sig_behavior       INTEGER NOT NULL,
     time_on_page_ms INTEGER,
-    webdriver       TEXT    NOT NULL
+    webdriver       TEXT    NOT NULL,
+    monitored       INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_verify_challenge ON verify_decisions(challenge_id);
 CREATE INDEX IF NOT EXISTS idx_verify_ts ON verify_decisions(ts DESC);
@@ -102,6 +104,10 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE verify_decisions DROP COLUMN outcome_minimal",
     "ALTER TABLE puzzle_decisions ADD COLUMN ip_reputation_category TEXT",
     "ALTER TABLE puzzle_decisions ADD COLUMN country TEXT",
+    // Monitor mode: the row's verdict was recorded but not enforced. Defaults
+    // to 0 so every pre-existing row reads as enforced, which it was.
+    "ALTER TABLE puzzle_decisions ADD COLUMN monitored INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE verify_decisions ADD COLUMN monitored INTEGER NOT NULL DEFAULT 0",
 ];
 
 enum Msg {
@@ -412,14 +418,14 @@ fn insert_puzzle(
     conn.execute(
         "INSERT INTO puzzle_decisions (
             ts, challenge_id, site_key, ip, ip_count, site_count,
-            score, tier, difficulty, outcome,
+            score, tier, difficulty, outcome, monitored,
             sig_rate, sig_header_anomaly, sig_ip_reputation, sig_tls_fingerprint,
             ip_reputation_category, tls_fingerprint, user_agent, country
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6,
-            ?7, ?8, ?9, ?10,
-            ?11, ?12, ?13, ?14,
-            ?15, ?16, ?17, ?18
+            ?7, ?8, ?9, ?10, ?11,
+            ?12, ?13, ?14, ?15,
+            ?16, ?17, ?18, ?19
          )",
         params![
             ts,
@@ -432,6 +438,7 @@ fn insert_puzzle(
             tier,
             r.difficulty,
             r.outcome,
+            r.monitored as i64,
             r.breakdown.rate,
             r.breakdown.header_anomaly,
             r.breakdown.ip_reputation,
@@ -451,11 +458,11 @@ fn insert_verify(conn: &Connection, r: &VerifyRecord) -> rusqlite::Result<()> {
         "INSERT INTO verify_decisions (
             ts, challenge_id, success, outcome, score,
             sig_honeypot, sig_time_on_page, sig_behavior,
-            time_on_page_ms, webdriver
+            time_on_page_ms, webdriver, monitored
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5,
             ?6, ?7, ?8,
-            ?9, ?10
+            ?9, ?10, ?11
          )",
         params![
             ts,
@@ -468,6 +475,7 @@ fn insert_verify(conn: &Connection, r: &VerifyRecord) -> rusqlite::Result<()> {
             r.breakdown.behavior,
             r.time_on_page_ms.map(|v| v as i64),
             r.webdriver,
+            r.monitored as i64,
         ],
     )?;
     Ok(())
@@ -538,6 +546,7 @@ mod tests {
         let log = DecisionLog::open(&path, None).unwrap();
         log.record_puzzle(PuzzleRecord {
             challenge_id: Some(uuid::Uuid::new_v4()),
+            monitored: false,
             site_key: uuid::Uuid::new_v4(),
             ip: "1.2.3.0".into(),
             ip_count: 1,

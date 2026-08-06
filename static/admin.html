@@ -336,6 +336,12 @@ function probabilityClass(p) {
   if (p >= 30) return 'warn';
   return 'good';
 }
+// A monitored verdict was computed but not enforced. Rendering it with the
+// same red pill as an enforced block would make monitor mode unreadable —
+// the operator's whole question is "which of these actually refused someone?"
+function monitoredPill(on) {
+  return on ? h('span', { class: 'pill warn', title: 'recorded, not enforced' }, 'monitor') : null;
+}
 function outcomeClass(o) {
   if (o === 'pass' || o === 'issued') return 'good';
   if (o === 'shadow_fail') return 'warn';
@@ -544,10 +550,11 @@ function renderApp(token) {
           h('span', { class: 'bar' }, h('div', { class: pCls, style: `width:${p}%` })),
           `${p}%`,
         ),
-        h('td', {}, h('span', { class: `pill ${pCls}` }, s.tier)),
+        h('td', {}, h('span', { class: `pill ${pCls}` }, s.tier), monitoredPill(s.monitored)),
         h('td', {}, h('span', { class: `pill ${outcomeClass(s.puzzle_outcome)}` }, s.puzzle_outcome)),
         h('td', {}, s.verify
-          ? h('span', { class: `pill ${outcomeClass(s.verify.outcome)}` }, s.verify.outcome)
+          ? [h('span', { class: `pill ${outcomeClass(s.verify.outcome)}` }, s.verify.outcome),
+             monitoredPill(s.verify.monitored)]
           : h('span', { class: 'pill' }, '—')),
         h('td', { class: 'mono' }, String(s.puzzle_score)),
         h('td', { class: 'mono' }, s.verify ? String(s.verify.score) : '—'),

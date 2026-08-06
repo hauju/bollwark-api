@@ -130,7 +130,8 @@ const LIST_SQL: &str = "SELECT
     p.sig_rate, p.sig_header_anomaly, p.sig_ip_reputation, p.sig_tls_fingerprint,
     v.ts, v.outcome, v.success, v.score,
     v.sig_honeypot, v.sig_time_on_page, v.sig_behavior,
-    v.time_on_page_ms, v.webdriver
+    v.time_on_page_ms, v.webdriver,
+    p.monitored, v.monitored
 FROM puzzle_decisions p
 LEFT JOIN verify_decisions v ON v.challenge_id = p.challenge_id
 ORDER BY p.id DESC
@@ -143,7 +144,8 @@ const GET_SQL: &str = "SELECT
     p.sig_rate, p.sig_header_anomaly, p.sig_ip_reputation, p.sig_tls_fingerprint,
     v.ts, v.outcome, v.success, v.score,
     v.sig_honeypot, v.sig_time_on_page, v.sig_behavior,
-    v.time_on_page_ms, v.webdriver
+    v.time_on_page_ms, v.webdriver,
+    p.monitored, v.monitored
 FROM puzzle_decisions p
 LEFT JOIN verify_decisions v ON v.challenge_id = p.challenge_id
 WHERE p.id = ?1";
@@ -182,10 +184,12 @@ fn row_to_session(row: &Row<'_>) -> rusqlite::Result<Session> {
         };
         let time_on_page_ms: Option<i64> = row.get(24)?;
         let webdriver: String = row.get(25)?;
+        let v_monitored: i64 = row.get(27).unwrap_or(0);
         Some(VerifySection {
             ts,
             outcome,
             success: success != 0,
+            monitored: v_monitored != 0,
             score,
             time_on_page_ms: time_on_page_ms.map(|v| v as u64),
             webdriver,
@@ -195,6 +199,7 @@ fn row_to_session(row: &Row<'_>) -> rusqlite::Result<Session> {
         None
     };
 
+    let monitored: i64 = row.get(26)?;
     let bot_probability = bot_probability(puzzle_score, verify.as_ref().map(|v| v.score));
 
     Ok(Session {
@@ -211,6 +216,7 @@ fn row_to_session(row: &Row<'_>) -> rusqlite::Result<Session> {
         ip_count,
         site_count,
         tls_fingerprint,
+        monitored: monitored != 0,
         puzzle_breakdown: breakdown,
         verify,
         bot_probability,
@@ -258,7 +264,9 @@ fn stats_blocking(conn: &Connection) -> rusqlite::Result<Stats> {
             SUM(CASE WHEN p.tier = 'InvisiblePass'    THEN 1 ELSE 0 END),
             SUM(CASE WHEN p.tier = 'Checkbox'         THEN 1 ELSE 0 END),
             SUM(CASE WHEN p.tier = 'HardPow'          THEN 1 ELSE 0 END),
-            SUM(CASE WHEN p.tier = 'Block'            THEN 1 ELSE 0 END)
+            SUM(CASE WHEN p.tier = 'Block'            THEN 1 ELSE 0 END),
+            SUM(CASE WHEN p.monitored = 1 THEN 1 ELSE 0 END),
+            SUM(CASE WHEN v.monitored = 1 THEN 1 ELSE 0 END)
          FROM puzzle_decisions p
          LEFT JOIN verify_decisions v ON v.challenge_id = p.challenge_id",
         [],
@@ -287,6 +295,8 @@ fn stats_blocking(conn: &Connection) -> rusqlite::Result<Stats> {
                     verify_shadow_fail: opt_i64(r, 15)? as u64,
                     verify_block: opt_i64(r, 16)? as u64,
                     verify_pow_invalid: opt_i64(r, 17)? as u64,
+                    puzzle_monitored: opt_i64(r, 22)? as u64,
+                    verify_monitored: opt_i64(r, 23)? as u64,
                 },
                 tiers: TierCounts {
                     invisible_pass: opt_i64(r, 18)? as u64,
@@ -697,6 +707,11 @@ mod tests {
         assert_eq!(stats.tiers.hard_pow, 1);
         assert_eq!(stats.tiers.block, 1);
 
+        // Nothing above was monitored, so both counters read zero — this also
+        // pins indices 22–23, the new tail of the SELECT.
+        assert_eq!(stats.outcomes.puzzle_monitored, 0);
+        assert_eq!(stats.outcomes.verify_monitored, 0);
+
         // Outcomes.
         assert_eq!(stats.outcomes.puzzle_issued, 1);
         assert_eq!(stats.outcomes.puzzle_rejected, 1);
@@ -852,5 +867,49 @@ mod tests {
 
         assert_eq!(f("Mozilla/5.0 Chrome/120.0 Safari/537.36"), None);
         assert_eq!(bot_family(None), None);
+    }
+
+    /// A monitored block must stay counted as a block *and* be identifiable as
+    /// unenforced. Excluding it from the block counts would make monitor mode
+    /// report nothing, which is the only thing it exists to do.
+    #[test]
+    fn monitored_rows_are_counted_as_blocks_and_flagged() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::dashboard::log::SCHEMA).unwrap();
+
+        conn.execute_batch(
+            "INSERT INTO puzzle_decisions
+               (ts, challenge_id, site_key, ip, ip_count, site_count, score, tier, difficulty,
+                outcome, monitored, sig_rate, sig_header_anomaly, sig_ip_reputation,
+                sig_tls_fingerprint, tls_fingerprint, user_agent)
+             VALUES
+               ('2026-01-01T00:00:00Z','c1','s','1.2.3.4',1,1,90,'Block',16,'issued',1,
+                30,30,30,0,'Skipped',NULL);
+             INSERT INTO verify_decisions
+               (ts, challenge_id, success, outcome, score, sig_honeypot, sig_time_on_page,
+                sig_behavior, time_on_page_ms, webdriver, monitored)
+             VALUES
+               ('2026-01-01T00:00:02Z','c1',1,'block',100,100,0,0,5000,'false',1);",
+        )
+        .unwrap();
+
+        let stats = stats_blocking(&conn).unwrap();
+        // The verdict is still visible as a block...
+        assert_eq!(stats.outcomes.verify_block, 1);
+        assert_eq!(stats.tiers.block, 1);
+        // ...and distinguishable from an enforced one.
+        assert_eq!(stats.outcomes.puzzle_monitored, 1);
+        assert_eq!(stats.outcomes.verify_monitored, 1);
+        // The puzzle was issued despite the Block tier — that pairing is the
+        // on-disk signature of a monitored request.
+        assert_eq!(stats.outcomes.puzzle_issued, 1);
+        assert_eq!(stats.outcomes.puzzle_rejected, 0);
+
+        // The session view surfaces both flags for the detail panel.
+        let session = get_blocking(&conn, 1).unwrap().expect("session row");
+        assert!(session.monitored);
+        let verify = session.verify.expect("verify section");
+        assert!(verify.monitored);
+        assert!(verify.success);
     }
 }

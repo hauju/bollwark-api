@@ -2834,3 +2834,163 @@ async fn test_admin_update_policy_takes_effect_immediately() {
     let (status, _) = puzzle_status_and_tier(&app, no_ua_puzzle_request(&key)).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
 }
+
+// --- Monitor mode (SiteMode::Monitor) ---
+
+/// Thresholds low enough that the fixed +30 header anomaly of
+/// `no_ua_puzzle_request` lands in the Block band, so the only variable
+/// between the enforce and monitor cases is the mode.
+fn blocking_policy(mode: Option<&str>) -> serde_json::Value {
+    let mut p = serde_json::json!({
+        "tier_checkbox_min": 5,
+        "tier_hard_pow_min": 10,
+        "tier_block_min": 20,
+    });
+    if let Some(m) = mode {
+        p["mode"] = serde_json::json!(m);
+    }
+    p
+}
+
+#[tokio::test]
+async fn test_monitor_mode_issues_a_puzzle_where_enforce_would_429() {
+    let app = test_app();
+    let enforcing = create_test_site_with_policy(&app, blocking_policy(None)).await;
+    let monitoring = create_test_site_with_policy(&app, blocking_policy(Some("monitor"))).await;
+
+    let (status, _) =
+        puzzle_status_and_tier(&app, no_ua_puzzle_request(&enforcing.site_key.to_string())).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    // Same score, same bands — the monitored site gets a puzzle instead, at
+    // the max difficulty, since "observe don't refuse" still means the
+    // strongest non-blocking response.
+    let (status, puzzle) =
+        puzzle_status_and_tier(&app, no_ua_puzzle_request(&monitoring.site_key.to_string())).await;
+    assert_eq!(status, StatusCode::OK);
+    let puzzle = puzzle.unwrap();
+    assert_eq!(puzzle.difficulty, 16); // the test config's MAX_DIFFICULTY
+    // The client is told what it must actually solve. A `block` tier carrying
+    // a puzzle would be incoherent to the widget.
+    assert_eq!(puzzle.tier, EscalationTier::HardPow);
+}
+
+#[tokio::test]
+async fn test_monitor_mode_passes_a_verify_that_would_block() {
+    let app = test_app();
+    // A tripped honeypot scores +100 — unambiguously past any block threshold.
+    for (mode, expected_success) in [(None, false), (Some("monitor"), true)] {
+        let site = create_test_site_with_policy(
+            &app,
+            match mode {
+                Some(m) => serde_json::json!({ "mode": m }),
+                None => serde_json::json!({}),
+            },
+        )
+        .await;
+        let (_, puzzle) = get_test_puzzle(&app, &site.site_key.to_string()).await;
+        let puzzle = puzzle.unwrap();
+        let nonce = solve_challenge(&puzzle.prefix, puzzle.difficulty);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/verify")
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", site.secret_key))
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "challenge_id": puzzle.challenge_id,
+                    "nonce": nonce,
+                    "honeypot": "spam@example.com",
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let result: VerifyResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            result.success, expected_success,
+            "honeypot under mode {mode:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_monitor_mode_does_not_disable_the_load_shed() {
+    // The safety property: monitoring is scoped to *risk* verdicts. The
+    // challenge-map ceiling protects every other tenant on the instance, so a
+    // monitored site must still be shed when the map is full — otherwise one
+    // customer left in observe mode can exhaust memory for all of them.
+    let app = test_app_with(|b| b.max_active_challenges = Some(1));
+    let site = create_test_site_with_policy(&app, serde_json::json!({ "mode": "monitor" })).await;
+    let key = site.site_key.to_string();
+
+    // First request fills the map to the ceiling.
+    let (status, _) = get_test_puzzle(&app, &key).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Second is over capacity: 429 despite monitor mode, and despite this
+    // request's own score being clean.
+    let (status, _) = get_test_puzzle(&app, &key).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn test_monitor_mode_does_not_excuse_an_invalid_pow() {
+    // A wrong nonce is a failed proof, not a judgement about the visitor —
+    // there is nothing to "observe rather than enforce".
+    let app = test_app();
+    let site = create_test_site_with_policy(&app, serde_json::json!({ "mode": "monitor" })).await;
+    let (_, puzzle) = get_test_puzzle(&app, &site.site_key.to_string()).await;
+    let puzzle = puzzle.unwrap();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/verify")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", site.secret_key))
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "challenge_id": puzzle.challenge_id,
+                "nonce": 1u64, // almost certainly not a solution
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: VerifyResponse = serde_json::from_slice(&bytes).unwrap();
+    assert!(!result.success);
+}
+
+#[tokio::test]
+async fn test_monitor_mode_can_be_toggled_without_rotating_the_secret() {
+    // The onboarding flow: run a live site in observe mode, then enforce.
+    let (app, _store) = test_app_with_store(|b| b.enable_admin = true);
+    let site = create_test_site_with_policy(&app, blocking_policy(Some("monitor"))).await;
+    let key = site.site_key.to_string();
+
+    let (status, _) = puzzle_status_and_tier(&app, no_ua_puzzle_request(&key)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, resp) = admin_req(
+        &app,
+        "PUT",
+        &format!("/v1/admin/sites/{}/policy", site.site_key),
+        Some(TEST_ADMIN_TOKEN),
+        Some(blocking_policy(Some("enforce"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp["policy"]["mode"], "enforce");
+
+    let (status, _) = puzzle_status_and_tier(&app, no_ua_puzzle_request(&key)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}

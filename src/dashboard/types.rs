@@ -9,6 +9,11 @@ use crate::risk::{EscalationTier, SignalBreakdown};
 /// an operator already sees in the JSONL stream.
 #[derive(Debug, Clone)]
 pub struct PuzzleRecord {
+    /// The site is in [`crate::site::types::SiteMode::Monitor`] and this row's
+    /// `tier` is a Block that was *not* enforced — a puzzle was issued anyway.
+    /// Recorded rather than folded into `outcome` so the dashboard's existing
+    /// tier/outcome aggregates keep answering "what would I block?" unchanged.
+    pub monitored: bool,
     pub challenge_id: Option<Uuid>,
     pub site_key: Uuid,
     pub ip: String,
@@ -29,6 +34,9 @@ pub struct PuzzleRecord {
 
 #[derive(Debug, Clone)]
 pub struct VerifyRecord {
+    /// The site is monitoring and this row's `outcome` is a Block that was not
+    /// enforced, so `success` is true despite it. See [`PuzzleRecord`].
+    pub monitored: bool,
     pub challenge_id: Uuid,
     pub success: bool,
     pub outcome: &'static str,
@@ -42,6 +50,10 @@ pub struct VerifyRecord {
 /// fields are populated when the matching `/v1/verify` call has occurred.
 #[derive(Debug, Clone, Serialize)]
 pub struct Session {
+    /// The puzzle-side risk verdict in `tier` was recorded but not enforced —
+    /// the site is in monitor mode and a puzzle was issued anyway.
+    #[serde(default)]
+    pub monitored: bool,
     pub id: i64,
     pub ts: String,
     pub challenge_id: Option<String>,
@@ -72,6 +84,9 @@ pub struct PuzzleBreakdownDto {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct VerifySection {
+    /// `outcome` is a Block that was not enforced, so `success` is true.
+    #[serde(default)]
+    pub monitored: bool,
     pub ts: String,
     pub outcome: String,
     pub success: bool,
@@ -132,6 +147,14 @@ pub struct OutcomeCounts {
     pub verify_shadow_fail: u64,
     pub verify_block: u64,
     pub verify_pow_invalid: u64,
+    /// Of the counts above, how many were *observed rather than enforced*
+    /// because the site is in monitor mode. Split out rather than excluded so
+    /// the block counts keep answering "what would I block?" — subtract these
+    /// to get what was actually refused.
+    #[serde(default)]
+    pub puzzle_monitored: u64,
+    #[serde(default)]
+    pub verify_monitored: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

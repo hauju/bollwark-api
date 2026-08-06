@@ -69,6 +69,44 @@ pub struct SitePolicy {
     /// ceiling.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_difficulty: Option<u32>,
+    /// Whether risk verdicts are acted on. Omitted = [`SiteMode::Enforce`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<SiteMode>,
+}
+
+/// Whether this site's risk verdicts are enforced or merely observed.
+///
+/// `Monitor` exists for onboarding: pointing a real form at a new CAPTCHA is
+/// a leap of faith, and the only honest way to make it isn't one is to run
+/// the full pipeline against live traffic for a week and read what it *would*
+/// have done. Scores, tiers and decisions are computed and logged exactly as
+/// in `Enforce`, so the numbers seen while monitoring are the numbers that
+/// enforcement will produce — flipping the switch changes no arithmetic.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SiteMode {
+    /// Risk verdicts are acted on: Block-tier gets 429, a verify-time Block
+    /// returns `success: false`. The default.
+    #[default]
+    Enforce,
+    /// Risk verdicts are recorded but never refuse a visitor. A Block-tier
+    /// request is issued a max-difficulty puzzle instead of a 429, and a
+    /// verify-time Block returns `success: true`.
+    ///
+    /// Scoped deliberately to *risk* verdicts. It does not disable the load
+    /// sheds (`MAX_ACTIVE_CHALLENGES`, the flooder shed), which protect the
+    /// whole instance rather than judge this visitor — one monitored tenant
+    /// must not be able to exhaust the challenge map for every other site.
+    /// It also doesn't excuse an invalid proof of work or an unattested
+    /// failover claim: neither is a judgement about the visitor's risk, so
+    /// there is nothing there to observe rather than enforce.
+    Monitor,
+}
+
+impl SiteMode {
+    pub fn is_monitor(self) -> bool {
+        matches!(self, Self::Monitor)
+    }
 }
 
 /// A [`SitePolicy`] overlaid on the process config — every knob resolved to a
@@ -80,6 +118,7 @@ pub struct EffectivePolicy {
     pub verify: VerifyThresholds,
     pub default_difficulty: u32,
     pub max_difficulty: u32,
+    pub mode: SiteMode,
 }
 
 impl SitePolicy {
@@ -104,6 +143,9 @@ impl SitePolicy {
             },
             default_difficulty: self.default_difficulty.unwrap_or(config.default_difficulty),
             max_difficulty: self.max_difficulty.unwrap_or(config.max_difficulty),
+            // No env equivalent: enforcing is the only sane process-wide
+            // default, and monitoring is a per-site onboarding state.
+            mode: self.mode.unwrap_or_default(),
         }
     }
 
@@ -461,6 +503,43 @@ mod tests {
         .validate(&cfg())
         .unwrap_err();
         assert!(err.contains("verify_block_min"), "{err}");
+    }
+
+    #[test]
+    fn mode_defaults_to_enforce_and_round_trips() {
+        assert_eq!(
+            SitePolicy::default().resolve(&cfg()).mode,
+            SiteMode::Enforce
+        );
+        assert!(!SitePolicy::default().resolve(&cfg()).mode.is_monitor());
+
+        let p = SitePolicy {
+            mode: Some(SiteMode::Monitor),
+            ..Default::default()
+        };
+        assert!(p.resolve(&cfg()).mode.is_monitor());
+        // Wire form is the snake_case name, so the admin API reads as
+        // {"mode":"monitor"} rather than a bare boolean.
+        assert_eq!(serde_json::to_string(&p).unwrap(), r#"{"mode":"monitor"}"#);
+        assert_eq!(
+            serde_json::from_str::<SitePolicy>(r#"{"mode":"monitor"}"#).unwrap(),
+            p
+        );
+    }
+
+    #[test]
+    fn monitor_mode_is_not_an_override_and_needs_no_validation() {
+        // Monitoring changes what happens to a verdict, never how one is
+        // computed, so it can't produce an invalid threshold set.
+        let p = SitePolicy {
+            mode: Some(SiteMode::Monitor),
+            ..Default::default()
+        };
+        assert!(p.validate(&cfg()).is_ok());
+        // ...and it leaves every threshold inheriting.
+        let e = p.resolve(&cfg());
+        assert_eq!(e.tiers.block, cfg().tier_block_min);
+        assert_eq!(e.verify.block_min, cfg().verify_block_min);
     }
 
     #[test]
