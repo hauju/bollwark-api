@@ -182,7 +182,7 @@ By default, a verify request with no `behavior` blob at all contributes 0 — a 
 | Time-on-page < 2000ms | +25 |
 | Behavior: flatline (zero events) | +30 |
 | Behavior: blob absent (only with `VERIFY_REQUIRE_BEHAVIOR`) | +30 |
-| Behavior: click without pointer movement | +15 |
+| Behavior: isolated click without pointer movement (≤1 interaction) | +15 |
 | Behavior: sub-50ms first interaction | +20 |
 | Behavior: driven browser (`navigator.webdriver` **or** driver artifacts) | +30 |
 | Behavior: headless hints | +20 |

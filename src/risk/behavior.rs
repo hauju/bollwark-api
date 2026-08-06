@@ -6,9 +6,15 @@
 //! compact summary alongside the PoW solution; we score it at verify-time.
 //!
 //! The aim is *not* to fingerprint the user. We only care about presence/
-//! absence of *any* organic interaction. A real user fills out a form with
-//! at least *some* mouse movement or touches; a naïve headless driver that
-//! just fetches a puzzle and submits will report a flatline.
+//! absence of *any* organic interaction. A naïve headless driver that just
+//! fetches a puzzle and submits will report a flatline.
+//!
+//! Note what is deliberately *not* inferred: that a real user must have moved
+//! a mouse. Keyboard and screen-reader visitors are pointer-free by
+//! definition, so pointer absence alone is scored only when it comes with
+//! essentially no interaction at all (see `BEHAVIOR_ISOLATED_INTERACTION_MAX`).
+//! Scoring it unconditionally penalised people for how they navigate, which
+//! is both wrong and, for an accessible widget, self-defeating.
 //!
 //! A sophisticated bot can fake these counters trivially. The point is to
 //! raise the floor — we are not trying to catch determined attackers, we
@@ -73,11 +79,30 @@ pub enum BehaviorPresence {
 // strongest behavioural signal — at this score it lands a clean request in
 // the shadow band on its own.
 pub const BEHAVIOR_FLATLINE_SCORE: u32 = 30;
-// Click without prior cursor movement: characteristic of a driver that
-// dispatches synthetic clicks rather than moving a real cursor.
+// An *isolated* synthetic click: one interaction, no cursor movement before
+// it. Characteristic of a driver that dispatches `el.click()` rather than
+// moving a real cursor. (Mainline Playwright/Puppeteer don't land here — CDP
+// synthesises a `mouseMoved` first — so this targets the cheaper
+// `dispatchEvent` / injected-script tail.)
 pub const BEHAVIOR_NO_POINTER_SCORE: u32 = 15;
-// Submitting <50ms after the first interaction is implausibly fast — even
-// a one-click form takes longer than that for a human.
+// Interaction count above which "no pointer" stops being evidence of a
+// driver. A visitor navigating by keyboard or screen reader is pointer-free
+// by definition, and previously scored the same as a synthetic click — a
+// penalty for how someone navigates rather than for anything they did. But
+// they cannot reach submit in one event: every Tab, keystroke and scroll is
+// counted in `interactions`, so the minimum real path (Tab, activate, Tab,
+// submit) is already four, and filling any field is dozens. The bot this
+// signal was written for is, by construction, exactly one.
+//
+// A bot can of course report two interactions instead of one and shed the
+// penalty. That costs it nothing today either — `mouse_moves: 1` already
+// does it — which is the module-level stance above: raise the floor against
+// the cheap tail, don't pretend the counters are unforgeable.
+pub const BEHAVIOR_ISOLATED_INTERACTION_MAX: u32 = 1;
+// First interaction landing <50ms after the widget mounted is implausibly
+// fast for a deliberate one — a human has not read the form yet. Note this
+// measures mount → first interaction (see `first_interaction_ms`), not
+// first-interaction → submit.
 pub const BEHAVIOR_INSTANT_INTERACTION_MS: u64 = 50;
 pub const BEHAVIOR_INSTANT_INTERACTION_SCORE: u32 = 20;
 // The browser is driven — `navigator.webdriver === true` and/or driver
@@ -103,7 +128,10 @@ pub fn score_behavior(presence: BehaviorPresence) -> u32 {
     let mut score = 0;
     if no_pointer && no_interaction {
         score += BEHAVIOR_FLATLINE_SCORE;
-    } else if no_pointer {
+    } else if no_pointer && b.interactions <= BEHAVIOR_ISOLATED_INTERACTION_MAX {
+        // Pointer-free *and* barely any interaction at all. Pointer-free with
+        // a real interaction trail is a keyboard or screen-reader visitor and
+        // scores nothing here — see BEHAVIOR_ISOLATED_INTERACTION_MAX.
         score += BEHAVIOR_NO_POINTER_SCORE;
     }
 
@@ -172,7 +200,9 @@ mod tests {
     }
 
     #[test]
-    fn click_without_pointer_scores() {
+    fn isolated_click_without_pointer_scores() {
+        // One interaction, no cursor: the synthetic-click driver this signal
+        // was written for.
         let r = BehaviorReport {
             mouse_moves: 0,
             touches: 0,
@@ -183,6 +213,58 @@ mod tests {
         assert_eq!(
             score_behavior(BehaviorPresence::Present(r)),
             BEHAVIOR_NO_POINTER_SCORE
+        );
+    }
+
+    #[test]
+    fn keyboard_only_visitor_scores_nothing() {
+        // Tab, type, Tab, activate, Tab, submit — pointer-free by definition,
+        // but nothing about it resembles a driver. This scoring 15 was a
+        // penalty for how someone navigates; the widget is keyboard-operable
+        // on purpose, so the scorer must not contradict that.
+        let r = BehaviorReport {
+            mouse_moves: 0,
+            touches: 0,
+            interactions: 24,
+            first_interaction_ms: Some(1_500),
+            ..Default::default()
+        };
+        assert_eq!(score_behavior(BehaviorPresence::Present(r)), 0);
+    }
+
+    #[test]
+    fn no_pointer_penalty_stops_at_the_isolated_interaction_boundary() {
+        let at_boundary = BehaviorReport {
+            mouse_moves: 0,
+            touches: 0,
+            interactions: BEHAVIOR_ISOLATED_INTERACTION_MAX,
+            first_interaction_ms: Some(1_500),
+            ..Default::default()
+        };
+        let past_boundary = BehaviorReport {
+            interactions: BEHAVIOR_ISOLATED_INTERACTION_MAX + 1,
+            ..at_boundary
+        };
+        assert_eq!(
+            score_behavior(BehaviorPresence::Present(at_boundary)),
+            BEHAVIOR_NO_POINTER_SCORE
+        );
+        assert_eq!(score_behavior(BehaviorPresence::Present(past_boundary)), 0);
+    }
+
+    #[test]
+    fn flatline_is_unaffected_by_the_interaction_gate() {
+        // Zero interactions still takes the flatline branch, which is checked
+        // first — the gate must not accidentally downgrade a total flatline.
+        let r = BehaviorReport {
+            mouse_moves: 0,
+            touches: 0,
+            interactions: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            score_behavior(BehaviorPresence::Present(r)),
+            BEHAVIOR_FLATLINE_SCORE
         );
     }
 

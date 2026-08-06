@@ -134,6 +134,7 @@ impl VerifyScorer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::risk::BehaviorReport;
 
     fn scorer() -> VerifyScorer {
         VerifyScorer::new(false)
@@ -265,5 +266,42 @@ mod tests {
         assert_eq!(score_time_on_page(Some(500)), TIME_SHORT_SCORE);
         assert_eq!(score_time_on_page(Some(1_999)), TIME_SHORT_SCORE);
         assert_eq!(score_time_on_page(Some(2_000)), 0);
+    }
+
+    /// The disparate-impact regression. A keyboard-only visitor is
+    /// pointer-free by definition, and used to collect +15 for it. Combined
+    /// with the short-dwell band that reached 40 — a hard block under the
+    /// tightened `verify_block_min` this project documents as a realistic
+    /// login policy — where a mouse user doing the identical thing scored 25
+    /// and passed. The widget is deliberately keyboard-operable; the scorer
+    /// must not undo that.
+    #[test]
+    fn keyboard_only_visitor_passes_even_under_a_tight_policy() {
+        let keyboard = BehaviorReport {
+            mouse_moves: 0,
+            touches: 0,
+            interactions: 24,
+            first_interaction_ms: Some(1_500),
+            ..Default::default()
+        };
+        let c = VerifyContext {
+            honeypot_tripped: false,
+            // Inside the <2s band, so the time signal contributes its +25.
+            time_on_page_ms: Some(1_500),
+            behavior: BehaviorPresence::Present(keyboard),
+        };
+        let tight = VerifyThresholds {
+            shadow_min: 20,
+            block_min: 30,
+        };
+        let s = scorer().score(&c, tight);
+
+        assert_eq!(s.breakdown.behavior, 0, "keyboard use is not a penalty");
+        assert_eq!(s.total, 25, "only the short-dwell band should contribute");
+        // Not blocked. What remains is the short-dwell band, which a mouse
+        // user with the same 1.5s dwell scores identically — equal treatment
+        // is the property under test, not immunity.
+        assert_eq!(s.decision, VerifyDecision::ShadowFail);
+        assert_ne!(s.decision, VerifyDecision::Block);
     }
 }
