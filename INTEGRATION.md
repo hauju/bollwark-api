@@ -240,6 +240,29 @@ a3f1c0...    # opaque; do not parse or depend on its contents
 
 > Dwell time is **not** carried in the token. The server derives it from the challenge's issuance timestamp, so a bot can't claim a longer time-on-page than actually elapsed.
 
+### Single-page apps: when nothing posts a form
+
+The flow above assumes a real form submission. If your form is a React/Vue/Svelte/Dioxus component that calls an API instead, the widget still works and still writes `captcha-token` into the enclosing `<form>` — nothing posts it, so you read the value out and send it yourself.
+
+Three things differ:
+
+1. **Mount the widget after the component renders.** The script's auto-init runs once at `DOMContentLoaded`; a form inside a modal or a route that mounts later was never on the page then. Call `window.Bollwark.scan()` after your component mounts — it tags what it mounts, so re-running is a no-op rather than a second widget.
+2. **Read the token at submit time**, not at mount: `document.querySelector('input[name="captcha-token"]').value`. The widget rewrites that field on submit so the behavioural counters reflect the visitor's actual interaction.
+3. **Keep the `<div data-sitekey>` inside a `<form>` element.** The widget walks up to the nearest form to inject its hidden field; with no form ancestor there is nowhere to write the token. The form never has to be *submitted* — it just has to exist.
+
+```js
+// after your component mounts
+window.Bollwark && window.Bollwark.scan();
+
+// at submit
+const el = document.querySelector('input[name="captcha-token"]');
+await api.signup({ email, captchaToken: el ? el.value : "" });
+```
+
+Your backend then calls `/v1/verify` with that string exactly as below — the token is opaque either way, and nothing about the server side changes.
+
+> **Cross-origin**: the widget fetches its puzzle from wherever the script came from. If that's a different origin to your app (the usual case), that origin must list yours in `CORS_ALLOWED_ORIGINS`, or `GET /v1/puzzle` is blocked by the browser before the widget ever renders.
+
 ## 4. Verify on Your Backend
 
 Your form handler should reject the submission if:
