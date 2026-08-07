@@ -4,7 +4,7 @@ use axum::Json;
 use axum::extract::{ConnectInfo, State};
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
-use axum::http::header::{AUTHORIZATION, ORIGIN, USER_AGENT};
+use axum::http::header::{ORIGIN, USER_AGENT};
 use axum::response::IntoResponse;
 
 use crate::dashboard::types::{PuzzleRecord, VerifyRecord};
@@ -370,11 +370,7 @@ pub async fn verify(
     let req = body.resolve()?;
 
     // Extract and validate bearer token
-    let token = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or(CaptchaError::Unauthorized)?;
+    let token = super::extract::bearer_token(&headers).ok_or(CaptchaError::Unauthorized)?;
 
     let site = state
         .store
@@ -826,11 +822,7 @@ fn require_admin_token(state: &SharedState, headers: &HeaderMap) -> Result<(), C
     let Some(expected) = state.admin_token.as_ref() else {
         return Err(CaptchaError::NotFound);
     };
-    let token = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or(CaptchaError::Unauthorized)?;
+    let token = super::extract::bearer_token(headers).ok_or(CaptchaError::Unauthorized)?;
     let a = token.as_bytes();
     let b = expected.as_bytes();
     if a.len() != b.len() {

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use axum::Json;
 use axum::Router;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use serde::Deserialize;
@@ -360,10 +360,7 @@ async fn delete_site(
 
 #[allow(clippy::result_large_err)]
 fn check_auth(state: &AdminState, headers: &HeaderMap) -> Result<(), axum::response::Response> {
-    let token = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
+    let token = crate::api::extract::bearer_token(headers);
     let Some(token) = token else {
         return Err((StatusCode::UNAUTHORIZED, "missing bearer token").into_response());
     };
