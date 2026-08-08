@@ -72,6 +72,16 @@ pub trait Store: Send + Sync + 'static {
         origins: Vec<String>,
     ) -> impl Future<Output = Result<(), CaptchaError>> + Send;
 
+    /// Replace the site's display name (already validated by the caller).
+    /// Returns `NotFound` if the site doesn't exist. Purely a label: nothing
+    /// in the scoring pipeline reads it, so this is the one site edit that
+    /// cannot change how a visitor is treated.
+    fn update_site_name(
+        &self,
+        site_key: &Uuid,
+        name: String,
+    ) -> impl Future<Output = Result<(), CaptchaError>> + Send;
+
     /// Replace the site's scoring policy (already validated by the caller
     /// against the process config). Returns `NotFound` if the site doesn't
     /// exist. Takes effect on the next request — challenges already issued

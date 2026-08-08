@@ -226,6 +226,28 @@ impl SitePolicy {
 /// loop in the puzzle handler.
 pub const MAX_ALLOWED_ORIGINS: usize = 32;
 
+/// Cap on a site's display name.
+pub const MAX_SITE_NAME_LEN: usize = 200;
+
+/// Trim and validate a site name, returning the value to store.
+///
+/// Shared by `POST /v1/sites` and `PUT /v1/admin/sites/:id/name` for the same
+/// reason `normalize_origins` is: two copies of the rule are two things that
+/// drift, and a rename accepting what provisioning rejects would put a name in
+/// the store that could never have been created there.
+pub fn normalize_site_name(raw: &str) -> Result<String, String> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err("name is required".into());
+    }
+    if name.len() > MAX_SITE_NAME_LEN {
+        return Err(format!(
+            "name must be {MAX_SITE_NAME_LEN} characters or fewer"
+        ));
+    }
+    Ok(name.to_string())
+}
+
 /// Normalize and validate a single allowed-origin entry. An origin is a full
 /// `http(s)://host[:port]` token — lowercased, with no path, query, fragment,
 /// trailing slash, or whitespace. Returns the normalized origin, or the
@@ -271,6 +293,25 @@ pub fn normalize_origins(raw: &[String]) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_site_name_is_trimmed_before_it_is_judged() {
+        assert_eq!(normalize_site_name("  checkout  ").unwrap(), "checkout");
+        // Whitespace-only is empty, not a 3-character name.
+        assert_eq!(
+            normalize_site_name("   "),
+            Err("name is required".to_string())
+        );
+    }
+
+    #[test]
+    fn a_site_name_is_length_capped() {
+        assert!(normalize_site_name(&"a".repeat(MAX_SITE_NAME_LEN)).is_ok());
+        assert!(normalize_site_name(&"a".repeat(MAX_SITE_NAME_LEN + 1)).is_err());
+        // The trim happens first, so padding a legal name over the cap is
+        // still legal — otherwise a paste with a trailing newline would fail.
+        assert!(normalize_site_name(&format!("  {}  ", "a".repeat(MAX_SITE_NAME_LEN))).is_ok());
+    }
 
     #[test]
     fn normalize_accepts_https_http_and_port() {

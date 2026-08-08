@@ -84,6 +84,7 @@ The widget evaluates its risk tier once on mount (matching Turnstile / hCaptcha 
 | `GET /v1/admin/sessions[/:id]` | Bearer (`ADMIN_TOKEN`) | Decision log read API. Mounted only when `ADMIN_DB_PATH` is set. |
 | `GET /v1/admin/stats` | Bearer (`ADMIN_TOKEN`) | Aggregate decision-log stats (counts, tier/decision breakdowns) for the dashboard. |
 | `GET /v1/admin/sites` | Bearer (`ADMIN_TOKEN`) | List registered sites with activity aggregates from the decision log. |
+| `PUT /v1/admin/sites/:id/name` | Bearer (`ADMIN_TOKEN`) | Rename a site. A label only — no credential or scoring change. |
 | `POST /v1/admin/sites/:id/rotate` | Bearer (`ADMIN_TOKEN`) | Generate a new `secret_key` for a site; the old one is invalidated immediately. |
 | `DELETE /v1/admin/sites/:id` | Bearer (`ADMIN_TOKEN`) | Delete a site. Future `/v1/verify` calls with its secret will fail. |
 

@@ -761,15 +761,8 @@ pub async fn create_site(
 ) -> Result<Json<CreateSiteResponse>, CaptchaError> {
     require_admin_token(&state, &headers)?;
 
-    let name = body.name.trim();
-    if name.is_empty() {
-        return Err(CaptchaError::BadRequest("name is required".into()));
-    }
-    if name.len() > 200 {
-        return Err(CaptchaError::BadRequest(
-            "name must be 200 characters or fewer".into(),
-        ));
-    }
+    let name =
+        crate::site::types::normalize_site_name(&body.name).map_err(CaptchaError::BadRequest)?;
 
     // Validate + normalize the optional origin allowlist; a bad entry names
     // itself in the 400 so the caller can fix it.
@@ -790,7 +783,7 @@ pub async fn create_site(
     let site = Site {
         site_key,
         secret_key: secret_key.clone(),
-        name: name.to_string(),
+        name,
         created_at: chrono::Utc::now(),
         allowed_origins: allowed_origins.clone(),
         policy,

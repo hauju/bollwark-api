@@ -429,6 +429,32 @@ impl Store for InMemoryStore {
         Ok(())
     }
 
+    async fn update_site_name(&self, site_key: &Uuid, name: String) -> Result<(), CaptchaError> {
+        // One critical section (see store_site): resolve NotFound from memory,
+        // persist inside the lock, then swap in-memory. The name is not indexed
+        // — nothing looks a site up by it — so only `sites_by_key` is touched.
+        let mut by_key = self.sites_by_key.write().map_err(lock_err)?;
+        let Some(site) = by_key.get_mut(site_key) else {
+            return Err(CaptchaError::NotFound);
+        };
+        if let Some(persist) = &self.site_persistence {
+            let conn = persist.lock().map_err(lock_err)?;
+            let updated = conn
+                .execute(
+                    "UPDATE sites SET name = ?1 WHERE site_key = ?2",
+                    params![name, site_key.to_string()],
+                )
+                .map_err(|e| CaptchaError::Storage(format!("update site name: {e}")))?;
+            if updated == 0 {
+                return Err(CaptchaError::Storage(
+                    "site in memory but missing from db".into(),
+                ));
+            }
+        }
+        site.name = name;
+        Ok(())
+    }
+
     async fn update_site_policy(
         &self,
         site_key: &Uuid,
@@ -899,6 +925,65 @@ mod tests {
         let store = InMemoryStore::new();
         let result = store
             .update_site_origins(&Uuid::new_v4(), vec!["https://x.example".to_string()])
+            .await;
+        assert!(matches!(result, Err(CaptchaError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn test_update_site_name_persists_across_reopen() {
+        let dir = tempdir();
+        let path = dir.join("sites.db");
+
+        let site = make_site();
+        {
+            let store = InMemoryStore::with_site_persistence(&path).unwrap();
+            store.store_site(&site).await.unwrap();
+            store
+                .update_site_name(&site.site_key, "renamed".to_string())
+                .await
+                .unwrap();
+        }
+
+        let store = InMemoryStore::with_site_persistence(&path).unwrap();
+        let reloaded = store
+            .get_site_by_key(&site.site_key)
+            .await
+            .unwrap()
+            .expect("site reloaded");
+        assert_eq!(reloaded.name, "renamed");
+    }
+
+    #[tokio::test]
+    async fn test_update_site_name_leaves_the_secret_lookup_intact() {
+        // The name is not an index, but it shares the write path with the two
+        // maps that are. A rename that disturbed `sites_by_secret` would break
+        // every `/v1/verify` for that site with nothing in the response saying
+        // why, so it gets a test rather than a comment.
+        let store = InMemoryStore::new();
+        let site = make_site();
+        store.store_site(&site).await.unwrap();
+
+        store
+            .update_site_name(&site.site_key, "  renamed  ".to_string())
+            .await
+            .unwrap();
+
+        let found = store
+            .get_site_by_secret(&site.secret_key)
+            .await
+            .unwrap()
+            .expect("the secret still resolves");
+        assert_eq!(found.site_key, site.site_key);
+        // Trimming is the handler's job (`normalize_site_name`), not the
+        // store's — this pins that the store writes what it is handed.
+        assert_eq!(found.name, "  renamed  ");
+    }
+
+    #[tokio::test]
+    async fn test_update_site_name_not_found() {
+        let store = InMemoryStore::new();
+        let result = store
+            .update_site_name(&Uuid::new_v4(), "whatever".to_string())
             .await;
         assert!(matches!(result, Err(CaptchaError::NotFound)));
     }

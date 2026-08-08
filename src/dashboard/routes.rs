@@ -47,6 +47,10 @@ pub fn router(state: AdminState) -> Router {
             axum::routing::post(rotate_site),
         )
         .route(
+            "/v1/admin/sites/{id}/name",
+            axum::routing::put(update_site_name),
+        )
+        .route(
             "/v1/admin/sites/{id}/origins",
             axum::routing::put(update_site_origins),
         )
@@ -287,6 +291,52 @@ async fn update_site_policy(
         }
         Err(e) => {
             tracing::warn!(error = %e, "admin update_site_policy failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "update failed").into_response()
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateNameRequest {
+    name: String,
+}
+
+/// Rename a site. Trimmed and length-checked exactly like `POST /v1/sites`,
+/// through the same function, so a name that could not have been created here
+/// cannot be renamed into either.
+///
+/// The site's identity is its `site_key`; the name is only a label, so nothing
+/// an integrator embedded changes and no scoring is affected. It is a separate
+/// route from `/origins` and `/policy` for the same reason those are separate
+/// from each other — each replaces exactly one thing, so a client that only
+/// wants to rename need not read and echo back the rest.
+async fn update_site_name(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateNameRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_auth(&state, &headers) {
+        return resp;
+    }
+    let site_key = match uuid::Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid site_key").into_response(),
+    };
+    let name = match crate::site::types::normalize_site_name(&body.name) {
+        Ok(n) => n,
+        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+    };
+    match state.store.update_site_name(&site_key, name.clone()).await {
+        Ok(()) => {
+            tracing::info!(site_key = %site_key, "admin: renamed site");
+            Json(json!({ "site_key": site_key.to_string(), "name": name })).into_response()
+        }
+        Err(crate::error::CaptchaError::NotFound) => {
+            (StatusCode::NOT_FOUND, "site not found").into_response()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "admin update_site_name failed");
             (StatusCode::INTERNAL_SERVER_ERROR, "update failed").into_response()
         }
     }

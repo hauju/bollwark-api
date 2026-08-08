@@ -276,7 +276,7 @@ Empty/unset → no peer is trusted → signal never fires (boot log will WARN if
 
 ## Site registration & provisioning
 
-Sites are registered with `POST /v1/sites`, which returns a `site_key` (public, embedded in the widget) and a `secret_key` (server-to-server, used as the bearer for `/v1/verify`). An optional `allowed_origins` array (`http(s)://host[:port]` entries, max 32) restricts which browser origins `GET /v1/puzzle` serves — a non-listed `Origin` gets `403`; requests with no `Origin` header always pass. This is tenant hygiene (quota/stats protection), not bot defense — `Origin` is browser-set only. Change it later without rotating the secret via `PUT /v1/admin/sites/{id}/origins`. Two settings govern this surface:
+Sites are registered with `POST /v1/sites`, which returns a `site_key` (public, embedded in the widget) and a `secret_key` (server-to-server, used as the bearer for `/v1/verify`). An optional `allowed_origins` array (`http(s)://host[:port]` entries, max 32) restricts which browser origins `GET /v1/puzzle` serves — a non-listed `Origin` gets `403`; requests with no `Origin` header always pass. This is tenant hygiene (quota/stats protection), not bot defense — `Origin` is browser-set only. Change it later without rotating the secret via `PUT /v1/admin/sites/{id}/origins`. A site's `name` is a label only — nothing in the scoring pipeline reads it — and can be changed with `PUT /v1/admin/sites/{id}/name`, which trims and length-checks it exactly like provisioning does. Two settings govern this surface:
 
 ### `ADMIN_TOKEN`
 Bearer token required for `POST /v1/sites`. **When unset, `/v1/sites` returns 404** — no anonymous provisioning. Generate with `openssl rand -hex 32` and pass on the call:

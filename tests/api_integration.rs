@@ -1903,6 +1903,106 @@ async fn test_admin_update_origins_rejects_bad_input() {
 }
 
 #[tokio::test]
+async fn test_admin_rename_site() {
+    let (app, store) = test_app_with_store(|b| b.enable_admin = true);
+    let site = create_test_site(&app).await;
+    let uri = format!("/v1/admin/sites/{}/name", site.site_key);
+
+    let (status, resp) = admin_req(
+        &app,
+        "PUT",
+        &uri,
+        Some(TEST_ADMIN_TOKEN),
+        Some(serde_json::json!({ "name": "  checkout  " })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // Trimmed, exactly as `POST /v1/sites` would have.
+    assert_eq!(resp["name"], "checkout");
+
+    let reloaded = store
+        .get_site_by_key(&site.site_key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reloaded.name, "checkout");
+    // A rename is a label change, not a re-provisioning: the credentials an
+    // integrator already embedded must be untouched.
+    assert_eq!(reloaded.secret_key, site.secret_key);
+    assert!(
+        store
+            .get_site_by_secret(&site.secret_key)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn test_admin_rename_site_rejects_bad_input() {
+    let (app, _store) = test_app_with_store(|b| b.enable_admin = true);
+    let site = create_test_site(&app).await;
+
+    // Invalid UUID in the path → 400.
+    let (status, _) = admin_req(
+        &app,
+        "PUT",
+        "/v1/admin/sites/not-a-uuid/name",
+        Some(TEST_ADMIN_TOKEN),
+        Some(serde_json::json!({ "name": "fine" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Blank name → 400, same rule as provisioning.
+    let uri = format!("/v1/admin/sites/{}/name", site.site_key);
+    let (status, _) = admin_req(
+        &app,
+        "PUT",
+        &uri,
+        Some(TEST_ADMIN_TOKEN),
+        Some(serde_json::json!({ "name": "   " })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Over the length cap → 400.
+    let (status, _) = admin_req(
+        &app,
+        "PUT",
+        &uri,
+        Some(TEST_ADMIN_TOKEN),
+        Some(serde_json::json!({ "name": "a".repeat(201) })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Unknown (but well-formed) site_key → 404.
+    let uri = format!("/v1/admin/sites/{}/name", uuid::Uuid::new_v4());
+    let (status, _) = admin_req(
+        &app,
+        "PUT",
+        &uri,
+        Some(TEST_ADMIN_TOKEN),
+        Some(serde_json::json!({ "name": "fine" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // No bearer → 401, and the site is not renamed on the way past.
+    let uri = format!("/v1/admin/sites/{}/name", site.site_key);
+    let (status, _) = admin_req(
+        &app,
+        "PUT",
+        &uri,
+        None,
+        Some(serde_json::json!({ "name": "hijacked" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn test_admin_rotate_and_delete_site() {
     let (app, store) = test_app_with_store(|b| b.enable_admin = true);
     let site = create_test_site(&app).await;
