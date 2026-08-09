@@ -14,6 +14,11 @@ WORKDIR /usr/src/bollwark
 
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+# The workspace members under crates/ are integration libraries, not part of
+# the server — but cargo loads every member's manifest before it will build
+# anything, so omitting them fails the build outright rather than merely
+# skipping them. `--bin bollwark` still builds only the server.
+COPY crates ./crates
 
 RUN cargo build --release --locked --bin bollwark
 
