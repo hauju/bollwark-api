@@ -164,6 +164,15 @@ If you bundle or proxy the script from your own app origin instead, set `data-se
 
 The previous embed — a `<link>` for `/static/captcha-widget.css` plus a `<script>` for `/static/captcha-widget.js` — keeps working and is not going away. It just doesn't get the version pinning: those paths are unversioned, so the widget and worker are cached independently. Moving over is deleting the `<link>` and repointing the `<script>` at `/v1/widget.js`. If you keep your own `<link>`, the widget detects it and won't inject a second one.
 
+**If you integrated before the `rust-captcha` → `bollwark` rename**, the JS names changed too. Both old names still work, so nothing breaks today, but they will be removed:
+
+| Old | Current |
+|---|---|
+| `window.RustCaptcha` | `window.Bollwark` — aliased, warns once on first use |
+| `rustcaptcha:puzzle` | `bollwark:puzzle` — both are dispatched |
+
+The alias matters because the legacy `/static/` path serves the *current* widget: without it an old embed loads a working script that then does nothing, polling for a global that no longer exists, with nothing wrong in the network tab. Migrating is a find-and-replace of those two names.
+
 </details>
 
 ### Widget Modes
@@ -244,20 +253,40 @@ a3f1c0...    # opaque; do not parse or depend on its contents
 
 The flow above assumes a real form submission. If your form is a React/Vue/Svelte/Dioxus component that calls an API instead, the widget still works and still writes `captcha-token` into the enclosing `<form>` — nothing posts it, so you read the value out and send it yourself.
 
-Three things differ:
-
-1. **Mount the widget after the component renders.** The script's auto-init runs once at `DOMContentLoaded`; a form inside a modal or a route that mounts later was never on the page then. Call `window.Bollwark.scan()` after your component mounts — it tags what it mounts, so re-running is a no-op rather than a second widget.
-2. **Read the token at submit time**, not at mount: `document.querySelector('input[name="captcha-token"]').value`. The widget rewrites that field on submit so the behavioural counters reflect the visitor's actual interaction.
-3. **Keep the `<div data-sitekey>` inside a `<form>` element.** The widget walks up to the nearest form to inject its hidden field; with no form ancestor there is nowhere to write the token. The form never has to be *submitted* — it just has to exist.
+Use `Bollwark.token()`. One `await`, and it handles the parts that are easy to get wrong:
 
 ```js
-// after your component mounts
-window.Bollwark && window.Bollwark.scan();
+const result = await Bollwark.token(formEl);   // or the container element
+if (!result.ok) return showError(result.reason);
 
-// at submit
-const el = document.querySelector('input[name="captcha-token"]');
-await api.signup({ email, captchaToken: el ? el.value : "" });
+await api.signup({ email, captchaToken: result.token });
 ```
+
+It never rejects — every expected outcome is a value, so a submit handler reads as a branch rather than a try/catch, and the failure cases stay distinguishable in a way a bare token-or-null cannot be:
+
+| `reason` | What happened | Reasonable response |
+|---|---|---|
+| `needs-interaction` | An escalated tier rendered a checkbox the visitor hasn't clicked. Returns immediately rather than holding a disabled button against a click that may never come. | "Please complete the verification." |
+| `blocked` | Refused at puzzle time (HTTP 429). In invisible mode nothing was rendered, so this is the only way you learn of it. | Show a failure state, or route to your own moderation path. |
+| `unreachable` | The script never loaded, the container never mounted, or the puzzle fetch failed. | Usually an ad/script blocker. Say so — it reads as an infra problem, not user error. |
+| `no-form` | Solved, but the container has no `<form>` ancestor, so there was nowhere to write the token. | An integration bug; see point 2 below. |
+| `timeout` | Mounted and solving, but not finished within `timeoutMs` (default 15s). | Ask them to try again. |
+
+On success you get `{ ok: true, token, tier, failover }`. Pass `{ timeoutMs }` to override the deadline.
+
+Two things still to get right, which no helper can do for you:
+
+1. **Keep the `<div data-sitekey>` inside a `<form>` element.** The widget walks up to the nearest form to inject its hidden field; with no form ancestor there is nowhere to write the token (that's `reason: "no-form"`). The form never has to be *submitted* — it just has to exist.
+2. **Call `Bollwark.token()` at submit time**, not at mount. It refreshes the token before returning so the behavioural counters reflect the visitor's actual interaction rather than the moment the worker happened to finish.
+
+<details>
+<summary>Doing it by hand</summary>
+
+`Bollwark.token()` is a convenience, not a requirement. The manual equivalent is to call `window.Bollwark.scan()` after your component mounts (auto-init runs once at `DOMContentLoaded`, so a form in a modal or a late route was never on the page then; `scan()` tags what it mounts, so re-running is a no-op rather than a second widget), then read `document.querySelector('input[name="captcha-token"]').value` at submit time.
+
+What you take on by doing that: the mount race in both directions, the asynchronous solve in invisible mode — where a fast submit beats the token and an empty field is indistinguishable from a failure — and telling `blocked` apart from `needs-interaction` apart from a script that never loaded, via the `bollwark:puzzle` event.
+
+</details>
 
 Your backend then calls `/v1/verify` with that string exactly as below — the token is opaque either way, and nothing about the server side changes.
 
@@ -389,6 +418,35 @@ app.post("/signup", express.urlencoded({ extended: false }), async (req, res) =>
 
 ## 6. Backend Example: Rust
 
+Use [`bollwark-verify`](crates/bollwark-verify) rather than the hand-rolled version below:
+
+```toml
+bollwark-verify = { version = "0.1", features = ["axum"] }
+```
+
+```rust
+use bollwark_verify::{Client, Error, Verdict};
+
+let client = Client::new("https://api.bollwark.eu", std::env::var("BOLLWARK_SECRET_KEY")?);
+
+match client.verify(token).await {
+    Ok(Verdict::Passed { failover }) => accept(failover),
+    // Recoverable — the visitor left the tab open, or double-submitted.
+    // Ask for a resubmit rather than reporting a failure.
+    Ok(Verdict::Expired | Verdict::Replayed) => ask_to_resubmit(),
+    Ok(Verdict::Blocked) => refuse(),
+    // Not a failed check: the service never got to decide. Fail closed for
+    // signup or payments, open for a contact form — but decide.
+    Err(Error::Unreachable(e)) => on_outage(e),
+    Err(e) => return Err(e.into()),
+}
+```
+
+With the `axum` feature, `Captcha<T>` does this as an extractor, so the handler only runs on a pass.
+
+<details>
+<summary>Without the crate</summary>
+
 ```rust
 use serde::Deserialize;
 
@@ -420,6 +478,10 @@ async fn verify_captcha(token: &str) -> anyhow::Result<bool> {
     Ok(result.success)
 }
 ```
+
+Note what this collapses, and decide whether you mean it: an expired challenge, a replayed one and a risk block all become `false`, and so does an outage — every visitor silently rejected by a fail-closed policy nobody chose. See §9 for the status codes.
+
+</details>
 
 ## 7. Cross-Origin Setup
 

@@ -14,8 +14,10 @@ serve:
     cargo run
 
 # Run all tests
+# --workspace + --all-features so the published integration crates under
+# crates/ are gated too; without it `cargo test` covers only the server.
 test:
-    cargo test
+    cargo test --workspace --all-features
 
 # Run unit tests only
 test-unit:
@@ -35,7 +37,7 @@ check:
 
 # Run clippy lints
 lint:
-    cargo clippy -- -D warnings
+    cargo clippy --workspace --all-features -- -D warnings
 
 # Format code
 fmt:
@@ -43,7 +45,7 @@ fmt:
 
 # Check formatting without modifying
 fmt-check:
-    cargo fmt -- --check
+    cargo fmt --all -- --check
 
 # Run clippy + format check
 ci: fmt-check lint test

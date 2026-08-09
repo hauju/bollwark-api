@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 
+# The server stays the root package, so `cargo build`, the Dockerfile and CI
+# are unchanged. `crates/` holds integration libraries published for consumers
+# of this service; they are not linked into the server binary, so its property
+# of making zero outbound HTTP calls survives their dependencies.
+[workspace]
+members = ["crates/bollwark-verify"]
+
 [dependencies]
 axum = { version = "0.8", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }

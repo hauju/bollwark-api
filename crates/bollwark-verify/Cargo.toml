@@ -1,0 +1,30 @@
+[package]
+name = "bollwark-verify"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Server-side verification client for the Bollwark CAPTCHA service"
+repository = "https://github.com/hauju/bollwark-api"
+keywords = ["captcha", "bot", "proof-of-work", "axum"]
+categories = ["web-programming", "authentication"]
+readme = "README.md"
+
+[dependencies]
+# rustls rather than the default native-tls: a library should not drag a
+# system OpenSSL requirement into someone else's build.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+axum = { version = "0.8", optional = true }
+
+[features]
+default = []
+axum = ["dep:axum"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

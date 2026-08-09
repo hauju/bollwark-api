@@ -497,6 +497,14 @@
       this.container.dispatchEvent(
         new CustomEvent("bollwark:puzzle", { detail, bubbles: true })
       );
+      // Pre-rename event name, emitted alongside for the same reason
+      // `window.RustCaptcha` is still aliased. It matters most here: in
+      // invisible mode a block renders nothing, so an un-migrated embed
+      // listening for the old name would show a blocked visitor a form that
+      // silently does nothing at all.
+      this.container.dispatchEvent(
+        new CustomEvent("rustcaptcha:puzzle", { detail, bubbles: true })
+      );
     }
 
     // ── Failover ──
@@ -1281,6 +1289,138 @@
     });
   }
   window.Bollwark.scan = autoInit;
+
+  // ── Token helper ──
+
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  // Resolve `target` — either the widget container itself, or any ancestor of
+  // it (typically the <form>) — to the mounted widget instance.
+  function findWidget(target) {
+    if (!target) return null;
+    const instances = window.Bollwark._instances;
+    const direct = instances.find((i) => i.container === target);
+    if (direct) return direct;
+    if (typeof target.querySelector === "function") {
+      const el = target.querySelector("[data-sitekey]");
+      if (el) return instances.find((i) => i.container === el) || null;
+    }
+    return null;
+  }
+
+  /**
+   * Await this widget's token, handling everything an SPA integration would
+   * otherwise hand-roll: the mount race (this script and the container can
+   * land in either order), the asynchronous solve (invisible mode finishes
+   * after render, so a fast submit beats the token), and the difference
+   * between "still working", "the visitor has to click something" and "the
+   * server said no".
+   *
+   * Only needed when nothing posts the <form> — a real form submission
+   * carries the hidden `captcha-token` field on its own.
+   *
+   *   const r = await Bollwark.token(formEl);
+   *   if (!r.ok) return showError(r.reason);
+   *   await api.signup({ email, captchaToken: r.token });
+   *
+   * Never rejects. Every expected outcome is a value, so a submit handler
+   * reads as a branch rather than a try/catch — and the failure cases are
+   * distinguishable, which a bare token-or-null cannot be.
+   *
+   *   { ok: true,  token, tier, failover }
+   *   { ok: false, reason, tier }
+   *
+   * reason:
+   *   "needs-interaction" — an escalated tier rendered a checkbox the visitor
+   *                         has not clicked. Returns immediately rather than
+   *                         holding a disabled submit button against a click
+   *                         that may never come.
+   *   "blocked"           — refused at puzzle time (HTTP 429). In invisible
+   *                         mode nothing was rendered, so this is the only
+   *                         way the embedder learns of it.
+   *   "unreachable"       — the script never loaded, the container never
+   *                         mounted, or the puzzle fetch failed outright.
+   *   "no-form"           — solved, but the container has no <form> ancestor,
+   *                         so there is nowhere to write the token.
+   *   "timeout"           — mounted and solving, but not finished in time.
+   */
+  async function token(target, options) {
+    const opts = options || {};
+    const timeoutMs = typeof opts.timeoutMs === "number" ? opts.timeoutMs : 15000;
+    const deadline = Date.now() + timeoutMs;
+
+    // The container can exist while this script is still loading, and can be
+    // injected after it has already scanned. autoInit is idempotent, so
+    // re-scanning until one appears costs nothing.
+    let widget = findWidget(target);
+    while (!widget && Date.now() < deadline) {
+      autoInit();
+      widget = findWidget(target);
+      if (widget) break;
+      await sleep(50);
+    }
+    if (!widget) return { ok: false, reason: "unreachable", tier: null };
+
+    while (Date.now() < deadline) {
+      if (widget.state === "verified") {
+        // Refresh before reading so the behaviour counters reflect the
+        // visitor's actual interaction rather than the moment the worker
+        // happened to finish. A real form submit gets this from the capture
+        // -phase listener; a fetch-based submit has no such event.
+        widget._refreshTokenInput();
+        const value = widget._tokenInput ? widget._tokenInput.value : "";
+        return value
+          ? {
+              ok: true,
+              token: value,
+              tier: widget.tier,
+              failover: !!widget._failover,
+            }
+          : { ok: false, reason: "no-form", tier: widget.tier };
+      }
+      if (widget.tier === "block") {
+        return { ok: false, reason: "blocked", tier: "block" };
+      }
+      // A failed fetch leaves no tier to escalate to and will not recover on
+      // its own — distinct from an escalated tier that is merely waiting.
+      if (widget.state === "failed" && widget.tier === null) {
+        return { ok: false, reason: "unreachable", tier: null };
+      }
+      if (
+        (widget.tier === "checkbox" || widget.tier === "hard_pow") &&
+        widget.state !== "solving"
+      ) {
+        return { ok: false, reason: "needs-interaction", tier: widget.tier };
+      }
+      await sleep(50);
+    }
+    return { ok: false, reason: "timeout", tier: widget.tier };
+  }
+  window.Bollwark.token = token;
+
+  // ── Back-compat: the pre-rename `rust-captcha` global ──
+  //
+  // The legacy `/static/captcha-widget.js` path still serves this file, so an
+  // un-migrated embed loads a *working* script that then does nothing: it
+  // polls for a global that no longer exists and gives up seconds later with
+  // nothing wrong in the network tab. Aliasing turns that silent dead end
+  // into a working integration, and the getter warns only if it is actually
+  // reached — so a migrated embed never sees the noise.
+  let warnedLegacyGlobal = false;
+  Object.defineProperty(window, "RustCaptcha", {
+    configurable: true,
+    get() {
+      if (!warnedLegacyGlobal) {
+        warnedLegacyGlobal = true;
+        console.warn(
+          "[Bollwark] `window.RustCaptcha` is a compatibility alias for the " +
+            "pre-rename name and will be removed in a future release. Use " +
+            "`window.Bollwark`."
+        );
+      }
+      return window.Bollwark;
+    },
+  });
 
   // SPA-friendly bootstrap: if `DOMContentLoaded` has already fired by the
   // time this script lands (typical when injected dynamically by a Dioxus
