@@ -3,9 +3,9 @@ name: Docker (ghcr.io)
 # Publishes the public self-hosting image to ghcr.io.
 #
 # This is separate from the `docker` job in bollwark.yml, which pushes the
-# amd64 deployment image to the private dcr.oxidt.com registry and triggers
-# the Coolify webhook. That one deploys the maintainer's instance; this one
-# is what self-hosters pull.
+# amd64 deployment image to the private dcr.oxidt.com registry; that image is
+# rolled out to the maintainer's instance manually via orca
+# (`orca redeploy bollwark-api`). This one is what self-hosters pull.
 
 on:
   push:
