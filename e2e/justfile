@@ -18,6 +18,10 @@ test-headed:
 test-one NAME:
     bunx playwright test -g "{{ NAME }}"
 
+# Run the raw-HTTP login bot against a running server (see bot/README.md)
+bot *ARGS:
+    bun bot/login-bot.ts {{ ARGS }}
+
 # Reuse an already-running server on http://127.0.0.1:3000
 test-reuse:
     CAPTCHA_REUSE_SERVER=1 bun run test

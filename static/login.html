@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bollwark — Demo Login</title>
+  <link rel="icon" type="image/svg+xml" href="/static/logo.svg">
+  <!-- No stylesheet link on purpose: /v1/widget.js injects it from the
+       versioned bundle. -->
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0e1116;
+      color: #e6e8eb;
+      min-height: 100vh;
+      padding: 40px 20px;
+    }
+    .container { max-width: 460px; margin: 0 auto; }
+    h1 { font-size: 22px; margin-bottom: 6px; }
+    .subtitle { color: #9aa4af; margin-bottom: 28px; font-size: 13px; }
+    .card {
+      background: #161b22;
+      border: 1px solid #263040;
+      border-radius: 10px;
+      padding: 24px;
+      margin-bottom: 20px;
+    }
+    .card h2 { font-size: 15px; margin-bottom: 14px; }
+    .form-group { margin-bottom: 14px; }
+    .form-group label {
+      display: block; font-size: 12px; font-weight: 600;
+      color: #9aa4af; margin-bottom: 6px;
+    }
+    .form-group input {
+      width: 100%; padding: 10px 12px;
+      background: #0e1116; border: 1px solid #30363d; border-radius: 6px;
+      color: #e6e8eb; font-size: 14px; outline: none; transition: border-color .15s;
+    }
+    .form-group input:focus { border-color: #4a90d9; }
+    .captcha-container { margin: 18px 0; }
+    button[type="submit"] {
+      width: 100%; padding: 12px; background: #2f81f7; color: #fff;
+      border: none; border-radius: 6px; font-size: 14px; font-weight: 600;
+      cursor: pointer; transition: background .15s;
+    }
+    button[type="submit"]:hover { background: #1f6feb; }
+    button[type="submit"]:disabled { background: #21324d; color: #7d8590; cursor: not-allowed; }
+    .setup-card { border-style: dashed; }
+    .setup-card p { font-size: 12px; color: #9aa4af; margin-bottom: 10px; }
+    .setup-btn {
+      padding: 9px 14px; background: #e6e8eb; color: #0e1116;
+      border: none; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer;
+    }
+    .setup-btn:hover { background: #c9d1d9; }
+    .setup-btn:disabled { background: #484f58; color: #9aa4af; cursor: not-allowed; }
+    .creds-hint {
+      font-size: 12px; color: #9aa4af; margin-bottom: 14px;
+      background: #0e1116; border: 1px solid #263040; border-radius: 6px; padding: 8px 10px;
+    }
+    .creds-hint code { color: #7ee787; }
+    .mono {
+      font-family: "SF Mono", Menlo, Monaco, monospace; font-size: 11px;
+      word-break: break-all; background: #0e1116; border: 1px solid #263040;
+      border-radius: 6px; padding: 10px; margin-top: 10px; display: none;
+    }
+    .mono .k { color: #79c0ff; }
+    .bot-cmd {
+      display: none; margin-top: 10px; font-size: 11px; color: #9aa4af;
+    }
+    .bot-cmd pre {
+      font-family: "SF Mono", Menlo, Monaco, monospace;
+      background: #0e1116; border: 1px solid #263040; border-radius: 6px;
+      padding: 10px; margin-top: 6px; overflow-x: auto; color: #ffa657;
+      white-space: pre;
+    }
+    .tier-row {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 12px; color: #9aa4af; margin-top: 14px;
+    }
+    .tier-pill {
+      display: inline-block; padding: 2px 8px; border-radius: 10px;
+      font-weight: 600; font-size: 10px; text-transform: uppercase;
+    }
+    .tier-invisible_pass { background: #12341f; color: #7ee787; }
+    .tier-checkbox       { background: #3a2f0b; color: #e3b341; }
+    .tier-hard_pow       { background: #43290b; color: #ffa657; }
+    .tier-block, .tier-blocked-429 { background: #4c1114; color: #ff7b72; }
+    .result {
+      display: none; border-radius: 8px; padding: 14px 16px; font-size: 14px; font-weight: 600;
+    }
+    .result.ok    { background: #12341f; border: 1px solid #2ea043; color: #7ee787; }
+    .result.deny  { background: #4c1114; border: 1px solid #da3633; color: #ff7b72; }
+    .result.wrong { background: #3a2f0b; border: 1px solid #d29922; color: #e3b341; }
+    .result .detail { display:block; font-weight: 400; font-size: 12px; color: #9aa4af; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Acme Corp — Sign in</h1>
+    <p class="subtitle">A demo login protected by Bollwark. Point a bot at it and watch it get stopped.</p>
+
+    <!-- Setup: provision a protected site -->
+    <div class="card setup-card" id="setup-section">
+      <h2>1 · Provision a protected site</h2>
+      <p>Registers a site with a login-grade policy (escalates sooner, hard-blocks automated submits).</p>
+      <button class="setup-btn" id="setup-btn" onclick="autoSetup()">Provision site</button>
+      <div class="mono" id="site-info"></div>
+      <div class="bot-cmd" id="bot-cmd">
+        Attack <em>this</em> site from a raw-HTTP bot (run from <code>bollwark-api/e2e/</code>):
+        <pre id="bot-cmd-text"></pre>
+      </div>
+    </div>
+
+    <!-- Login form -->
+    <div class="card">
+      <h2>2 · Sign in</h2>
+      <div class="creds-hint">Demo account — username <code>admin</code>, password <code>bollwark</code></div>
+      <form id="login-form">
+        <div class="form-group">
+          <label for="username">Username</label>
+          <input type="text" id="username" name="username" autocomplete="username" placeholder="admin" required>
+        </div>
+        <div class="form-group">
+          <label for="password">Password</label>
+          <input type="password" id="password" name="password" autocomplete="current-password" placeholder="••••••••" required>
+        </div>
+
+        <div class="captcha-container">
+          <div id="captcha-widget" data-sitekey="" data-theme="dark"></div>
+        </div>
+
+        <button type="submit" id="submit-btn" disabled>Sign in</button>
+      </form>
+
+      <div class="tier-row">
+        <span>Widget risk tier:</span>
+        <span id="tier-readout"><span class="tier-pill">—</span></span>
+      </div>
+    </div>
+
+    <!-- Result -->
+    <div class="card result" id="result"></div>
+  </div>
+
+  <script src="/v1/widget.js"></script>
+  <script>
+    // The valid demo credential. A real backend would check a database; here
+    // the login logic lives in the page, and the CAPTCHA verdict gates it.
+    const VALID = { username: "admin", password: "bollwark" };
+
+    // Login-grade policy: escalate to expensive PoW sooner than the defaults,
+    // and hard-block a submit that looks automated (fast + no behaviour).
+    // A real human still passes — a clean browser scores 0 and submits with
+    // organic telemetry. Mirrors the "stricter login policy" shape the API's
+    // own tests use.
+    const LOGIN_POLICY = {
+      tier_checkbox_min: 10,
+      tier_hard_pow_min: 25,
+      tier_block_min: 60,
+      verify_shadow_min: 20,
+      verify_block_min: 30,
+    };
+
+    let siteKey = null;
+    let siteSecret = null;
+
+    function renderTier(tier) {
+      const cls = tier ? "tier-" + tier : "";
+      document.getElementById("tier-readout").innerHTML =
+        '<span class="tier-pill ' + cls + '">' + (tier || "—") + "</span>";
+    }
+
+    // Mirror the tier the widget's own eager puzzle fetch received.
+    document.addEventListener("bollwark:puzzle", (e) => {
+      const d = e.detail || {};
+      renderTier(d.ok ? d.tier : (d.tier || "blocked-429"));
+    });
+
+    // POST /v1/sites is gated by ADMIN_TOKEN (404 when unset, 401 on bad
+    // token). Reuse the sessionStorage key the admin dashboard uses so one
+    // sign-in covers every page in this tab. When the server runs with
+    // DEV_DISABLE_ADMIN_AUTH=1 (local/e2e), no token is needed.
+    const ADMIN_TOKEN_KEY = "bollwark_admin_token";
+
+    async function provision(token) {
+      const headers = { "Content-Type": "application/json" };
+      if (token) headers.Authorization = "Bearer " + token;
+      return fetch("/v1/sites", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ name: "demo-login", policy: LOGIN_POLICY }),
+      });
+    }
+
+    async function autoSetup() {
+      const btn = document.getElementById("setup-btn");
+      btn.disabled = true;
+      btn.textContent = "Provisioning…";
+      try {
+        let token = sessionStorage.getItem(ADMIN_TOKEN_KEY);
+        let resp = await provision(token);
+        if (resp.status === 401 || resp.status === 404) {
+          // No dev bypass and no/stale token — prompt once.
+          token = prompt("Enter ADMIN_TOKEN to provision a site:");
+          if (!token) throw new Error("Admin token required");
+          sessionStorage.setItem(ADMIN_TOKEN_KEY, token);
+          resp = await provision(token);
+        }
+        if (!resp.ok) throw new Error("provision failed: HTTP " + resp.status);
+        const data = await resp.json();
+        siteKey = data.site_key;
+        siteSecret = data.secret_key;
+
+        const widgetEl = document.getElementById("captcha-widget");
+        widgetEl.dataset.sitekey = siteKey;
+        // Re-init the widget now that we have a key. Order matters: set the
+        // key before reset() so the eager puzzle fetch can run.
+        if (window.Bollwark._instances.length > 0) {
+          window.Bollwark._instances[0].siteKey = siteKey;
+          window.Bollwark._instances[0].reset();
+        } else {
+          window.Bollwark.render(widgetEl, { sitekey: siteKey, theme: "dark" });
+        }
+
+        const info = document.getElementById("site-info");
+        info.style.display = "block";
+        info.innerHTML =
+          '<span class="k">site_key:</span> ' + siteKey +
+          '<br><span class="k">secret_key:</span> ' + siteSecret;
+
+        const cmd = document.getElementById("bot-cmd");
+        cmd.style.display = "block";
+        document.getElementById("bot-cmd-text").textContent =
+          "bun bot/login-bot.ts \\\n" +
+          "  --base " + location.origin + " \\\n" +
+          "  --site-key " + siteKey + " \\\n" +
+          "  --secret " + siteSecret;
+
+        btn.textContent = "Site provisioned";
+        document.getElementById("submit-btn").disabled = false;
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = "Retry";
+        showResult("deny", "Setup failed", err.message);
+      }
+    }
+
+    function showResult(kind, title, detail) {
+      const el = document.getElementById("result");
+      el.className = "result " + kind;
+      el.style.display = "block";
+      el.innerHTML = title + (detail ? '<span class="detail">' + detail + "</span>" : "");
+    }
+
+    document.getElementById("login-form").addEventListener("submit", async function (e) {
+      e.preventDefault();
+      const username = document.getElementById("username").value;
+      const password = document.getElementById("password").value;
+
+      // The widget writes an opaque token into a hidden field. The form host
+      // forwards it verbatim — no parsing.
+      const token = new FormData(this).get("captcha-token");
+      if (!token) {
+        showResult("wrong", "⚠️ Complete the verification first", null);
+        return;
+      }
+
+      // Server-side CAPTCHA verification. In this harness the page holds the
+      // secret and calls /v1/verify directly; a real app would do this on its
+      // backend. Either way the bot's job is identical: produce a token that
+      // passes. This gate runs BEFORE the credential check.
+      let verdict;
+      try {
+        const resp = await fetch("/v1/verify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer " + siteSecret },
+          body: JSON.stringify({ token }),
+        });
+        verdict = await resp.json();
+      } catch (err) {
+        showResult("deny", "Verification error", err.message);
+        return;
+      }
+
+      if (!verdict.success) {
+        showResult("deny", "🛑 Blocked by Bollwark", "Automated traffic refused — the CAPTCHA verdict was fail, so credentials were never checked.");
+        return;
+      }
+
+      // CAPTCHA passed — now the real login check.
+      if (username === VALID.username && password === VALID.password) {
+        showResult("ok", "✅ Signed in as " + username, verdict.failover ? "Accepted via failover (service was unreachable)." : "CAPTCHA passed and credentials matched.");
+      } else {
+        showResult("wrong", "❌ Invalid username or password", "CAPTCHA passed, but the credentials were wrong.");
+      }
+    });
+  </script>
+</body>
+</html>
