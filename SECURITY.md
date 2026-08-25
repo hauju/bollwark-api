@@ -10,7 +10,7 @@ appreciate reports from the community.
 Report privately through either channel:
 
 - **GitHub** — use *Security → Report a vulnerability* on this repository
-  ([private vulnerability reporting](https://github.com/hauju/rust-captcha/security/advisories/new)).
+  ([private vulnerability reporting](https://github.com/hauju/bollwark-api/security/advisories/new)).
   This is the preferred channel.
 - **Email** — <mail@haukejung.de>. Use `[SECURITY] bollwark` in the subject.
 

@@ -36,7 +36,7 @@ file with a named volume for `/data` and every optional variable present but
 commented out.
 
 ```bash
-curl -O https://raw.githubusercontent.com/hauju/rust-captcha/main/docker-compose.yml
+curl -O https://raw.githubusercontent.com/hauju/bollwark-api/main/docker-compose.yml
 # uncomment ADMIN_TOKEN (and SITE_DB_PATH if you want sites to survive restarts)
 docker compose up -d
 docker compose logs -f

@@ -2,7 +2,7 @@
 
 # Bollwark
 
-Self-hostable proof-of-work CAPTCHA service in Rust. Clients solve a memory-hard Argon2id (or SHA-256) puzzle to prove they aren't bots; the server brackets each solve with two scoring passes that adapt difficulty — or short-circuit — based on per-request risk signals.
+Privacy-first, self-hostable proof-of-work CAPTCHA service in Rust — a reCAPTCHA alternative that sets no cookies and needs no consent banner. Clients solve a memory-hard Argon2id (or SHA-256) puzzle to prove they aren't bots; the server brackets each solve with two scoring passes that adapt difficulty — or short-circuit — based on per-request risk signals. Free to self-host (MIT), or hosted at [bollwark.eu](https://bollwark.eu).
 
 - **Two-pass risk scoring.** A puzzle-time pass picks an escalation tier (invisible / checkbox / hard PoW / 429 block) and issues a proof-of-work puzzle at a tier-adjusted difficulty. A verify-time pass re-scores after submit using time-on-page, honeypot, and behavioural telemetry, returning `pass` / `shadow_fail` / `block`.
 - **Pluggable signals.** Rate, header anomaly, honeypot, time-on-page, and behavioural telemetry are always on; IP reputation (CIDR list) and TLS fingerprint (read from a trusted reverse-proxy header) self-gate on their own config. The service is cookie-free — there's no global scoring toggle and no consent-triggering client storage; every signal runs under legitimate interest with data minimization.
