@@ -529,7 +529,7 @@ Common responses:
 | Case | Response | What to do |
 |---|---|---|
 | Missing or bad `site_key` | `400` from `/v1/puzzle` | Check frontend config |
-| Origin not on the site's allowlist | `403` from `/v1/puzzle` | Add the embedding origin via `allowed_origins`, or leave the allowlist empty to allow any origin. |
+| Origin not on the site's allowlist | `403` from `/v1/puzzle` | Add the embedding origin via `allowed_origins`, or leave the allowlist empty to allow any origin. The widget shows the visitor "Verification isn't set up for this site" and logs the refused origin to the browser console. |
 | High-risk puzzle request (`block` tier) | `429` from `/v1/puzzle` | Show a retry/error state or fall back to your own moderation path. |
 | Missing verify auth | `401` from `/v1/verify` | Check backend `secret_key` |
 | Challenge expired | `410` from `/v1/verify` | Ask user to retry the form |

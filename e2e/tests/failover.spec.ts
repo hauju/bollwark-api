@@ -111,6 +111,47 @@ test("a block-tier 429 does not fall back to failover", async ({ page }) => {
   ).toBe(true);
 });
 
+test("an integration fault renders a readable line, not the raw body", async ({
+  page,
+}) => {
+  // A 403 — the page's origin is not on the site's allowlist — is the
+  // embedder's to fix, not the visitor's. The visitor gets a translated
+  // sentence; the refused origin goes to the console, which is where the
+  // embedder is looking. And like a 429, it must never fall open.
+  await setupSite(page);
+
+  const errors: string[] = [];
+  page.on("console", (msg) => {
+    if (msg.type() === "error") errors.push(msg.text());
+  });
+
+  await page.route("**/v1/puzzle*", (route) =>
+    route.fulfill({
+      status: 403,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "Origin not allowed" }),
+    })
+  );
+
+  await page.evaluate(() => window.Bollwark._instances[0].reset());
+
+  await expect(page.locator(".rc-captcha-status")).toHaveText(
+    "Verification isn't set up for this site",
+    { timeout: 20_000 }
+  );
+
+  const hint = errors.find((e) => e.includes("Origin not allowed"));
+  expect(hint, "the embedder-facing hint must reach the console").toBeDefined();
+  expect(hint).toContain(new URL(page.url()).origin);
+  expect(hint).not.toContain('{"error"');
+
+  const token = await readToken(page);
+  expect(
+    token === null || token.failover !== true,
+    "an integration fault must not mint a failover claim"
+  ).toBe(true);
+});
+
 test("recovery upgrades the failover claim to a real solved token", async ({
   page,
 }) => {

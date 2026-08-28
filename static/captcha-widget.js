@@ -91,6 +91,7 @@
       click_to_verify: "Click to verify",
       unavailable: "Verification unavailable",
       unavailable_continuing: "Verification unavailable — continuing",
+      not_configured: "Verification isn't set up for this site",
       no_puzzle: "Error: no puzzle available",
       error_prefix: "Error: ",
       privacy: "Privacy",
@@ -104,6 +105,7 @@
       click_to_verify: "Zum Bestätigen klicken",
       unavailable: "Überprüfung nicht verfügbar",
       unavailable_continuing: "Überprüfung nicht verfügbar — wird fortgesetzt",
+      not_configured: "Überprüfung ist für diese Seite nicht eingerichtet",
       no_puzzle: "Fehler: keine Aufgabe verfügbar",
       error_prefix: "Fehler: ",
       privacy: "Datenschutz",
@@ -117,6 +119,7 @@
       click_to_verify: "Cliquez pour vérifier",
       unavailable: "Vérification indisponible",
       unavailable_continuing: "Vérification indisponible — poursuite",
+      not_configured: "La vérification n'est pas configurée pour ce site",
       no_puzzle: "Erreur : aucune énigme disponible",
       error_prefix: "Erreur : ",
       privacy: "Confidentialité",
@@ -130,6 +133,7 @@
       click_to_verify: "Haz clic para verificar",
       unavailable: "Verificación no disponible",
       unavailable_continuing: "Verificación no disponible — continuando",
+      not_configured: "La verificación no está configurada para este sitio",
       no_puzzle: "Error: no hay ningún desafío disponible",
       error_prefix: "Error: ",
       privacy: "Privacidad",
@@ -143,6 +147,7 @@
       click_to_verify: "Fai clic per verificare",
       unavailable: "Verifica non disponibile",
       unavailable_continuing: "Verifica non disponibile — si prosegue",
+      not_configured: "La verifica non è configurata per questo sito",
       no_puzzle: "Errore: nessuna sfida disponibile",
       error_prefix: "Errore: ",
       privacy: "Privacy",
@@ -156,6 +161,7 @@
       click_to_verify: "Klik om te verifiëren",
       unavailable: "Verificatie niet beschikbaar",
       unavailable_continuing: "Verificatie niet beschikbaar — doorgaan",
+      not_configured: "Verificatie is niet ingesteld voor deze site",
       no_puzzle: "Fout: geen puzzel beschikbaar",
       error_prefix: "Fout: ",
       privacy: "Privacy",
@@ -470,6 +476,15 @@
           error: err.message,
         });
 
+        // Anything else is an integration fault — an unknown site_key, an
+        // origin missing from the site's allowlist — which the embedder can
+        // fix and the visitor cannot. The actionable detail goes to the
+        // console, where the embedder is looking; the visitor gets a plain
+        // sentence below, never the raw response body.
+        if (!blocked) {
+          console.error("[Bollwark] " + CaptchaWidget._integrationHint(err));
+        }
+
         // Invisible mode hands block-tier UX to the embedder via the
         // `bollwark:puzzle` event — they decide whether to show an
         // inline message, redirect, or do nothing. The console.warn is a
@@ -489,8 +504,20 @@
         // URLs even when rejecting — surface them now so the brand corner
         // points at the right Privacy/Terms even in block-tier.
         if (err.infoUrls) this._applyInfoUrls(err.infoUrls);
-        this._renderBlocked(blocked ? this._t("unavailable") : err.message);
+        this._renderBlocked(this._t(blocked ? "unavailable" : "not_configured"));
       }
+    }
+
+    // Turn a refused puzzle fetch into the one line an embedder needs to fix
+    // it. A 403 gets the detail the server cannot give: which origin it
+    // refused — the widget is the only party that knows the page it's on.
+    static _integrationHint(err) {
+      if (err.status !== 403) return err.message;
+      return (
+        `${err.message} — this page's origin (${window.location.origin}) ` +
+        "is not in the site's allowed_origins. Add it, or clear the list " +
+        "to allow any origin."
+      );
     }
 
     _dispatchPuzzleEvent(detail) {
@@ -1002,7 +1029,12 @@
         } catch (_) {
           /* body wasn't JSON — non-block error from upstream proxy etc. */
         }
-        const err = new Error(`Puzzle fetch failed (${resp.status}): ${body}`);
+        // The server answers `{"error": "..."}`; surface that sentence rather
+        // than the raw body, since this message reaches the console and the
+        // `bollwark:puzzle` event as-is.
+        const detail =
+          parsed && typeof parsed.error === "string" ? parsed.error : body;
+        const err = new Error(`Puzzle fetch failed (${resp.status}): ${detail}`);
         err.status = resp.status;
         err.infoUrls = parsed && parsed.info_urls ? parsed.info_urls : null;
         throw err;
