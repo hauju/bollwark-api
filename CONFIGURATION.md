@@ -146,11 +146,24 @@ A hard per-IP issuance cap that sits *outside* the scoring pipeline. The rate si
 | Signal | Max contribution | Enabled by |
 |---|---|---|
 | Rate (per-IP — IPv6 bucketed to /64 — + per-site, 60s window) | 45 | Always on |
-| Header anomaly (UA / Accept-Language / Accept-Encoding) | 50 | Always on |
+| Header anomaly (UA / Accept-Language / Accept-Encoding / fetch metadata / client hints) | 75 | Always on |
 | IP reputation | 40 | `IP_REPUTATION_FILE` |
 | TLS fingerprint | 35 | `TLS_FINGERPRINT_HEADER` + `TRUSTED_PROXIES` |
 
 Every signal self-gates on its own input: header anomaly always computes, IP reputation contributes 0 without `IP_REPUTATION_FILE`, and TLS fingerprint contributes 0 unless a trusted proxy supplied the header. There is no global on/off switch — the service is cookie-free and runs these signals under legitimate interest with data minimization. Tuning the per-signal score weights requires a code change (see `src/risk/signals.rs` and the per-signal modules); only the **tier thresholds** are env-tunable.
+
+Header anomaly components:
+
+| Check | Score |
+|---|---|
+| `User-Agent` missing | +30 |
+| `User-Agent` shorter than 10 chars, or naming an HTTP library (`curl`, `wget`, `python`, `go-http`, `libwww`, `httpclient`, `java/`) | +25 |
+| `Accept-Language` missing | +10 |
+| `Accept-Encoding` missing | +10 |
+| UA claims a browser (`Mozilla/`) but none of `Sec-Fetch-Mode` / `-Site` / `-Dest` is present | +15 |
+| UA claims Chromium (`Chrome/`) but `Sec-CH-UA` is absent | +15 |
+
+The last two are **browser impersonation** checks. Fetch metadata has been attached to every browser request since Chrome 76 / Firefox 90 / Safari 16.4, and Chromium has sent the low-entropy client hints since 89; both are forbidden header names, so page script can neither add nor suppress them. An HTTP library with a copied Chrome UA string sends neither and lands on +30 — the same weight as omitting the UA, i.e. `checkbox` under the default bands. Each check alone stays below `TIER_CHECKBOX_MIN`, so the known false-positive populations — pre-16.4 Safari, a header-stripping proxy or extension — see no friction unless another signal also fires. WebKit and Gecko never send client hints, which is why that check is gated on `Chrome/` (Chrome on iOS reports `CriOS/` and is excluded). Both checks test presence only; the header values are never read.
 
 ---
 
@@ -552,7 +565,7 @@ The service is **cookie-free** and runs every signal under **legitimate interest
 | Signal | Always on? | Privacy notes |
 |---|---|---|
 | Rate (per-IP + per-site, 60 s window) | Yes | Transient counter, no per-IP profile retained |
-| Header anomaly (UA / Accept-Language / Accept-Encoding) | Yes | Scored transiently from headers the browser already sends; no stable identifier persisted |
+| Header anomaly (UA / Accept-Language / Accept-Encoding / fetch metadata / client hints) | Yes | Scored transiently from headers the browser already sends; `Sec-Fetch-*` and `Sec-CH-UA` are checked for presence only, never read; no stable identifier persisted |
 | Honeypot | Yes | No PII |
 | Time-on-page | Yes | Derived server-side, transient |
 | Behavior (mouse / touch / `webdriver`) | Yes | Ephemeral, submitted for one verification, not linked to an identity |

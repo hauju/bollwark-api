@@ -124,6 +124,9 @@ mod tests {
             ACCEPT_ENCODING,
             HeaderValue::from_static("gzip, deflate, br"),
         );
+        h.insert("sec-fetch-mode", HeaderValue::from_static("cors"));
+        h.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
+        h.insert("sec-fetch-dest", HeaderValue::from_static("empty"));
         h
     }
 

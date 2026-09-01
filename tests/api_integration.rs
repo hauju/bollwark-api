@@ -249,7 +249,10 @@ fn with_connect_info_ip(req: Request<Body>, ip: &str) -> Request<Body> {
 }
 
 /// Build a GET /v1/puzzle request with the given headers.
-/// Pass `None` for a header to omit it entirely.
+/// Pass `None` for a header to omit it entirely. Always carries the
+/// fetch-metadata triple a browser attaches to `fetch()` on its own, so a
+/// request with a UA reads as a browser; the impersonation test builds its
+/// own request without it.
 fn puzzle_request(
     site_key: &str,
     user_agent: Option<&str>,
@@ -269,11 +272,17 @@ fn puzzle_request(
     if let Some(ae) = accept_encoding {
         builder = builder.header("Accept-Encoding", ae);
     }
+    builder = builder
+        .header("Sec-Fetch-Mode", "cors")
+        .header("Sec-Fetch-Site", "cross-site")
+        .header("Sec-Fetch-Dest", "empty");
 
     builder.body(Body::empty()).unwrap()
 }
 
 const CLEAN_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15";
+const CHROME_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+                         (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
 const CLEAN_LANG: &str = "en-US,en;q=0.9";
 const CLEAN_ENC: &str = "gzip, deflate, br";
 
@@ -1019,6 +1028,30 @@ async fn test_missing_user_agent_bumps_to_checkbox() {
 
     // No UA → header_anomaly = 30 → >= TIER_CHECKBOX_MIN (20), < TIER_HARD_POW_MIN (40)
     let req = puzzle_request(&key, None, Some(CLEAN_LANG), Some(CLEAN_ENC));
+    let (status, puzzle) = send_puzzle(&app, with_connect_info(req)).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(puzzle.unwrap().tier, EscalationTier::Checkbox);
+}
+
+/// A Chrome UA string on a request with neither fetch metadata nor client
+/// hints is the signature of an HTTP library with a copied User-Agent. The two
+/// impersonation checks sum to 30 — the same weight as omitting the UA — which
+/// is Checkbox under the default bands.
+#[tokio::test]
+async fn test_copied_chrome_ua_without_browser_headers_bumps_to_checkbox() {
+    let app = test_app();
+    let site = create_test_site(&app).await;
+    let key = site.site_key.to_string();
+
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/v1/puzzle?site_key={key}"))
+        .header("User-Agent", CHROME_UA)
+        .header("Accept-Language", CLEAN_LANG)
+        .header("Accept-Encoding", CLEAN_ENC)
+        .body(Body::empty())
+        .unwrap();
     let (status, puzzle) = send_puzzle(&app, with_connect_info(req)).await;
 
     assert_eq!(status, StatusCode::OK);

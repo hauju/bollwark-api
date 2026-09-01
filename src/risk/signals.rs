@@ -46,6 +46,25 @@ pub const UA_SUSPICIOUS_SCORE: u32 = 25;
 pub const ACCEPT_LANGUAGE_MISSING_SCORE: u32 = 10;
 pub const ACCEPT_ENCODING_MISSING_SCORE: u32 = 10;
 
+/// A UA that claims to be a browser (`Mozilla/`) on a request carrying none of
+/// the fetch-metadata headers every browser has attached for years (Chrome 76,
+/// Firefox 90, Safari 16.4). They are forbidden header names — page script can
+/// neither add nor suppress them — so their absence under a browser UA means
+/// the request did not come from a browser. Kept below `TIER_CHECKBOX_MIN` on
+/// its own: the false-positive population (pre-16.4 Safari, a header-stripping
+/// proxy) should see no friction unless something else also fires.
+pub const SEC_FETCH_MISSING_SCORE: u32 = 15;
+/// A UA that claims Chromium (`Chrome/`) without the low-entropy client hints
+/// Chromium has sent on every request since 89. WebKit and Gecko never send
+/// them, hence the `Chrome/` gate (Chrome on iOS reports `CriOS/` and is
+/// correctly excluded). Stacks with the fetch-metadata check: each alone is
+/// ambiguous, both together — a Chrome UA with neither header family — is the
+/// signature of an HTTP library with a copied UA string, and the sum equals
+/// `UA_MISSING_SCORE`. Presence only; the value is never read.
+pub const CLIENT_HINTS_MISSING_SCORE: u32 = 15;
+
+const SEC_FETCH_HEADERS: &[&str] = &["sec-fetch-mode", "sec-fetch-site", "sec-fetch-dest"];
+
 const UA_MIN_LEN: usize = 10;
 const UA_BOT_NEEDLES: &[&str] = &[
     "curl",
@@ -66,6 +85,17 @@ pub fn score_header_anomaly(headers: &HeaderMap) -> u32 {
             let lower = ua.to_ascii_lowercase();
             if ua.len() < UA_MIN_LEN || UA_BOT_NEEDLES.iter().any(|n| lower.contains(n)) {
                 score += UA_SUSPICIOUS_SCORE;
+            }
+            // Browser impersonation: the UA claims a browser, the rest of the
+            // request doesn't. Any one fetch-metadata header counts as present
+            // so a proxy dropping one of the three can't trip the check.
+            if lower.starts_with("mozilla/")
+                && !SEC_FETCH_HEADERS.iter().any(|h| headers.contains_key(*h))
+            {
+                score += SEC_FETCH_MISSING_SCORE;
+            }
+            if lower.contains("chrome/") && !headers.contains_key("sec-ch-ua") {
+                score += CLIENT_HINTS_MISSING_SCORE;
             }
         }
     }
@@ -140,12 +170,93 @@ mod tests {
             ACCEPT_ENCODING,
             HeaderValue::from_static("gzip, deflate, br"),
         );
+        // What a browser's `fetch()` attaches on its own.
+        h.insert("sec-fetch-mode", HeaderValue::from_static("cors"));
+        h.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
+        h.insert("sec-fetch-dest", HeaderValue::from_static("empty"));
         h
+    }
+
+    const CHROME_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+                             (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
+
+    fn headers_chrome_like() -> HeaderMap {
+        let mut h = headers_browser_like();
+        h.insert(USER_AGENT, HeaderValue::from_static(CHROME_UA));
+        h.insert(
+            "sec-ch-ua",
+            HeaderValue::from_static(
+                r#""Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128""#,
+            ),
+        );
+        h
+    }
+
+    fn strip_fetch_metadata(h: &mut HeaderMap) {
+        for name in SEC_FETCH_HEADERS {
+            h.remove(*name);
+        }
     }
 
     #[test]
     fn clean_browser_headers_score_zero() {
         assert_eq!(score_header_anomaly(&headers_browser_like()), 0);
+    }
+
+    #[test]
+    fn clean_chrome_headers_score_zero() {
+        assert_eq!(score_header_anomaly(&headers_chrome_like()), 0);
+    }
+
+    #[test]
+    fn browser_ua_without_fetch_metadata_scores() {
+        let mut h = headers_browser_like();
+        strip_fetch_metadata(&mut h);
+        assert_eq!(score_header_anomaly(&h), SEC_FETCH_MISSING_SCORE);
+    }
+
+    #[test]
+    fn one_fetch_metadata_header_counts_as_present() {
+        let mut h = headers_browser_like();
+        h.remove("sec-fetch-mode");
+        h.remove("sec-fetch-dest");
+        assert_eq!(score_header_anomaly(&h), 0);
+    }
+
+    #[test]
+    fn chrome_ua_without_client_hints_scores() {
+        let mut h = headers_chrome_like();
+        h.remove("sec-ch-ua");
+        assert_eq!(score_header_anomaly(&h), CLIENT_HINTS_MISSING_SCORE);
+    }
+
+    #[test]
+    fn webkit_ua_without_client_hints_is_clean() {
+        // `headers_browser_like` is Safari-shaped; WebKit never sends UA-CH.
+        let h = headers_browser_like();
+        assert!(!h.contains_key("sec-ch-ua"));
+        assert_eq!(score_header_anomaly(&h), 0);
+    }
+
+    #[test]
+    fn http_library_with_copied_chrome_ua_scores_like_a_missing_ua() {
+        let mut h = headers_chrome_like();
+        strip_fetch_metadata(&mut h);
+        h.remove("sec-ch-ua");
+        assert_eq!(
+            score_header_anomaly(&h),
+            SEC_FETCH_MISSING_SCORE + CLIENT_HINTS_MISSING_SCORE
+        );
+        assert_eq!(score_header_anomaly(&h), UA_MISSING_SCORE);
+    }
+
+    #[test]
+    fn non_browser_ua_without_fetch_metadata_is_not_impersonation() {
+        // An honest server-side client claims neither Mozilla nor Chromium.
+        let mut h = headers_browser_like();
+        strip_fetch_metadata(&mut h);
+        h.insert(USER_AGENT, HeaderValue::from_static("AcmeFormsBackend/2.0"));
+        assert_eq!(score_header_anomaly(&h), 0);
     }
 
     #[test]

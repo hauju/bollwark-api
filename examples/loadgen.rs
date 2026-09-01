@@ -197,6 +197,26 @@ fn realistic_headers() -> HeaderMap {
         HeaderName::from_static("accept-encoding"),
         HeaderValue::from_static("gzip, deflate, br"),
     );
+    // A Chromium `fetch()` also carries fetch metadata and low-entropy client
+    // hints; without them the UA above reads as a copied string (+30).
+    h.insert(
+        HeaderName::from_static("sec-fetch-mode"),
+        HeaderValue::from_static("cors"),
+    );
+    h.insert(
+        HeaderName::from_static("sec-fetch-site"),
+        HeaderValue::from_static("cross-site"),
+    );
+    h.insert(
+        HeaderName::from_static("sec-fetch-dest"),
+        HeaderValue::from_static("empty"),
+    );
+    h.insert(
+        HeaderName::from_static("sec-ch-ua"),
+        HeaderValue::from_static(
+            r#""Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99""#,
+        ),
+    );
     h
 }
 
