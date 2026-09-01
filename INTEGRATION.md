@@ -309,7 +309,7 @@ curl -s -X POST https://api.bollwark.eu/v1/verify \
   -d '{ "token": "<captcha-token value>" }'
 ```
 
-> **Server-to-server callers** that build the request without the widget can send the explicit fields instead of `token`: `challenge_id` plus `nonce`, with optional `honeypot` and `behavior`.
+> **Server-to-server callers** that build the request without the widget can send the explicit fields instead of `token`: `challenge_id` plus `nonce`, with optional `honeypot` and `behavior`. Forward the widget's `behavior` blob verbatim or omit it — never synthesise a constant one: identical activity-claiming blobs repeating on a site are scored as scripted traffic (see *Verify-time signals* in `CONFIGURATION.md`), and an omitted blob is neutral by default.
 
 Successful response:
 

@@ -15,6 +15,7 @@ use bollwark::puzzle::challenge::{
     solve_argon2id_challenge, solve_challenge,
 };
 use bollwark::puzzle::types::{Algorithm, Argon2idParams, PuzzleConfig};
+use bollwark::risk::behavior::BEHAVIOR_DUPLICATE_MIN;
 use bollwark::risk::{
     CidrListReputation, EscalationTier, FingerprintBlocklist, ReputationStore, RiskScorer,
     TrustedProxies, VerifyScorer,
@@ -1708,6 +1709,99 @@ async fn test_behavior_organic_passes() {
         .unwrap();
     let result: VerifyResponse = serde_json::from_slice(&body).unwrap();
     assert!(result.success);
+}
+
+/// One full puzzle → solve → verify cycle carrying `behavior`, with the
+/// challenge backdated so the dwell band contributes nothing and the behaviour
+/// blob is the only thing being measured. Returns the response's `success`.
+async fn solve_and_verify_with_behavior(
+    app: &axum::Router,
+    store: &InMemoryStore,
+    site: &CreateSiteResponse,
+    behavior: serde_json::Value,
+) -> bool {
+    let (_, puzzle) = get_test_puzzle(app, &site.site_key.to_string()).await;
+    let puzzle = puzzle.unwrap();
+    let nonce = solve_challenge(&puzzle.prefix, puzzle.difficulty);
+    backdate_challenge(store, puzzle.challenge_id, 5).await;
+
+    let verify_body = serde_json::json!({
+        "challenge_id": puzzle.challenge_id,
+        "nonce": nonce,
+        "behavior": behavior,
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/verify")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", site.secret_key))
+        .body(Body::from(serde_json::to_vec(&verify_body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: VerifyResponse = serde_json::from_slice(&body).unwrap();
+    result.success
+}
+
+#[tokio::test]
+async fn test_duplicate_behavior_blob_escalates_after_the_threshold() {
+    // A script replaying one fabricated organic-looking blob — the exact
+    // payload that scored 0 before this signal existed. The site pulls
+    // verify_block_min down to the duplicate weight so the escalation is
+    // observable over HTTP at all: a ShadowFail still answers success=true.
+    let (app, store) = test_app_with_store(|_| {});
+    let site =
+        create_test_site_with_policy(&app, serde_json::json!({ "verify_block_min": 30 })).await;
+    let n = BEHAVIOR_DUPLICATE_MIN;
+
+    let blob = serde_json::json!({
+        "mouse_moves": 20,
+        "touches": 0,
+        "interactions": 2,
+        "first_interaction_ms": 800,
+    });
+
+    for i in 1..n {
+        assert!(
+            solve_and_verify_with_behavior(&app, &store, &site, blob.clone()).await,
+            "submission {i} is still below the duplicate threshold — \
+             {n} identical blobs is the evidence, fewer is coincidence"
+        );
+    }
+    for i in n..=n + 1 {
+        assert!(
+            !solve_and_verify_with_behavior(&app, &store, &site, blob.clone()).await,
+            "submission {i} repeats a blob this site has already seen {} times",
+            i - 1
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_distinct_behavior_blobs_do_not_escalate() {
+    // The same traffic volume from N+1 different visitors. Real widgets differ
+    // in at least the millisecond of their first interaction, so nothing here
+    // is a duplicate and the identical policy leaves every submission alone.
+    let (app, store) = test_app_with_store(|_| {});
+    let site =
+        create_test_site_with_policy(&app, serde_json::json!({ "verify_block_min": 30 })).await;
+    let n = BEHAVIOR_DUPLICATE_MIN;
+
+    for i in 0..=n {
+        let blob = serde_json::json!({
+            "mouse_moves": 20 + i,
+            "touches": 0,
+            "interactions": 2,
+            "first_interaction_ms": 800 + i,
+        });
+        assert!(
+            solve_and_verify_with_behavior(&app, &store, &site, blob).await,
+            "distinct blob {i} must not be treated as a repeat"
+        );
+    }
 }
 
 #[tokio::test]

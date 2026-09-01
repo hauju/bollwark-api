@@ -10,6 +10,9 @@ use axum::response::IntoResponse;
 use crate::dashboard::types::{PuzzleRecord, VerifyRecord};
 use crate::error::CaptchaError;
 use crate::puzzle::types::Algorithm;
+use crate::risk::behavior::{
+    behavior_fingerprint, claims_activity, score_duplicate_blob, score_impossible_timing,
+};
 use crate::risk::{
     BehaviorPresence, EscalationTier, SignalContext, TlsFingerprint, VerifyContext, VerifyDecision,
     anonymize_ip, client_ip, difficulty_for, rate_key,
@@ -511,10 +514,27 @@ pub async fn verify(
         Some(report) => BehaviorPresence::Present(report),
         None => BehaviorPresence::Absent,
     };
+    // How many times this site has already seen this exact blob. Counted here
+    // rather than inside the scorer for the same reason `ip_count`/
+    // `site_count` are counted in the puzzle handler: scorers stay pure and
+    // testable without a store. Only activity-claiming blobs are counted — an
+    // identical flatline is what every untouched form produces, and it is
+    // already scored. Counted *after* the proof of work, so a wrong-nonce
+    // retry loop can neither inflate a visitor's own count nor grow the map.
+    let behavior_duplicate_count = match req.behavior {
+        Some(report) if claims_activity(&report) => {
+            state
+                .store
+                .increment_behavior_blob_count(&site.site_key, behavior_fingerprint(&report))
+                .await?
+        }
+        _ => 0,
+    };
     let vctx = VerifyContext {
         honeypot_tripped,
         time_on_page_ms: Some(time_on_page_ms),
         behavior,
+        behavior_duplicate_count,
     };
     let vscore = state.verify_scorer.score(&vctx, policy.verify);
 
@@ -544,6 +564,12 @@ pub async fn verify(
         Some(b) => (flag(b.webdriver), flag(b.automation), flag(b.headless)),
         None => ("no_blob", "no_blob", "no_blob"),
     };
+    // Which of the two blob-plausibility checks fired. Both fold into
+    // `sig_behavior`, so the aggregate can't tell them apart — and these two
+    // are the ones whose false-positive rate has to be watched on real traffic
+    // before anyone tightens `verify_block_min` around them.
+    let impossible_timing = score_impossible_timing(behavior, Some(time_on_page_ms)) > 0;
+    let duplicate_blob = score_duplicate_blob(behavior, behavior_duplicate_count) > 0;
 
     macro_rules! emit_decision {
         ($lvl:expr) => {
@@ -560,6 +586,8 @@ pub async fn verify(
                 webdriver = webdriver_flag,
                 automation = automation_flag,
                 headless = headless_flag,
+                impossible_timing = impossible_timing,
+                duplicate_blob = duplicate_blob,
                 time_on_page_ms = time_on_page_ms,
                 monitored = monitored,
                 "Verify decision"
@@ -629,6 +657,11 @@ fn verify_failover(
             Some(report) => BehaviorPresence::Present(report),
             None => BehaviorPresence::Absent,
         },
+        // No challenge means no dwell to contradict, and this path is
+        // deliberately synchronous — an outage recovery can deliver the whole
+        // site's backlog at once, which is also the one moment when a burst of
+        // similar blobs is expected rather than suspicious.
+        behavior_duplicate_count: 0,
     };
     let vscore = state.verify_scorer.score(&vctx, policy.verify);
 

@@ -109,5 +109,20 @@ pub trait Store: Send + Sync + 'static {
         site_key: &Uuid,
     ) -> impl Future<Output = Result<u32, CaptchaError>> + Send;
 
+    /// Count how many times an identical verify-time behaviour blob has been
+    /// submitted for this site inside the dedup window, returning the new
+    /// count (this submission included). `fingerprint` is
+    /// [`crate::risk::behavior::behavior_fingerprint`] — a hash of the blob's
+    /// parsed fields, never the raw JSON.
+    ///
+    /// Deliberately in-memory and short-lived wherever it's implemented: the
+    /// window exists to spot one script inside one site's traffic, and a hash
+    /// of event counters is not something to persist.
+    fn increment_behavior_blob_count(
+        &self,
+        site_key: &Uuid,
+        fingerprint: u64,
+    ) -> impl Future<Output = Result<u32, CaptchaError>> + Send;
+
     fn cleanup_expired(&self) -> impl Future<Output = Result<(), CaptchaError>> + Send;
 }

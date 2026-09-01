@@ -24,9 +24,19 @@
 //! are trying to catch the cheap ones, and to give the weighted ensemble
 //! one more signal that's well-correlated with the puzzle-time signals.
 //!
+//! Two of the checks here are about the blob rather than about the visitor:
+//! a timeline the server can prove impossible, and a blob one site has seen
+//! byte-identically several times inside a window. Both need context the blob
+//! doesn't carry (the server-derived dwell, a per-site occurrence count), so
+//! they take it as an argument and stay pure — see `score_impossible_timing`
+//! and `score_duplicate_blob`.
+//!
 //! Older clients that don't include the block at all are treated as
 //! `Absent` and contribute zero — we don't want to penalise existing
 //! integrations on rollout.
+
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 use serde::Deserialize;
 
@@ -130,6 +140,127 @@ pub const BEHAVIOR_AUTOMATION_SCORE: u32 = 30;
 // populations they can misfire on (in-app WebViews, embedded browsers) are
 // real traffic. It earns its keep in combination, not alone.
 pub const BEHAVIOR_HEADLESS_SCORE: u32 = 20;
+
+// ── Blob plausibility: checks the blob's own fields can't answer ────────────
+
+// How far `first_interaction_ms` may legitimately exceed the server's dwell.
+//
+// The widget sets its page-load anchor at construction, *before* the
+// `GET /v1/puzzle` that mints the challenge, and measures
+// `first_interaction_ms` from it. The server's dwell clock
+// (`challenge.dwell_since`, inherited across pre-expiry refreshes) starts
+// later, by however long that first fetch took. That offset is the whole of
+// the legitimate excess: an interaction at wall time `t` claims
+// `t - page_load`, while the server credits at most `t_submit - dwell_since`,
+// so
+//
+//     first_interaction_ms - time_on_page_ms  <=  dwell_since - page_load
+//
+// with equality only if the visitor submitted at the very instant they first
+// interacted. Beyond that offset the blob describes an interaction that
+// happened after the visitor was already submitting, which cannot occur —
+// hence "impossible", not "unlikely".
+//
+// 30s is far past any real offset (the widget's own retry backoff totals
+// 1.2s; a cold DNS+TLS handshake on a bad mobile link is a few seconds more).
+// The headroom buys a second property worth more than tight calibration: a
+// visitor whose first interaction was within 30s of the widget mounting can
+// never trip this, *whatever* happens to the dwell anchor. That matters
+// because the anchor can legitimately jump forward — a pre-expiry refresh
+// deferred while the tab was hidden past the TTL cites a challenge the server
+// has already swept, and an unmatched citation re-anchors dwell to now. The
+// slack is what keeps that visitor out of this check.
+pub const BEHAVIOR_IMPOSSIBLE_TIMING_SLACK_MS: u64 = 30_000;
+// Same calibration as the automation markers: shadow band alone under the
+// default 30/60, never a block on its own. The check is a certainty about the
+// blob, not about the visitor, and a client-asserted field is not something to
+// hard-fail a first-time rollout on.
+pub const BEHAVIOR_IMPOSSIBLE_TIMING_SCORE: u32 = 30;
+
+// How many byte-identical activity-claiming blobs one site may receive inside
+// `BEHAVIOR_DUPLICATE_WINDOW_SECS` before the next one scores.
+//
+// Humans do not produce identical counters. `first_interaction_ms` alone is a
+// millisecond reading, so two real visitors collide only when it is `None` —
+// no click, keypress, scroll, focus or touch before submit — which leaves
+// `mouse_moves` as the single varying field. A total flatline is that case
+// with `mouse_moves: 0`, and it is both expected in bulk and already worth
+// +30, so it is excluded from dedup entirely (see `claims_activity`); what
+// remains is the visitor who moved a pointer and did nothing else. Two of
+// those can plausibly land on the same small count on a busy site, so the
+// threshold sits well clear of it at 5 while still tripping a script at its
+// fifth submission.
+pub const BEHAVIOR_DUPLICATE_MIN: u32 = 5;
+// 10 minutes. Long enough that a script pacing itself under the 60s rate
+// window still accumulates (one submission a minute reaches 5 well inside it),
+// short enough that the in-memory map reclaims promptly.
+pub const BEHAVIOR_DUPLICATE_WINDOW_SECS: i64 = 600;
+pub const BEHAVIOR_DUPLICATE_SCORE: u32 = 30;
+
+/// Whether a blob claims any activity at all. Only these are deduplicated: a
+/// flatline is the one blob real clients repeat verbatim (every visitor who
+/// submits without touching the page produces it), and it already scores
+/// `BEHAVIOR_FLATLINE_SCORE` on its own.
+pub fn claims_activity(b: &BehaviorReport) -> bool {
+    b.mouse_moves > 0 || b.touches > 0 || b.interactions > 0
+}
+
+/// Deterministic fingerprint of a blob's *fields*, used as the dedup key.
+///
+/// Hashes the parsed struct rather than the raw JSON: field order, whitespace
+/// and omitted-versus-explicit defaults are all free for a script to vary, so
+/// hashing bytes would make dedup trivially evadable. The value lives in
+/// memory for one window and is never logged or persisted — a hash of event
+/// counters identifies no person.
+pub fn behavior_fingerprint(b: &BehaviorReport) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    b.mouse_moves.hash(&mut hasher);
+    b.touches.hash(&mut hasher);
+    b.interactions.hash(&mut hasher);
+    b.first_interaction_ms.hash(&mut hasher);
+    b.webdriver.hash(&mut hasher);
+    b.automation.hash(&mut hasher);
+    b.headless.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The blob claims an interaction that happened after the visitor existed.
+///
+/// `time_on_page_ms` is the server-derived dwell, passed in so this stays a
+/// pure function; `None` (the failover path, which has no challenge) means
+/// there is nothing to compare against and scores 0.
+pub fn score_impossible_timing(presence: BehaviorPresence, time_on_page_ms: Option<u64>) -> u32 {
+    let (BehaviorPresence::Present(b), Some(dwell)) = (presence, time_on_page_ms) else {
+        return 0;
+    };
+    // No first interaction reported — nothing to contradict. Pointer-only
+    // visitors live here: `mousemove` never sets the field.
+    let Some(first) = b.first_interaction_ms else {
+        return 0;
+    };
+    if first > dwell.saturating_add(BEHAVIOR_IMPOSSIBLE_TIMING_SLACK_MS) {
+        BEHAVIOR_IMPOSSIBLE_TIMING_SCORE
+    } else {
+        0
+    }
+}
+
+/// This exact blob has been submitted for this site `duplicate_count` times
+/// inside the dedup window (the count includes the submission being scored).
+///
+/// The count comes from the store, computed by the handler and passed in, so
+/// the scorer stays pure and database-free — the same shape as the puzzle
+/// handler passing `ip_count`/`site_count` into `SignalContext`.
+pub fn score_duplicate_blob(presence: BehaviorPresence, duplicate_count: u32) -> u32 {
+    let BehaviorPresence::Present(b) = presence else {
+        return 0;
+    };
+    if claims_activity(&b) && duplicate_count >= BEHAVIOR_DUPLICATE_MIN {
+        BEHAVIOR_DUPLICATE_SCORE
+    } else {
+        0
+    }
+}
 
 pub fn score_behavior(presence: BehaviorPresence) -> u32 {
     let BehaviorPresence::Present(b) = presence else {
@@ -501,5 +632,244 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(score_behavior(BehaviorPresence::Present(r)), 0);
+    }
+
+    // ── Impossible timing ──
+
+    #[test]
+    fn impossible_timing_is_absent_safe() {
+        assert_eq!(
+            score_impossible_timing(BehaviorPresence::Absent, Some(1_000)),
+            0
+        );
+    }
+
+    #[test]
+    fn impossible_timing_needs_a_server_dwell() {
+        // The failover path has no challenge and so no dwell — nothing to
+        // contradict, and it must not become a free penalty during an outage.
+        let r = BehaviorReport {
+            first_interaction_ms: Some(600_000),
+            interactions: 3,
+            ..report()
+        };
+        assert_eq!(
+            score_impossible_timing(BehaviorPresence::Present(r), None),
+            0
+        );
+    }
+
+    #[test]
+    fn impossible_timing_ignores_a_missing_first_interaction() {
+        // A pointer-only visitor never sets the field; absence can't lie.
+        let r = BehaviorReport {
+            first_interaction_ms: None,
+            ..report()
+        };
+        assert_eq!(
+            score_impossible_timing(BehaviorPresence::Present(r), Some(0)),
+            0
+        );
+    }
+
+    #[test]
+    fn impossible_timing_boundary_is_the_slack() {
+        let dwell = 2_000;
+        let at_slack = BehaviorReport {
+            first_interaction_ms: Some(dwell + BEHAVIOR_IMPOSSIBLE_TIMING_SLACK_MS),
+            ..report()
+        };
+        let past_slack = BehaviorReport {
+            first_interaction_ms: Some(dwell + BEHAVIOR_IMPOSSIBLE_TIMING_SLACK_MS + 1),
+            ..report()
+        };
+        assert_eq!(
+            score_impossible_timing(BehaviorPresence::Present(at_slack), Some(dwell)),
+            0,
+            "exactly one slack ahead is still explainable by the puzzle fetch"
+        );
+        assert_eq!(
+            score_impossible_timing(BehaviorPresence::Present(past_slack), Some(dwell)),
+            BEHAVIOR_IMPOSSIBLE_TIMING_SCORE
+        );
+    }
+
+    #[test]
+    fn organic_widget_timings_are_never_impossible() {
+        // The ordinary case: the interaction predates the submit, so the
+        // claim is below the dwell and the slack is not even consulted.
+        let r = report(); // first_interaction_ms = 800
+        assert_eq!(
+            score_impossible_timing(BehaviorPresence::Present(r), Some(30_000)),
+            0
+        );
+    }
+
+    #[test]
+    fn keyboard_only_visitor_is_untouched_by_the_plausibility_checks() {
+        // Pointer-free with a real interaction trail. `first_interaction_ms`
+        // is set (keydown does set it, unlike mousemove), so this visitor is
+        // in scope for the timing check and must still score nothing.
+        let keyboard = BehaviorReport {
+            mouse_moves: 0,
+            touches: 0,
+            interactions: 24,
+            first_interaction_ms: Some(1_500),
+            ..Default::default()
+        };
+        let p = BehaviorPresence::Present(keyboard);
+        assert_eq!(score_behavior(p), 0);
+        assert_eq!(score_impossible_timing(p, Some(1_500)), 0);
+        assert_eq!(score_duplicate_blob(p, BEHAVIOR_DUPLICATE_MIN - 1), 0);
+    }
+
+    // ── Duplicate blobs ──
+
+    #[test]
+    fn duplicate_is_absent_safe() {
+        assert_eq!(
+            score_duplicate_blob(BehaviorPresence::Absent, BEHAVIOR_DUPLICATE_MIN * 10),
+            0
+        );
+    }
+
+    #[test]
+    fn duplicate_boundary_is_the_threshold() {
+        let p = BehaviorPresence::Present(report());
+        assert_eq!(score_duplicate_blob(p, BEHAVIOR_DUPLICATE_MIN - 1), 0);
+        assert_eq!(
+            score_duplicate_blob(p, BEHAVIOR_DUPLICATE_MIN),
+            BEHAVIOR_DUPLICATE_SCORE
+        );
+    }
+
+    #[test]
+    fn flatline_is_excluded_from_dedup() {
+        // Every visitor who submits without touching the page produces this
+        // exact blob, so repeats are expected — and it already scores +30.
+        let flat = BehaviorReport::default();
+        assert!(!claims_activity(&flat));
+        assert_eq!(
+            score_duplicate_blob(
+                BehaviorPresence::Present(flat),
+                BEHAVIOR_DUPLICATE_MIN * 100
+            ),
+            0
+        );
+        // A flatline carrying only environment probes is still a flatline.
+        let probed = BehaviorReport {
+            webdriver: Some(false),
+            automation: Some(false),
+            headless: Some(false),
+            ..Default::default()
+        };
+        assert!(!claims_activity(&probed));
+    }
+
+    #[test]
+    fn any_single_counter_makes_a_blob_eligible_for_dedup() {
+        for r in [
+            BehaviorReport {
+                mouse_moves: 1,
+                ..Default::default()
+            },
+            BehaviorReport {
+                touches: 1,
+                ..Default::default()
+            },
+            BehaviorReport {
+                interactions: 1,
+                ..Default::default()
+            },
+        ] {
+            assert!(claims_activity(&r));
+        }
+    }
+
+    #[test]
+    fn both_plausibility_checks_stack() {
+        // Independent facts: one is about this submission's internal
+        // consistency, the other about the population of submissions. Unlike
+        // webdriver/automation they are not two views of one thing, so they
+        // sum — and a client that trips both has earned block_min.
+        let r = BehaviorReport {
+            mouse_moves: 20,
+            interactions: 2,
+            first_interaction_ms: Some(120_000),
+            ..Default::default()
+        };
+        let p = BehaviorPresence::Present(r);
+        let total = score_behavior(p)
+            + score_impossible_timing(p, Some(1_000))
+            + score_duplicate_blob(p, BEHAVIOR_DUPLICATE_MIN);
+        assert_eq!(
+            total,
+            BEHAVIOR_IMPOSSIBLE_TIMING_SCORE + BEHAVIOR_DUPLICATE_SCORE
+        );
+    }
+
+    // ── Fingerprint ──
+
+    #[test]
+    fn fingerprint_is_stable_and_field_sensitive() {
+        let a = report();
+        assert_eq!(behavior_fingerprint(&a), behavior_fingerprint(&report()));
+
+        for changed in [
+            BehaviorReport {
+                mouse_moves: a.mouse_moves + 1,
+                ..a
+            },
+            BehaviorReport {
+                touches: a.touches + 1,
+                ..a
+            },
+            BehaviorReport {
+                interactions: a.interactions + 1,
+                ..a
+            },
+            BehaviorReport {
+                first_interaction_ms: Some(801),
+                ..a
+            },
+            BehaviorReport {
+                first_interaction_ms: None,
+                ..a
+            },
+            BehaviorReport {
+                webdriver: Some(true),
+                ..a
+            },
+            BehaviorReport {
+                automation: None,
+                ..a
+            },
+            BehaviorReport {
+                headless: Some(true),
+                ..a
+            },
+        ] {
+            assert_ne!(
+                behavior_fingerprint(&a),
+                behavior_fingerprint(&changed),
+                "every wire field must be covered by the fingerprint"
+            );
+        }
+    }
+
+    #[test]
+    fn fingerprint_ignores_json_shape() {
+        // Hashing the parsed struct, not the bytes: re-ordering keys or
+        // spelling out a default must not mint a fresh dedup identity.
+        let a: BehaviorReport = serde_json::from_str(
+            r#"{"mouse_moves":12,"interactions":3,"first_interaction_ms":800}"#,
+        )
+        .unwrap();
+        let b: BehaviorReport = serde_json::from_str(
+            r#"{ "first_interaction_ms" : 800 , "interactions": 3, "touches": 0,
+                 "mouse_moves": 12 }"#,
+        )
+        .unwrap();
+        assert_eq!(behavior_fingerprint(&a), behavior_fingerprint(&b));
     }
 }

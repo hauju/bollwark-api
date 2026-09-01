@@ -10,13 +10,22 @@
 //! `ShadowFail` returns `success: true` to the caller but emits a structured
 //! warn log so an operator can review the request offline.
 
-use super::behavior::{BEHAVIOR_FLATLINE_SCORE, BehaviorPresence, score_behavior};
+use super::behavior::{
+    BEHAVIOR_FLATLINE_SCORE, BehaviorPresence, score_behavior, score_duplicate_blob,
+    score_impossible_timing,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct VerifyContext {
     pub honeypot_tripped: bool,
     pub time_on_page_ms: Option<u64>,
     pub behavior: BehaviorPresence,
+    /// How many times this exact behaviour blob has been submitted for this
+    /// site inside the dedup window, including this submission. Supplied by
+    /// the handler from the store — the scorer stays pure, exactly as the
+    /// puzzle side passes `ip_count`/`site_count` into `SignalContext`.
+    /// `0` means "not counted" (no blob, a flatline, or the failover path).
+    pub behavior_duplicate_count: u32,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -109,9 +118,21 @@ impl VerifyScorer {
                 0
             },
             time_on_page: score_time_on_page(ctx.time_on_page_ms),
+            // All three behaviour-blob terms fold into one component so the
+            // decision-log schema doesn't move. They sum rather than saturate:
+            // `score_behavior` judges what the counters describe, the timing
+            // check judges whether this submission's timeline is internally
+            // possible, and the dedup check judges the blob against every
+            // other blob this site received. Three separate facts, unlike the
+            // `webdriver`/`automation` pair inside `score_behavior`, which are
+            // two readings of one.
             behavior: match ctx.behavior {
                 BehaviorPresence::Absent if self.require_behavior => BEHAVIOR_FLATLINE_SCORE,
-                b => score_behavior(b),
+                b => {
+                    score_behavior(b)
+                        + score_impossible_timing(b, ctx.time_on_page_ms)
+                        + score_duplicate_blob(b, ctx.behavior_duplicate_count)
+                }
             },
         };
         let total = breakdown.honeypot + breakdown.time_on_page + breakdown.behavior;
@@ -148,6 +169,7 @@ mod tests {
             honeypot_tripped: false,
             time_on_page_ms: Some(10_000),
             behavior: BehaviorPresence::Absent,
+            behavior_duplicate_count: 0,
         }
     }
 
@@ -288,6 +310,7 @@ mod tests {
             // Inside the <2s band, so the time signal contributes its +25.
             time_on_page_ms: Some(1_500),
             behavior: BehaviorPresence::Present(keyboard),
+            behavior_duplicate_count: 0,
         };
         let tight = VerifyThresholds {
             shadow_min: 20,
@@ -323,6 +346,7 @@ mod tests {
             honeypot_tripped: false,
             time_on_page_ms: Some(1_500),
             behavior: BehaviorPresence::Present(typing_at_mount),
+            behavior_duplicate_count: 0,
         };
         let tight = VerifyThresholds {
             shadow_min: 20,
@@ -333,5 +357,99 @@ mod tests {
         assert_eq!(s.breakdown.behavior, 0, "navigation style is not a penalty");
         assert_eq!(s.total, 25, "only the short-dwell band should contribute");
         assert_ne!(s.decision, VerifyDecision::Block);
+    }
+
+    /// A fabricated blob claiming an interaction from long before the visitor
+    /// existed. Alone it must shadow, never block — the same rollout stance as
+    /// `VERIFY_REQUIRE_BEHAVIOR`.
+    #[test]
+    fn impossible_timing_alone_shadows() {
+        let mut c = ctx();
+        c.time_on_page_ms = Some(10_000);
+        c.behavior = BehaviorPresence::Present(BehaviorReport {
+            mouse_moves: 20,
+            interactions: 2,
+            first_interaction_ms: Some(120_000),
+            ..Default::default()
+        });
+        let s = scorer().score(&c, VerifyThresholds::default());
+        assert_eq!(
+            s.breakdown.behavior,
+            super::super::behavior::BEHAVIOR_IMPOSSIBLE_TIMING_SCORE
+        );
+        assert_eq!(s.decision, VerifyDecision::ShadowFail);
+    }
+
+    /// Same organic-looking blob, arriving for the Nth time on one site.
+    #[test]
+    fn duplicate_blob_alone_shadows() {
+        let mut c = ctx();
+        c.behavior = BehaviorPresence::Present(BehaviorReport {
+            mouse_moves: 20,
+            interactions: 2,
+            first_interaction_ms: Some(800),
+            ..Default::default()
+        });
+        c.behavior_duplicate_count = super::super::behavior::BEHAVIOR_DUPLICATE_MIN;
+        let s = scorer().score(&c, VerifyThresholds::default());
+        assert_eq!(
+            s.breakdown.behavior,
+            super::super::behavior::BEHAVIOR_DUPLICATE_SCORE
+        );
+        assert_eq!(s.decision, VerifyDecision::ShadowFail);
+    }
+
+    /// Below the threshold the same blob is worth nothing: humans share a
+    /// site, and four coincidences are not evidence.
+    #[test]
+    fn duplicate_below_threshold_passes() {
+        let mut c = ctx();
+        c.behavior = BehaviorPresence::Present(BehaviorReport {
+            mouse_moves: 20,
+            interactions: 2,
+            first_interaction_ms: Some(800),
+            ..Default::default()
+        });
+        c.behavior_duplicate_count = super::super::behavior::BEHAVIOR_DUPLICATE_MIN - 1;
+        let s = scorer().score(&c, VerifyThresholds::default());
+        assert_eq!(s.breakdown.behavior, 0);
+        assert_eq!(s.decision, VerifyDecision::Pass);
+    }
+
+    /// The two checks are independent facts, so they stack — and a client
+    /// that is both internally impossible and mass-produced reaches block_min
+    /// on the behaviour component alone. Neither gets there by itself.
+    #[test]
+    fn impossible_and_duplicate_stack_to_block() {
+        let mut c = ctx();
+        c.time_on_page_ms = Some(10_000);
+        c.behavior = BehaviorPresence::Present(BehaviorReport {
+            mouse_moves: 20,
+            interactions: 2,
+            first_interaction_ms: Some(120_000),
+            ..Default::default()
+        });
+        c.behavior_duplicate_count = super::super::behavior::BEHAVIOR_DUPLICATE_MIN;
+        let s = scorer().score(&c, VerifyThresholds::default());
+        assert_eq!(
+            s.breakdown.behavior,
+            super::super::behavior::BEHAVIOR_IMPOSSIBLE_TIMING_SCORE
+                + super::super::behavior::BEHAVIOR_DUPLICATE_SCORE
+        );
+        assert_eq!(s.decision, VerifyDecision::Block);
+    }
+
+    /// Neither check may resurrect a blob that was never sent: an absent blob
+    /// stays 0 whatever dwell or duplicate count accompanies it.
+    #[test]
+    fn absent_blob_is_untouched_by_the_plausibility_checks() {
+        let mut c = ctx();
+        // A zero dwell would make any claimed first interaction "impossible",
+        // and the duplicate count is absurd — neither may invent a blob.
+        c.time_on_page_ms = Some(0);
+        c.behavior_duplicate_count = super::super::behavior::BEHAVIOR_DUPLICATE_MIN * 10;
+        let s = scorer().score(&c, VerifyThresholds::default());
+        assert_eq!(s.breakdown.behavior, 0);
+        assert_eq!(s.total, TIME_VERY_SHORT_SCORE, "only the dwell band fires");
     }
 }

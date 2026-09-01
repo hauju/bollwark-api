@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::error::CaptchaError;
 use crate::puzzle::types::Challenge;
+use crate::risk::behavior::BEHAVIOR_DUPLICATE_WINDOW_SECS;
 use crate::site::types::{Site, SitePolicy};
 
 use super::Store;
@@ -32,12 +33,17 @@ const RATE_SHARDS: usize = 16;
 /// counter bump), matching the previous single-lock behaviour per key.
 struct ShardedRates<K> {
     shards: [RwLock<HashMap<K, RateWindow>>; RATE_SHARDS],
+    /// Length of one counting window, in seconds. Per-instance because the
+    /// maps count different things: issuance rate over 60s, repeated
+    /// behaviour blobs over `BEHAVIOR_DUPLICATE_WINDOW_SECS`.
+    window_secs: i64,
 }
 
 impl<K: Eq + Hash + Clone> ShardedRates<K> {
-    fn new() -> Self {
+    fn new(window_secs: i64) -> Self {
         Self {
             shards: std::array::from_fn(|_| RwLock::new(HashMap::new())),
+            window_secs,
         }
     }
 
@@ -47,7 +53,7 @@ impl<K: Eq + Hash + Clone> ShardedRates<K> {
         &self.shards[(hasher.finish() as usize) % RATE_SHARDS]
     }
 
-    /// Increment the key's counter within the current 60s window, resetting it
+    /// Increment the key's counter within the current window, resetting it
     /// when the window has rolled over. Returns the new count.
     fn increment(&self, key: K) -> Result<u32, CaptchaError> {
         let mut map = self.shard(&key).write().map_err(lock_err)?;
@@ -56,7 +62,7 @@ impl<K: Eq + Hash + Clone> ShardedRates<K> {
             count: 0,
             window_start: now,
         });
-        if now - entry.window_start >= RATE_WINDOW_SECS {
+        if now - entry.window_start >= self.window_secs {
             entry.count = 0;
             entry.window_start = now;
         }
@@ -64,11 +70,11 @@ impl<K: Eq + Hash + Clone> ShardedRates<K> {
         Ok(entry.count)
     }
 
-    /// Drop windows older than twice the rate window across every stripe.
+    /// Drop windows older than twice this map's window across every stripe.
     fn retain_fresh(&self, now_ts: i64) -> Result<(), CaptchaError> {
         for shard in &self.shards {
             let mut map = shard.write().map_err(lock_err)?;
-            map.retain(|_, w| now_ts - w.window_start < RATE_WINDOW_SECS * 2);
+            map.retain(|_, w| now_ts - w.window_start < self.window_secs * 2);
         }
         Ok(())
     }
@@ -80,6 +86,12 @@ pub struct InMemoryStore {
     sites_by_secret: RwLock<HashMap<String, Uuid>>,
     ip_rates: ShardedRates<IpAddr>,
     site_rates: ShardedRates<Uuid>,
+    /// Occurrences of one verify-time behaviour blob per site, keyed on
+    /// `(site_key, behavior_fingerprint)`. Same shape as the counters above,
+    /// on a longer window. Entries are only created after a *valid* proof of
+    /// work, so growing this map costs an attacker one solve per entry, and
+    /// `cleanup_expired` reclaims it on the same sweep as the rate windows.
+    behavior_blobs: ShardedRates<(Uuid, u64)>,
     /// Optional write-through persistence for the sites table. Challenges
     /// and rate windows stay in-memory — they're cheap to lose on restart.
     /// Sites can't be: integrators store the secret_key client-side, so a
@@ -106,8 +118,9 @@ impl InMemoryStore {
             challenges: RwLock::new(HashMap::new()),
             sites_by_key: RwLock::new(HashMap::new()),
             sites_by_secret: RwLock::new(HashMap::new()),
-            ip_rates: ShardedRates::new(),
-            site_rates: ShardedRates::new(),
+            ip_rates: ShardedRates::new(RATE_WINDOW_SECS),
+            site_rates: ShardedRates::new(RATE_WINDOW_SECS),
+            behavior_blobs: ShardedRates::new(BEHAVIOR_DUPLICATE_WINDOW_SECS),
             site_persistence: None,
         }
     }
@@ -521,6 +534,14 @@ impl Store for InMemoryStore {
         self.site_rates.increment(*site_key)
     }
 
+    async fn increment_behavior_blob_count(
+        &self,
+        site_key: &Uuid,
+        fingerprint: u64,
+    ) -> Result<u32, CaptchaError> {
+        self.behavior_blobs.increment((*site_key, fingerprint))
+    }
+
     async fn cleanup_expired(&self) -> Result<(), CaptchaError> {
         let now = Utc::now();
 
@@ -534,6 +555,7 @@ impl Store for InMemoryStore {
         let ts = now.timestamp();
         self.ip_rates.retain_fresh(ts)?;
         self.site_rates.retain_fresh(ts)?;
+        self.behavior_blobs.retain_fresh(ts)?;
 
         Ok(())
     }
@@ -736,6 +758,77 @@ mod tests {
 
         assert_eq!(store.increment_site_count(&site_key).await.unwrap(), 1);
         assert_eq!(store.increment_site_count(&site_key).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_behavior_blob_counter_is_per_site_and_per_fingerprint() {
+        let store = InMemoryStore::new();
+        let site = Uuid::new_v4();
+        let other_site = Uuid::new_v4();
+
+        assert_eq!(
+            store
+                .increment_behavior_blob_count(&site, 42)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .increment_behavior_blob_count(&site, 42)
+                .await
+                .unwrap(),
+            2
+        );
+        // A different blob on the same site is a separate count...
+        assert_eq!(
+            store
+                .increment_behavior_blob_count(&site, 43)
+                .await
+                .unwrap(),
+            1
+        );
+        // ...and so is the same blob on a different site: one tenant's traffic
+        // must never push another tenant's visitors over the threshold.
+        assert_eq!(
+            store
+                .increment_behavior_blob_count(&other_site, 42)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_reclaims_stale_behavior_blob_windows() {
+        let store = InMemoryStore::new();
+        let site = Uuid::new_v4();
+        store.increment_behavior_blob_count(&site, 7).await.unwrap();
+
+        // Backdate past twice the dedup window, which is what `retain_fresh`
+        // reclaims on. Without the sweep this map would grow for the process
+        // lifetime.
+        {
+            let shard = store.behavior_blobs.shard(&(site, 7));
+            let mut map = shard.write().unwrap();
+            map.get_mut(&(site, 7)).unwrap().window_start =
+                Utc::now().timestamp() - BEHAVIOR_DUPLICATE_WINDOW_SECS * 3;
+        }
+
+        store.cleanup_expired().await.unwrap();
+
+        // Assert on the map, not on a fresh count: `increment` rolls a stale
+        // window over by itself, so a count of 1 would look identical whether
+        // or not the sweeper ever ran.
+        assert!(
+            !store
+                .behavior_blobs
+                .shard(&(site, 7))
+                .read()
+                .unwrap()
+                .contains_key(&(site, 7)),
+            "the sweeper must reclaim the dedup map, not just the rate windows"
+        );
     }
 
     #[tokio::test]
