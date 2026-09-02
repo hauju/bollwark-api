@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::error::CaptchaError;
 use crate::puzzle::types::Algorithm;
-use crate::risk::{BehaviorReport, EscalationTier};
+use crate::risk::{BehaviorReport, EscalationTier, VerifyDecision};
 use crate::site::types::SitePolicy;
 
 // --- Requests ---
@@ -270,6 +270,32 @@ pub struct BlockedResponse {
     pub info_urls: Option<InfoUrls>,
 }
 
+/// The verify-time verdict as a band, so an integrator can step up — email
+/// confirmation, a review queue, tighter downstream limits — on a submission
+/// the service accepted but did not like. Before this field a `ShadowFail`
+/// was invisible outside the operator's WARN log, so nobody downstream could
+/// act on it. `success` stays the enforcement decision; `risk` is the reason
+/// behind it, which is why `high` can arrive with `success: true` (the site
+/// is in monitor mode) and why an invalid proof of work carries no band at
+/// all — a wrong nonce is a failed proof, not a judgement about the visitor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RiskBand {
+    Low,
+    Elevated,
+    High,
+}
+
+impl From<VerifyDecision> for RiskBand {
+    fn from(d: VerifyDecision) -> Self {
+        match d {
+            VerifyDecision::Pass => RiskBand::Low,
+            VerifyDecision::ShadowFail => RiskBand::Elevated,
+            VerifyDecision::Block => RiskBand::High,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VerifyResponse {
     pub success: bool,
@@ -281,14 +307,28 @@ pub struct VerifyResponse {
     /// alone and get availability by default.
     #[serde(default)]
     pub failover: bool,
+    /// See [`RiskBand`]. Absent only when there was no risk verdict to
+    /// report (an invalid proof of work).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<RiskBand>,
 }
 
 impl VerifyResponse {
     /// The ordinary path: `failover` is false for every solved-puzzle verdict.
-    pub fn solved(success: bool) -> Self {
+    pub fn solved(success: bool, decision: VerifyDecision) -> Self {
         Self {
             success,
             failover: false,
+            risk: Some(decision.into()),
+        }
+    }
+
+    /// A wrong nonce: refused before any scoring ran, so there is no band.
+    pub fn pow_invalid() -> Self {
+        Self {
+            success: false,
+            failover: false,
+            risk: None,
         }
     }
 }

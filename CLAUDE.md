@@ -53,7 +53,7 @@ Self-hostable proof-of-work CAPTCHA service. Clients solve a PoW puzzle (find a 
 Two scoring passes bracket every successful solve:
 
 1. **Puzzle-time** (`GET /v1/puzzle`): score the request, pick an `EscalationTier`, then either issue a PoW puzzle at a tier-adjusted difficulty, or short-circuit with `429` for the `Block` tier.
-2. **Verify-time** (`POST /v1/verify`): after the PoW check passes, run a second scoring pass on signals only available at submit (time-on-page — derived server-side as `now - challenge.created_at`, not client-reported — honeypot, behavioural telemetry). Decision is `Pass` / `ShadowFail` (return `success: true` but emit a WARN log) / `Block` (return `success: false`).
+2. **Verify-time** (`POST /v1/verify`): after the PoW check passes, run a second scoring pass on signals only available at submit (time-on-page — derived server-side as `now - challenge.created_at`, not client-reported — honeypot, behavioural telemetry). Decision is `Pass` / `ShadowFail` (return `success: true` but emit a WARN log) / `Block` (return `success: false`). The decision is also returned as `risk: low|elevated|high` (`api::types::RiskBand`) so an integrator can step up on a shadow-failed submission; `success` stays the enforcement, which is why a monitored site answers `success: true` next to `risk: high`, and an invalid proof of work carries no band at all.
 
 ### Module Layout
 
@@ -118,7 +118,7 @@ Two scoring passes bracket every successful solve:
 - PoW verification runs inline for SHA-256 (a single hash) but is offloaded to `spawn_blocking` for Argon2id, since a memory-hard hash on an async worker thread would let a flood of `/v1/verify` attempts starve the runtime and stall every endpoint. Dispatch is on `challenge.algorithm` in the verify handler.
 - `MAX_ACTIVE_CHALLENGES` (default 1,000,000; `0` disables) is a global memory backstop: when the challenge map hits the ceiling, the puzzle handler sheds new issuance via the `Block`/429 path regardless of per-request score. Distinct from `IP_HARD_LIMIT` (per-IP) — it bounds a distributed or IPv6 /64-spread flood that stays under the per-IP cap.
 - `CLEANUP_INTERVAL_SECS` is coerced to ≥ 1s at config load: `tokio::time::interval` panics on a zero period, and that panic (swallowed inside the spawned task) would silently disable the only reclaimer for the challenge and rate-window maps.
-- `ShadowFail` has no persistent quarantine store; the structured WARN log is the audit trail.
+- `ShadowFail` has no persistent quarantine store; the structured WARN log is the audit trail, and `risk: "elevated"` on the verify response is the integrator-facing signal.
 - The TLS fingerprint signal deliberately doesn't do native TLS inspection — it reads a header set by a trusted reverse proxy (e.g. Cloudflare's `cf-ja4`). The `TRUSTED_PROXIES` CIDR check is what prevents direct clients from spoofing the header.
 - Each signal self-gates on its own input: header anomaly always computes; IP reputation is 0 without `IP_REPUTATION_FILE`; TLS fingerprint is 0 unless a trusted proxy supplies the header. There is no global scoring toggle — the service is cookie-free and scores under legitimate interest with data minimization.
 - Integration tests use `tower::ServiceExt::oneshot` with a manually-injected `ConnectInfo` extension to simulate client connections without binding a real port.

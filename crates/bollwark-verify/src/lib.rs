@@ -31,17 +31,21 @@
 //! # Example
 //!
 //! ```no_run
-//! use bollwark_verify::{Client, Error, Verdict};
+//! use bollwark_verify::{Client, Error, Risk, Verdict};
 //!
 //! # async fn f() -> Result<(), Box<dyn std::error::Error>> {
 //! let client = Client::new("https://api.bollwark.eu", std::env::var("BOLLWARK_SECRET_KEY")?);
 //!
 //! match client.verify(token).await {
-//!     Ok(Verdict::Passed { failover }) => {
+//!     Ok(Verdict::Passed { failover, risk }) => {
 //!         if failover {
 //!             // Accepted without a proof of work, because the service was
 //!             // attestably down when the visitor loaded the form.
 //!             eprintln!("captcha failover — accepted without proof of work");
+//!         }
+//!         if risk != Risk::Low {
+//!             // Accepted, but the service had reservations: step up here
+//!             // (email confirmation, a review queue) if the action warrants.
 //!         }
 //!         // ... proceed
 //!     }
@@ -87,7 +91,14 @@ pub enum Verdict {
     /// still checked, but there is no proof of work behind this one. Ignore
     /// it and you get availability during outages; branch on it to
     /// accept-but-flag.
-    Passed { failover: bool },
+    ///
+    /// `risk` is the service's verify-time verdict as a band. [`Risk::Low`]
+    /// is the ordinary pass. [`Risk::Elevated`] means the submission was
+    /// accepted with reservations — the place to step up (email
+    /// confirmation, a review queue) if the action warrants it.
+    /// [`Risk::High`] under `Passed` means the site is in monitor mode: this
+    /// is what it will refuse once switched to enforce.
+    Passed { failover: bool, risk: Risk },
 
     /// Solved correctly, but refused on risk score.
     ///
@@ -107,6 +118,23 @@ pub enum Verdict {
     /// like [`Expired`](Verdict::Expired) — prefer "please try again" over an
     /// accusation, but never accept the submission.
     Replayed,
+}
+
+/// The verify-time verdict as a band, carried on [`Verdict::Passed`].
+///
+/// `success` (whether the visitor is let through) is the service's
+/// enforcement decision; this is the reason behind it. Servers from before
+/// the field existed omit it, which reads as [`Risk::Low`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Risk {
+    /// Nothing suspicious at submit time.
+    #[default]
+    Low,
+    /// Accepted, but verify-time signals landed in the service's shadow band.
+    Elevated,
+    /// Would have been refused; only reaches `Passed` on a monitored site.
+    High,
 }
 
 impl Verdict {
@@ -240,6 +268,7 @@ impl Client {
                 Ok(if body.success {
                     Verdict::Passed {
                         failover: body.failover,
+                        risk: body.risk,
                     }
                 } else {
                     Verdict::Blocked
@@ -262,11 +291,22 @@ struct VerifyResponse {
     success: bool,
     #[serde(default)]
     failover: bool,
+    #[serde(default)]
+    risk: Risk,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_body_without_a_band_reads_as_low_risk() {
+        let body: VerifyResponse = serde_json::from_str(r#"{"success":true}"#).unwrap();
+        assert_eq!(body.risk, Risk::Low);
+        let body: VerifyResponse =
+            serde_json::from_str(r#"{"success":true,"risk":"elevated"}"#).unwrap();
+        assert_eq!(body.risk, Risk::Elevated);
+    }
 
     #[test]
     fn base_url_trailing_slash_does_not_double_up() {
@@ -286,8 +326,30 @@ mod tests {
 
     #[test]
     fn only_passed_is_accepted() {
-        assert!(Verdict::Passed { failover: false }.accepted());
-        assert!(Verdict::Passed { failover: true }.accepted());
+        let low = Risk::Low;
+        assert!(
+            Verdict::Passed {
+                failover: false,
+                risk: low
+            }
+            .accepted()
+        );
+        assert!(
+            Verdict::Passed {
+                failover: true,
+                risk: low
+            }
+            .accepted()
+        );
+        // Accepted with reservations is still accepted; stepping up is the
+        // caller's call, not this method's.
+        assert!(
+            Verdict::Passed {
+                failover: false,
+                risk: Risk::Elevated
+            }
+            .accepted()
+        );
         assert!(!Verdict::Blocked.accepted());
         assert!(!Verdict::Expired.accepted());
         assert!(!Verdict::Replayed.accepted());

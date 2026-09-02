@@ -177,12 +177,12 @@ After a PoW solution is verified, a second scoring pass runs against verify-time
 
 | Score range | Decision | Response | Side effect |
 |---|---|---|---|
-| `0` — `VERIFY_SHADOW_MIN-1` | `Pass` | `success: true` | DEBUG log |
-| `VERIFY_SHADOW_MIN` — `VERIFY_BLOCK_MIN-1` | `ShadowFail` | `success: true` | WARN log (the response body is identical to `Pass`; the log is the only signal) |
-| `VERIFY_BLOCK_MIN` — | `Block` | `success: false` | INFO log |
+| `0` — `VERIFY_SHADOW_MIN-1` | `Pass` | `success: true, risk: "low"` | DEBUG log |
+| `VERIFY_SHADOW_MIN` — `VERIFY_BLOCK_MIN-1` | `ShadowFail` | `success: true, risk: "elevated"` | WARN log; `risk: "elevated"` is the caller's cue to step up (see `INTEGRATION.md`) |
+| `VERIFY_BLOCK_MIN` — | `Block` | `success: false, risk: "high"` (`success: true` on a monitored site) | INFO log |
 
 ### `VERIFY_SHADOW_MIN` (default `30`)
-At/above this, the request is shadow-failed: success is still returned to the caller (they see no failure), but a structured WARN log fires for offline review. No persistent quarantine store yet — the log is the audit trail.
+At/above this, the request is shadow-failed: success is still returned to the caller, with `risk: "elevated"` so their backend can step up (email confirmation, a review queue), and a structured WARN log fires for offline review. No persistent quarantine store — the log is the audit trail.
 
 ### `VERIFY_BLOCK_MIN` (default `60`)
 At/above this, the request is hard-rejected (`success: false`).

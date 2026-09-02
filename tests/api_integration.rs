@@ -7,7 +7,7 @@ use tower::ServiceExt;
 
 use bollwark::api;
 use bollwark::api::state::AppState;
-use bollwark::api::types::{CreateSiteResponse, PuzzleResponse, VerifyResponse};
+use bollwark::api::types::{CreateSiteResponse, PuzzleResponse, RiskBand, VerifyResponse};
 use bollwark::config::AppConfig;
 use bollwark::dashboard::{DecisionLog, Sessions, routes::AdminState};
 use bollwark::puzzle::challenge::{
@@ -553,6 +553,8 @@ async fn test_wrong_nonce() {
         .unwrap();
     let result: VerifyResponse = serde_json::from_slice(&body).unwrap();
     assert!(!result.success);
+    // A failed proof is not a risk verdict, so there is no band to report.
+    assert_eq!(result.risk, None);
 }
 
 /// POST /v1/verify with an explicit nonce; returns the status and the parsed
@@ -1191,8 +1193,45 @@ async fn test_very_fast_submit_shadow_fails() {
         .await
         .unwrap();
     let result: VerifyResponse = serde_json::from_slice(&body).unwrap();
-    // ShadowFail returns success: true (caller doesn't see it; only the log does)
+    // ShadowFail returns success: true; the band is how the caller sees it.
     assert!(result.success, "shadow-fail still returns success=true");
+    assert_eq!(result.risk, Some(RiskBand::Elevated));
+}
+
+#[tokio::test]
+async fn test_clean_verify_reports_low_risk() {
+    let (app, store) = test_app_with_store(|_| {});
+    let site = create_test_site(&app).await;
+    let (_, puzzle) = get_test_puzzle(&app, &site.site_key.to_string()).await;
+    let puzzle = puzzle.unwrap();
+    let nonce = solve_challenge(&puzzle.prefix, puzzle.difficulty);
+    backdate_challenge(&store, puzzle.challenge_id, 5).await;
+
+    let verify_body = serde_json::json!({
+        "challenge_id": puzzle.challenge_id,
+        "nonce": nonce,
+        "behavior": {
+            "mouse_moves": 20,
+            "touches": 0,
+            "interactions": 2,
+            "first_interaction_ms": 800,
+        },
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/verify")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", site.secret_key))
+        .body(Body::from(serde_json::to_vec(&verify_body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: VerifyResponse = serde_json::from_slice(&body).unwrap();
+    assert!(result.success);
+    assert_eq!(result.risk, Some(RiskBand::Low));
 }
 
 #[tokio::test]
@@ -3149,6 +3188,13 @@ async fn test_monitor_mode_passes_a_verify_that_would_block() {
         assert_eq!(
             result.success, expected_success,
             "honeypot under mode {mode:?}"
+        );
+        // The band is the verdict and does not change with the mode; a
+        // monitored site is exactly `success: true` next to `risk: high`.
+        assert_eq!(
+            result.risk,
+            Some(RiskBand::High),
+            "band under mode {mode:?}"
         );
     }
 }

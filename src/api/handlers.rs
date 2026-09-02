@@ -504,7 +504,7 @@ pub async fn verify(
                 webdriver: "n/a",
             });
         }
-        return Ok(Json(VerifyResponse::solved(false)));
+        return Ok(Json(VerifyResponse::pow_invalid()));
     }
 
     // Consume the challenge atomically after a valid PoW. This preserves
@@ -620,7 +620,7 @@ pub async fn verify(
         });
     }
 
-    Ok(Json(VerifyResponse::solved(success)))
+    Ok(Json(VerifyResponse::solved(success, vscore.decision)))
 }
 
 /// Decide a failover claim — a client asserting it could not reach us at all.
@@ -705,6 +705,9 @@ fn verify_failover(
     Ok(Json(VerifyResponse {
         success,
         failover: success,
+        // The band describes the local evidence that was scored; an
+        // attestation refusal shows up as `success: false` beside it.
+        risk: Some(vscore.decision.into()),
     }))
 }
 

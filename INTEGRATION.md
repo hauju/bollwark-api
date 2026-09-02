@@ -314,16 +314,29 @@ curl -s -X POST https://api.bollwark.eu/v1/verify \
 Successful response:
 
 ```json
-{ "success": true, "failover": false }
+{ "success": true, "failover": false, "risk": "low" }
 ```
 
 Failed response:
 
 ```json
-{ "success": false, "failover": false }
+{ "success": false, "failover": false, "risk": "high" }
 ```
 
 Challenges are single-use. A second submit with the same `challenge_id` will fail.
+
+### The `risk` field
+
+`risk` is the verify-time verdict as a band — `low`, `elevated` or `high` — so you can step up on a submission the service accepted but did not like. `success` stays the enforcement decision; `risk` is the reason behind it:
+
+| `risk` | `success` | Meaning | Suggested handling |
+|---|---|---|---|
+| `low` | `true` | Solved, nothing suspicious at submit time | Accept |
+| `elevated` | `true` | Solved, but verify-time signals landed in the shadow band (`VERIFY_SHADOW_MIN`) | Accept, and step up where the action warrants it: email confirmation, hold for review, tighter downstream limits |
+| `high` | `false` | Solved, but refused on risk (`VERIFY_BLOCK_MIN`) | Reject or queue for manual review |
+| `high` | `true` | Would have been refused, but the site is in monitor mode | Log it — this is what the site will reject once you flip to `enforce` |
+
+`risk` is absent when there was no risk verdict to report: an invalid proof of work (`success: false`, no band). Servers from before the field existed omit it; treat a missing band as `low`. The `bollwark-verify` crate exposes it as `Verdict::Passed { risk, .. }`.
 
 ### The `failover` field
 
@@ -534,7 +547,8 @@ Common responses:
 | Missing verify auth | `401` from `/v1/verify` | Check backend `secret_key` |
 | Challenge expired | `410` from `/v1/verify` | Ask user to retry the form |
 | Replayed challenge | `404` from `/v1/verify` (single-use: the challenge is removed on the first successful verify) | Ask user to retry; do not accept the form |
-| Valid PoW but blocked risk score | `{ "success": false }` | Reject or queue for manual review |
+| Valid PoW but blocked risk score | `{ "success": false, "risk": "high" }` | Reject or queue for manual review |
+| Valid PoW, accepted with reservations | `{ "success": true, "risk": "elevated" }` | Accept; step up (confirmation, review) where the action warrants it |
 
 ## 10. Local Test Harness
 
