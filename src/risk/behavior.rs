@@ -35,6 +35,7 @@
 //! `Absent` and contribute zero — we don't want to penalise existing
 //! integrations on rollout.
 
+use super::weights::{SignalWeights, current};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -230,6 +231,16 @@ pub fn behavior_fingerprint(b: &BehaviorReport) -> u64 {
 /// pure function; `None` (the failover path, which has no challenge) means
 /// there is nothing to compare against and scores 0.
 pub fn score_impossible_timing(presence: BehaviorPresence, time_on_page_ms: Option<u64>) -> u32 {
+    score_impossible_timing_with(current(), presence, time_on_page_ms)
+}
+
+/// [`score_impossible_timing`] against explicit weights; the plain form reads the
+/// process-wide table from [`super::weights::current`].
+pub fn score_impossible_timing_with(
+    w: &SignalWeights,
+    presence: BehaviorPresence,
+    time_on_page_ms: Option<u64>,
+) -> u32 {
     let (BehaviorPresence::Present(b), Some(dwell)) = (presence, time_on_page_ms) else {
         return 0;
     };
@@ -239,7 +250,7 @@ pub fn score_impossible_timing(presence: BehaviorPresence, time_on_page_ms: Opti
         return 0;
     };
     if first > dwell.saturating_add(BEHAVIOR_IMPOSSIBLE_TIMING_SLACK_MS) {
-        BEHAVIOR_IMPOSSIBLE_TIMING_SCORE
+        w.behavior_impossible_timing
     } else {
         0
     }
@@ -252,17 +263,33 @@ pub fn score_impossible_timing(presence: BehaviorPresence, time_on_page_ms: Opti
 /// the scorer stays pure and database-free — the same shape as the puzzle
 /// handler passing `ip_count`/`site_count` into `SignalContext`.
 pub fn score_duplicate_blob(presence: BehaviorPresence, duplicate_count: u32) -> u32 {
+    score_duplicate_blob_with(current(), presence, duplicate_count)
+}
+
+/// [`score_duplicate_blob`] against explicit weights; the plain form reads the
+/// process-wide table from [`super::weights::current`].
+pub fn score_duplicate_blob_with(
+    w: &SignalWeights,
+    presence: BehaviorPresence,
+    duplicate_count: u32,
+) -> u32 {
     let BehaviorPresence::Present(b) = presence else {
         return 0;
     };
     if claims_activity(&b) && duplicate_count >= BEHAVIOR_DUPLICATE_MIN {
-        BEHAVIOR_DUPLICATE_SCORE
+        w.behavior_duplicate
     } else {
         0
     }
 }
 
 pub fn score_behavior(presence: BehaviorPresence) -> u32 {
+    score_behavior_with(current(), presence)
+}
+
+/// [`score_behavior`] against explicit weights; the plain form reads the
+/// process-wide table from [`super::weights::current`].
+pub fn score_behavior_with(w: &SignalWeights, presence: BehaviorPresence) -> u32 {
     let BehaviorPresence::Present(b) = presence else {
         return 0;
     };
@@ -275,12 +302,12 @@ pub fn score_behavior(presence: BehaviorPresence) -> u32 {
 
     let mut score = 0;
     if no_pointer && no_interaction {
-        score += BEHAVIOR_FLATLINE_SCORE;
+        score += w.behavior_flatline;
     } else if no_pointer && isolated {
         // Pointer-free *and* barely any interaction at all. Pointer-free with
         // a real interaction trail is a keyboard or screen-reader visitor and
         // scores nothing here — see BEHAVIOR_ISOLATED_INTERACTION_MAX.
-        score += BEHAVIOR_NO_POINTER_SCORE;
+        score += w.behavior_no_pointer;
     }
 
     // Same gate: an instant first interaction is only driver-shaped when it's
@@ -288,7 +315,7 @@ pub fn score_behavior(presence: BehaviorPresence) -> u32 {
     // widget mounted trips the timing but has a trail behind it.
     if isolated && matches!(b.first_interaction_ms, Some(t) if t < BEHAVIOR_INSTANT_INTERACTION_MS)
     {
-        score += BEHAVIOR_INSTANT_INTERACTION_SCORE;
+        score += w.behavior_instant_interaction;
     }
 
     // `webdriver` and `automation` are two views of one fact — the browser is
@@ -298,11 +325,11 @@ pub fn score_behavior(presence: BehaviorPresence) -> u32 {
     // e2e browser-harness-simulator regression test). The artifact probe adds
     // *recall*, not weight: it catches drivers that scrub `navigator.webdriver`.
     if matches!(b.webdriver, Some(true)) || matches!(b.automation, Some(true)) {
-        score += BEHAVIOR_AUTOMATION_SCORE;
+        score += w.behavior_automation;
     }
 
     if matches!(b.headless, Some(true)) {
-        score += BEHAVIOR_HEADLESS_SCORE;
+        score += w.behavior_headless;
     }
 
     score

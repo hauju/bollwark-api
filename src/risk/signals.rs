@@ -1,3 +1,4 @@
+use super::weights::{SignalWeights, current};
 use axum::http::HeaderMap;
 use axum::http::header::{ACCEPT_ENCODING, ACCEPT_LANGUAGE, USER_AGENT};
 
@@ -32,13 +33,13 @@ pub const RATE_IP_SUSTAINED_VERY_HIGH: u32 = 450;
 pub const RATE_IP_SUSTAINED_HIGH: u32 = 180;
 pub const RATE_IP_SUSTAINED_ELEVATED: u32 = 90;
 
-fn ip_band(count: u32, very_high: u32, high: u32, elevated: u32) -> u32 {
+fn ip_band(w: &SignalWeights, count: u32, very_high: u32, high: u32, elevated: u32) -> u32 {
     if count > very_high {
-        RATE_IP_SCORE_VERY_HIGH
+        w.rate_ip_very_high
     } else if count > high {
-        RATE_IP_SCORE_HIGH
+        w.rate_ip_high
     } else if count > elevated {
-        RATE_IP_SCORE_ELEVATED
+        w.rate_ip_elevated
     } else {
         0
     }
@@ -50,18 +51,36 @@ fn ip_band(count: u32, very_high: u32, high: u32, elevated: u32) -> u32 {
 /// ceiling stays at 45, and the sustained window only matters when the minute
 /// window is quiet.
 pub fn score_rate(ip_count: u32, ip_count_sustained: u32, site_count: u32) -> u32 {
-    let ip_component =
-        ip_band(ip_count, RATE_IP_VERY_HIGH, RATE_IP_HIGH, RATE_IP_ELEVATED).max(ip_band(
-            ip_count_sustained,
-            RATE_IP_SUSTAINED_VERY_HIGH,
-            RATE_IP_SUSTAINED_HIGH,
-            RATE_IP_SUSTAINED_ELEVATED,
-        ));
+    score_rate_with(current(), ip_count, ip_count_sustained, site_count)
+}
+
+/// [`score_rate`] against explicit weights; the plain form reads the
+/// process-wide table from [`super::weights::current`].
+pub fn score_rate_with(
+    w: &SignalWeights,
+    ip_count: u32,
+    ip_count_sustained: u32,
+    site_count: u32,
+) -> u32 {
+    let ip_component = ip_band(
+        w,
+        ip_count,
+        RATE_IP_VERY_HIGH,
+        RATE_IP_HIGH,
+        RATE_IP_ELEVATED,
+    )
+    .max(ip_band(
+        w,
+        ip_count_sustained,
+        RATE_IP_SUSTAINED_VERY_HIGH,
+        RATE_IP_SUSTAINED_HIGH,
+        RATE_IP_SUSTAINED_ELEVATED,
+    ));
 
     let site_component = if site_count > RATE_SITE_VERY_HIGH {
-        RATE_SITE_SCORE_VERY_HIGH
+        w.rate_site_very_high
     } else if site_count > RATE_SITE_HIGH {
-        RATE_SITE_SCORE_HIGH
+        w.rate_site_high
     } else {
         0
     };
@@ -107,14 +126,20 @@ const UA_BOT_NEEDLES: &[&str] = &[
 ];
 
 pub fn score_header_anomaly(headers: &HeaderMap) -> u32 {
+    score_header_anomaly_with(current(), headers)
+}
+
+/// [`score_header_anomaly`] against explicit weights; the plain form reads the
+/// process-wide table from [`super::weights::current`].
+pub fn score_header_anomaly_with(w: &SignalWeights, headers: &HeaderMap) -> u32 {
     let mut score = 0;
 
     match headers.get(USER_AGENT).and_then(|v| v.to_str().ok()) {
-        None => score += UA_MISSING_SCORE,
+        None => score += w.ua_missing,
         Some(ua) => {
             let lower = ua.to_ascii_lowercase();
             if ua.len() < UA_MIN_LEN || UA_BOT_NEEDLES.iter().any(|n| lower.contains(n)) {
-                score += UA_SUSPICIOUS_SCORE;
+                score += w.ua_suspicious;
             }
             // Browser impersonation: the UA claims a browser, the rest of the
             // request doesn't. Any one fetch-metadata header counts as present
@@ -122,20 +147,20 @@ pub fn score_header_anomaly(headers: &HeaderMap) -> u32 {
             if lower.starts_with("mozilla/")
                 && !SEC_FETCH_HEADERS.iter().any(|h| headers.contains_key(*h))
             {
-                score += SEC_FETCH_MISSING_SCORE;
+                score += w.sec_fetch_missing;
             }
             if lower.contains("chrome/") && !headers.contains_key("sec-ch-ua") {
-                score += CLIENT_HINTS_MISSING_SCORE;
+                score += w.client_hints_missing;
             }
         }
     }
 
     if !headers.contains_key(ACCEPT_LANGUAGE) {
-        score += ACCEPT_LANGUAGE_MISSING_SCORE;
+        score += w.accept_language_missing;
     }
 
     if !headers.contains_key(ACCEPT_ENCODING) {
-        score += ACCEPT_ENCODING_MISSING_SCORE;
+        score += w.accept_encoding_missing;
     }
 
     score

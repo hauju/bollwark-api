@@ -11,9 +11,9 @@
 //! warn log so an operator can review the request offline.
 
 use super::behavior::{
-    BEHAVIOR_FLATLINE_SCORE, BehaviorPresence, score_behavior, score_duplicate_blob,
-    score_impossible_timing,
+    BehaviorPresence, score_behavior_with, score_duplicate_blob_with, score_impossible_timing_with,
 };
+use super::weights::{SignalWeights, current};
 
 #[derive(Debug, Clone, Copy)]
 pub struct VerifyContext {
@@ -99,18 +99,26 @@ pub const TIME_SHORT_SCORE: u32 = 25;
 pub const REMOTE_IP_MISMATCH_SCORE: u32 = 30;
 
 pub fn score_remote_ip(mismatch: bool) -> u32 {
-    if mismatch {
-        REMOTE_IP_MISMATCH_SCORE
-    } else {
-        0
-    }
+    score_remote_ip_with(current(), mismatch)
+}
+
+/// [`score_remote_ip`] against explicit weights; the plain form reads the
+/// process-wide table from [`super::weights::current`].
+pub fn score_remote_ip_with(w: &SignalWeights, mismatch: bool) -> u32 {
+    if mismatch { w.remote_ip_mismatch } else { 0 }
 }
 
 pub fn score_time_on_page(ms: Option<u64>) -> u32 {
+    score_time_on_page_with(current(), ms)
+}
+
+/// [`score_time_on_page`] against explicit weights; the plain form reads the
+/// process-wide table from [`super::weights::current`].
+pub fn score_time_on_page_with(w: &SignalWeights, ms: Option<u64>) -> u32 {
     match ms {
         None => 0, // Field is optional; absence isn't suspicious on its own.
-        Some(t) if t < TIME_VERY_SHORT_MS => TIME_VERY_SHORT_SCORE,
-        Some(t) if t < TIME_SHORT_MS => TIME_SHORT_SCORE,
+        Some(t) if t < TIME_VERY_SHORT_MS => w.time_very_short,
+        Some(t) if t < TIME_SHORT_MS => w.time_short,
         _ => 0,
     }
 }
@@ -134,13 +142,14 @@ impl VerifyScorer {
     /// without changing what any signal is worth. The signal weights above are
     /// a property of this service; the bands are a property of the site.
     pub fn score(&self, ctx: &VerifyContext, thresholds: VerifyThresholds) -> VerifyScore {
+        let w = current();
         let breakdown = VerifyBreakdown {
             honeypot: if ctx.honeypot_tripped {
-                HONEYPOT_TRIPPED_SCORE
+                w.honeypot_tripped
             } else {
                 0
             },
-            time_on_page: score_time_on_page(ctx.time_on_page_ms),
+            time_on_page: score_time_on_page_with(w, ctx.time_on_page_ms),
             // All three behaviour-blob terms fold into one component so the
             // decision-log schema doesn't move. They sum rather than saturate:
             // `score_behavior` judges what the counters describe, the timing
@@ -150,14 +159,14 @@ impl VerifyScorer {
             // `webdriver`/`automation` pair inside `score_behavior`, which are
             // two readings of one.
             behavior: match ctx.behavior {
-                BehaviorPresence::Absent if self.require_behavior => BEHAVIOR_FLATLINE_SCORE,
+                BehaviorPresence::Absent if self.require_behavior => w.behavior_flatline,
                 b => {
-                    score_behavior(b)
-                        + score_impossible_timing(b, ctx.time_on_page_ms)
-                        + score_duplicate_blob(b, ctx.behavior_duplicate_count)
+                    score_behavior_with(w, b)
+                        + score_impossible_timing_with(w, b, ctx.time_on_page_ms)
+                        + score_duplicate_blob_with(w, b, ctx.behavior_duplicate_count)
                 }
             },
-            remote_ip: score_remote_ip(ctx.remote_ip_mismatch),
+            remote_ip: score_remote_ip_with(w, ctx.remote_ip_mismatch),
         };
         let total =
             breakdown.honeypot + breakdown.time_on_page + breakdown.behavior + breakdown.remote_ip;

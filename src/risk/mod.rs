@@ -7,6 +7,7 @@ pub mod signals;
 pub mod tier;
 pub mod tls_fingerprint;
 pub mod verify;
+pub mod weights;
 
 pub use behavior::{BehaviorPresence, BehaviorReport};
 pub use client_ip::{anonymize_ip, client_ip, rate_key};
@@ -18,3 +19,4 @@ pub use tls_fingerprint::{FingerprintBlocklist, TlsFingerprint, TrustedProxies};
 pub use verify::{
     VerifyBreakdown, VerifyContext, VerifyDecision, VerifyScore, VerifyScorer, VerifyThresholds,
 };
+pub use weights::SignalWeights;

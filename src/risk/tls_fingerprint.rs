@@ -12,6 +12,7 @@
 //! is only honored when the immediate peer IP is in a configured trusted-proxy
 //! CIDR allowlist — otherwise any client could spoof it.
 
+use super::weights::{SignalWeights, current};
 use std::collections::HashSet;
 use std::fs;
 use std::net::IpAddr;
@@ -119,9 +120,19 @@ pub enum TlsFingerprint<'a> {
 pub const FINGERPRINT_BAD_SCORE: u32 = 35;
 
 pub fn score_tls_fingerprint(fp: TlsFingerprint<'_>, list: &FingerprintBlocklist) -> u32 {
+    score_tls_fingerprint_with(current(), fp, list)
+}
+
+/// [`score_tls_fingerprint`] against explicit weights; the plain form reads the
+/// process-wide table from [`super::weights::current`].
+pub fn score_tls_fingerprint_with(
+    w: &SignalWeights,
+    fp: TlsFingerprint<'_>,
+    list: &FingerprintBlocklist,
+) -> u32 {
     match fp {
         TlsFingerprint::Skipped => 0,
-        TlsFingerprint::Provided(value) if list.contains(value) => FINGERPRINT_BAD_SCORE,
+        TlsFingerprint::Provided(value) if list.contains(value) => w.tls_fingerprint_bad,
         TlsFingerprint::Provided(_) => 0,
     }
 }

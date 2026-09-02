@@ -169,6 +169,33 @@ async fn main() {
         }
     });
 
+    // Signal weights: an optional file overriding any subset of the scoring
+    // constants (CONFIGURATION.md → "Signal weights"). Installed before the
+    // first request is scored; a bad file refuses to boot, because scoring
+    // with defaults an operator believes are overridden is worse than not
+    // starting.
+    if let Some(path) = config.signal_weights_file.clone() {
+        let weights = match bollwark::risk::weights::SignalWeights::from_file(&path) {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::error!("SIGNAL_WEIGHTS_FILE: {e}");
+                std::process::exit(1);
+            }
+        };
+        let overrides = weights.overrides();
+        tracing::info!(
+            "Signal weights loaded from {path}: {} of {} overridden",
+            overrides.len(),
+            bollwark::risk::weights::SignalWeights::NAMES.len()
+        );
+        for (name, default, value) in &overrides {
+            tracing::info!("  {name}: {default} -> {value}");
+        }
+        if bollwark::risk::weights::install(weights).is_err() {
+            tracing::warn!("signal weights were already installed; {path} ignored");
+        }
+    }
+
     // IP reputation: load CIDR list if a path is configured. The store is
     // hot-swappable; when a path is set we also spawn an fs-watcher that
     // reloads the file on change (debounced to coalesce editor save bursts).

@@ -30,6 +30,7 @@ A `.env` file in the working directory is loaded automatically at startup (via `
 | `VERIFY_MAX_ATTEMPTS` | `10` | Max failed PoW attempts a single challenge tolerates before the store evicts it. A wrong nonce leaves the challenge live for legitimate retry, so this bounds how many (with `argon2id`, memory-hard) verify attempts one challenge can absorb. `0` disables the cap. |
 | `VERIFY_REQUIRE_BEHAVIOR` | `false` | When truthy, a verify request with no `behavior` blob scores +30 (like a flatline) instead of 0. Enable when every legitimate client is the bundled widget. |
 | `IP_REPUTATION_FILE` | _unset_ | Path to CIDR reputation list (signal off if unset) |
+| `SIGNAL_WEIGHTS_FILE` | _unset_ | JSON file overriding any subset of the signal weights (see *Signal weights*); a bad file refuses to boot |
 | `TLS_FINGERPRINT_HEADER` | _unset_ | Header to read TLS fingerprint from (signal off if unset) |
 | `TLS_FINGERPRINT_FILE` | _unset_ | Path to known-bad fingerprint blocklist |
 | `TRUSTED_PROXIES` | _unset_ | CIDR allowlist of peers whose `TLS_FINGERPRINT_HEADER` we honor |
@@ -150,7 +151,7 @@ A hard per-IP issuance cap that sits *outside* the scoring pipeline. The rate si
 | IP reputation | 40 | `IP_REPUTATION_FILE` |
 | TLS fingerprint | 35 | `TLS_FINGERPRINT_HEADER` + `TRUSTED_PROXIES` |
 
-Every signal self-gates on its own input: header anomaly always computes, IP reputation contributes 0 without `IP_REPUTATION_FILE`, and TLS fingerprint contributes 0 unless a trusted proxy supplied the header. There is no global on/off switch — the service is cookie-free and runs these signals under legitimate interest with data minimization. Tuning the per-signal score weights requires a code change (see `src/risk/signals.rs` and the per-signal modules); only the **tier thresholds** are env-tunable.
+Every signal self-gates on its own input: header anomaly always computes, IP reputation contributes 0 without `IP_REPUTATION_FILE`, and TLS fingerprint contributes 0 unless a trusted proxy supplied the header. There is no global on/off switch — the service is cookie-free and runs these signals under legitimate interest with data minimization. The per-signal weights are compiled-in constants by default and can be overridden as a set with `SIGNAL_WEIGHTS_FILE` (see *Signal weights*); the **tier thresholds** are env- and per-site-tunable.
 
 Rate components: the per-IP counter is read over two tumbling windows, 60 s (>10 → +8, >20 → +15, >50 → +30) and 15 min (>90 → +8, >180 → +15, >450 → +30), and the IP component is the **worse band of the two, never the sum** — so a one-minute burst scores exactly as it did with one window and the signal's ceiling stays at 45. The 15-minute window exists for the source that paces itself just under the minute thresholds: 9 requests a minute never trips `>10`, but 135 in a quarter hour does. Its thresholds are the rate a source must *hold* for the whole window — roughly 6 / 12 / 30 a minute — which no single visitor produces (the widget fetches one puzzle per page load plus one refresh per `CHALLENGE_TTL_SECS`) but a shared egress can, which is why the lowest band is still below `TIER_CHECKBOX_MIN` on its own. Per-site stays on the single 60 s window (>200 → +8, >500 → +15); sustained site load is `LOAD_LADDER`'s job. Both per-IP counts are emitted on the `puzzle_decision` event as `ip_count` / `ip_count_sustained`.
 
@@ -264,6 +265,26 @@ Lookup is first-match-wins on the order in the file. Unknown categories on other
 **Hot reload.** The file is watched for changes — rewriting it (e.g. via a cron pulling Tor exits or AWS ranges) hot-swaps the in-memory list with no restart. Saves are debounced ~500ms to coalesce editor-rewrite bursts (atomic-rename via tmp file). A failed reparse is logged at WARN and the previous list is kept; the request path can never observe an empty/partial list.
 
 ---
+
+## Signal weights
+
+### `SIGNAL_WEIGHTS_FILE` (default _unset_)
+
+Every "+N" in the signal tables above is a constant next to the check it belongs to. This file overrides any subset of them without a rebuild — a JSON object keyed by the constant's name:
+
+```json
+{
+  "UA_MISSING_SCORE": 25,
+  "BEHAVIOR_HEADLESS_SCORE": 25,
+  "SCORE_DATACENTER": 35
+}
+```
+
+Accepted keys: `RATE_IP_SCORE_VERY_HIGH`, `RATE_IP_SCORE_HIGH`, `RATE_IP_SCORE_ELEVATED`, `RATE_SITE_SCORE_VERY_HIGH`, `RATE_SITE_SCORE_HIGH`, `UA_MISSING_SCORE`, `UA_SUSPICIOUS_SCORE`, `ACCEPT_LANGUAGE_MISSING_SCORE`, `ACCEPT_ENCODING_MISSING_SCORE`, `SEC_FETCH_MISSING_SCORE`, `CLIENT_HINTS_MISSING_SCORE`, `SCORE_TOR`, `SCORE_DATACENTER`, `SCORE_VPN`, `SCORE_RESIDENTIAL`, `FINGERPRINT_BAD_SCORE`, `HONEYPOT_TRIPPED_SCORE`, `TIME_VERY_SHORT_SCORE`, `TIME_SHORT_SCORE`, `REMOTE_IP_MISMATCH_SCORE`, `BEHAVIOR_FLATLINE_SCORE`, `BEHAVIOR_NO_POINTER_SCORE`, `BEHAVIOR_INSTANT_INTERACTION_SCORE`, `BEHAVIOR_AUTOMATION_SCORE`, `BEHAVIOR_HEADLESS_SCORE`, `BEHAVIOR_IMPOSSIBLE_TIMING_SCORE`, `BEHAVIOR_DUPLICATE_SCORE`. Values are non-negative integers; anything else, and any unknown key, refuses to boot — a weights file is a deliberate act, and a typo silently leaving the default in place is exactly the failure nobody would notice. Loaded once at boot (restart to pick up a change); the boot log lists every override as `name: default -> value`.
+
+Weights are a property of this service, not of a site, which is why they live in a process-wide file rather than in `SitePolicy` — a site tunes *where the bands sit*, not *what a signal is worth*. Thresholds that are counts rather than scores (the rate bands, the dedup window, the timing slack) stay constants on purpose: they are calibrated against how browsers behave, not against how bots score.
+
+This file is the return path of the self-improvement loop (see *Feedback and training samples*): the hosted service tunes against its anonymised training samples and ships a file, a self-hoster can adopt it or tune locally against their own `training_samples`.
 
 ## Cookie-free operation
 

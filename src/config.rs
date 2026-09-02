@@ -54,6 +54,10 @@ pub struct AppConfig {
     pub ip_hard_limit: u32,
     /// Path to a CIDR reputation file. If unset, the IP reputation signal contributes 0.
     pub ip_reputation_file: Option<String>,
+    /// Path to a JSON file overriding any subset of the signal weights
+    /// (`risk::weights::SignalWeights::NAMES`). Unset → the compiled-in
+    /// defaults. A file that fails to parse refuses to boot.
+    pub signal_weights_file: Option<String>,
     /// Verify-time score at/above which the request is shadow-failed (success
     /// returned, log emitted). Default 30.
     pub verify_shadow_min: u32,
@@ -221,6 +225,7 @@ impl AppConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(500),
             ip_reputation_file: env::var("IP_REPUTATION_FILE").ok(),
+            signal_weights_file: env::var("SIGNAL_WEIGHTS_FILE").ok(),
             verify_shadow_min: env::var("VERIFY_SHADOW_MIN")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -461,6 +466,7 @@ impl Default for AppConfig {
             tier_block_min: 85,
             ip_hard_limit: 500,
             ip_reputation_file: None,
+            signal_weights_file: None,
             verify_shadow_min: 30,
             verify_block_min: 60,
             verify_max_attempts: 10,

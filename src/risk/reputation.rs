@@ -1,3 +1,4 @@
+use super::weights::{SignalWeights, current};
 use std::fs;
 use std::net::IpAddr;
 use std::path::Path;
@@ -143,11 +144,17 @@ pub const SCORE_VPN: u32 = 20;
 pub const SCORE_RESIDENTIAL: u32 = 0;
 
 pub fn score_ip_reputation(category: Option<IpCategory>) -> u32 {
+    score_ip_reputation_with(current(), category)
+}
+
+/// [`score_ip_reputation`] against explicit weights; the plain form reads the
+/// process-wide table from [`super::weights::current`].
+pub fn score_ip_reputation_with(w: &SignalWeights, category: Option<IpCategory>) -> u32 {
     match category {
-        Some(IpCategory::Tor) => SCORE_TOR,
-        Some(IpCategory::Datacenter) => SCORE_DATACENTER,
-        Some(IpCategory::Vpn) => SCORE_VPN,
-        Some(IpCategory::Residential) => SCORE_RESIDENTIAL,
+        Some(IpCategory::Tor) => w.ip_tor,
+        Some(IpCategory::Datacenter) => w.ip_datacenter,
+        Some(IpCategory::Vpn) => w.ip_vpn,
+        Some(IpCategory::Residential) => w.ip_residential,
         None => 0,
     }
 }
