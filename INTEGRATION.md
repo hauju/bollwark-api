@@ -322,13 +322,13 @@ Forward the visitor's IP too, if you can:
 Successful response:
 
 ```json
-{ "success": true, "failover": false, "risk": "low" }
+{ "success": true, "failover": false, "risk": "low", "challenge_id": "…" }
 ```
 
 Failed response:
 
 ```json
-{ "success": false, "failover": false, "risk": "high" }
+{ "success": false, "failover": false, "risk": "high", "challenge_id": "…" }
 ```
 
 Challenges are single-use. A second submit with the same `challenge_id` will fail.
@@ -404,6 +404,19 @@ try {
 ```
 
 The widget also emits `bollwark:puzzle` with `detail.failover === true` when it enters failover mode, and `detail.recovered === true` if the service comes back and it upgrades to a real solved token in place.
+
+## 4c. Tell the service what it got wrong
+
+The verify-time score is only as good as the ground truth behind it, and the service never sees what happens to a submission after it answers. When you know — a `risk: "low"` submission that turned out to be spam, a `risk: "elevated"` one that was a real customer — say so:
+
+```bash
+curl -s -X POST https://api.bollwark.eu/v1/feedback \
+  -H "Authorization: Bearer <SECRET_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{ "challenge_id": "<challenge_id from the verify response>", "verdict": "spam" }'
+```
+
+`verdict` is `spam` or `legit`; `204` on success. `/v1/verify` returns the `challenge_id` next to `success`, so keep it alongside the submission if you may want to label it later (the `bollwark-verify` crate carries it on `Verdict::Passed` and `Verdict::Blocked`). Only your own site's challenges can be labelled — anyone else's is a `404` — and only the id and the verdict are stored, never the submission. The label lands on an anonymised training record that carries no IP and no user-agent, and it still counts if it arrives days later.
 
 ## 5. Backend Example: Express
 

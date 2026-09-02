@@ -40,6 +40,7 @@ pub fn router(state: AdminState) -> Router {
         .route("/v1/admin/sessions/{id}", get(get_session))
         .route("/v1/admin/stats", get(get_stats))
         .route("/v1/admin/analytics", get(get_analytics))
+        .route("/v1/admin/training", get(get_training))
         .route("/v1/admin/sites", get(list_sites))
         .route("/v1/admin/sites/{id}", axum::routing::delete(delete_site))
         .route(
@@ -167,6 +168,37 @@ async fn get_analytics(
         Ok(analytics) => Json(analytics).into_response(),
         Err(e) => {
             tracing::warn!(error = %e, "admin get_analytics failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "query failed").into_response()
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TrainingParams {
+    #[serde(default)]
+    after_id: Option<i64>,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+/// Anonymised training samples, keyset-paged: `after_id` is the last id the
+/// caller holds, `limit` is clamped to 1..=1000, and the caller loops until
+/// `next_after_id` is null. This is what bollwark-dx pulls into its
+/// long-retention store; a self-hoster can export the same way.
+async fn get_training(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Query(params): Query<TrainingParams>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_auth(&state, &headers) {
+        return resp;
+    }
+    let after_id = params.after_id.unwrap_or(0).max(0);
+    let limit = params.limit.unwrap_or(500).clamp(1, 1000);
+    match state.sessions.training(after_id, limit).await {
+        Ok(page) => Json(page).into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "admin get_training failed");
             (StatusCode::INTERNAL_SERVER_ERROR, "query failed").into_response()
         }
     }

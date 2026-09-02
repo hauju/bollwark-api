@@ -37,7 +37,7 @@
 //! let client = Client::new("https://api.bollwark.eu", std::env::var("BOLLWARK_SECRET_KEY")?);
 //!
 //! match client.verify(token).await {
-//!     Ok(Verdict::Passed { failover, risk }) => {
+//!     Ok(Verdict::Passed { failover, risk, .. }) => {
 //!         if failover {
 //!             // Accepted without a proof of work, because the service was
 //!             // attestably down when the visitor loaded the form.
@@ -52,7 +52,7 @@
 //!     Ok(Verdict::Expired | Verdict::Replayed) => {
 //!         // Recoverable: ask them to submit again, don't accuse them.
 //!     }
-//!     Ok(Verdict::Blocked) => { /* refuse, or queue for review */ }
+//!     Ok(Verdict::Blocked { .. }) => { /* refuse, or queue for review */ }
 //!     Err(Error::Unreachable(_)) => { /* your call — see the note above */ }
 //!     Err(e) => return Err(e.into()),
 //! }
@@ -82,7 +82,7 @@ pub mod axum;
 /// collapsing of distinct outcomes this crate exists to prevent. The verdict
 /// space is fixed by the service's protocol; a fifth outcome would be a
 /// breaking change and should be versioned as one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     /// Accepted.
     ///
@@ -99,13 +99,23 @@ pub enum Verdict {
     /// confirmation, a review queue) if the action warrants it.
     /// [`Risk::High`] under `Passed` means the site is in monitor mode: this
     /// is what it will refuse once switched to enforce.
-    Passed { failover: bool, risk: Risk },
+    ///
+    /// `challenge_id` is the handle for `POST /v1/feedback`: keep it with the
+    /// submission if you may later want to tell the service the visitor was
+    /// spam after all. `None` on the failover path, which has no challenge.
+    Passed {
+        failover: bool,
+        risk: Risk,
+        challenge_id: Option<String>,
+    },
 
     /// Solved correctly, but refused on risk score.
     ///
     /// The one variant that is actually about a suspicious visitor. Refuse,
-    /// or queue for review.
-    Blocked,
+    /// or queue for review. `challenge_id` is the feedback handle — labelling
+    /// a block `legit` is exactly the false positive the service wants to
+    /// hear about.
+    Blocked { challenge_id: Option<String> },
 
     /// The challenge expired before it was submitted (HTTP 410).
     ///
@@ -287,9 +297,12 @@ impl Client {
                     Verdict::Passed {
                         failover: body.failover,
                         risk: body.risk,
+                        challenge_id: body.challenge_id,
                     }
                 } else {
-                    Verdict::Blocked
+                    Verdict::Blocked {
+                        challenge_id: body.challenge_id,
+                    }
                 })
             }
             // Single-use: the challenge is removed on the first successful
@@ -311,6 +324,8 @@ struct VerifyResponse {
     failover: bool,
     #[serde(default)]
     risk: Risk,
+    #[serde(default)]
+    challenge_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -348,14 +363,16 @@ mod tests {
         assert!(
             Verdict::Passed {
                 failover: false,
-                risk: low
+                risk: low,
+                challenge_id: None
             }
             .accepted()
         );
         assert!(
             Verdict::Passed {
                 failover: true,
-                risk: low
+                risk: low,
+                challenge_id: None
             }
             .accepted()
         );
@@ -364,11 +381,12 @@ mod tests {
         assert!(
             Verdict::Passed {
                 failover: false,
-                risk: Risk::Elevated
+                risk: Risk::Elevated,
+                challenge_id: None
             }
             .accepted()
         );
-        assert!(!Verdict::Blocked.accepted());
+        assert!(!Verdict::Blocked { challenge_id: None }.accepted());
         assert!(!Verdict::Expired.accepted());
         assert!(!Verdict::Replayed.accepted());
     }

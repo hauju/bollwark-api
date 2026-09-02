@@ -55,7 +55,7 @@ use crate::{Client, Error, Verdict};
 /// The [`Verdict`] is carried through rather than discarded: only
 /// [`Verdict::Passed`] reaches your handler, but `failover: true` means the
 /// pass came without a proof of work, which is worth logging or flagging.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Captcha<T>(pub T, pub Verdict);
 
 impl<T, S> FromRequest<S> for Captcha<T>

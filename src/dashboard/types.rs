@@ -1,6 +1,7 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::risk::BehaviorReport;
 use crate::risk::verify::VerifyBreakdown;
 use crate::risk::{EscalationTier, SignalBreakdown};
 
@@ -44,6 +45,93 @@ pub struct VerifyRecord {
     pub breakdown: VerifyBreakdown,
     pub time_on_page_ms: Option<u64>,
     pub webdriver: &'static str,
+    pub automation: &'static str,
+    pub headless: &'static str,
+    /// The raw counters, kept for the training copy: they are what a tuning
+    /// pass needs, and a count of mouse moves identifies nobody.
+    pub behavior: Option<BehaviorReport>,
+    pub impossible_timing: bool,
+    pub duplicate_blob: bool,
+}
+
+/// An integrator's verdict on a submission the service already decided — the
+/// one source of ground truth the scorer otherwise never sees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FeedbackVerdict {
+    Spam,
+    Legit,
+}
+
+impl FeedbackVerdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FeedbackVerdict::Spam => "spam",
+            FeedbackVerdict::Legit => "legit",
+        }
+    }
+}
+
+/// One page of `GET /v1/admin/training`. `next_after_id` is the cursor for
+/// the next page, `None` once the caller has everything.
+#[derive(Debug, Clone, Serialize)]
+pub struct TrainingPage {
+    pub samples: Vec<TrainingSample>,
+    pub next_after_id: Option<i64>,
+}
+
+/// An anonymised decision: what the scorer saw and decided, minus everything
+/// that could identify the visitor. No IP, no user-agent string, no timestamp
+/// finer than the hour. `challenge_id` is a random id that links only to the
+/// integrator's own record of the submission (and to their label).
+#[derive(Debug, Clone, Serialize)]
+pub struct TrainingSample {
+    pub id: i64,
+    pub challenge_id: Option<String>,
+    pub site_key: String,
+    pub hour: String,
+    pub puzzle: TrainingPuzzle,
+    pub verify: Option<TrainingVerify>,
+    pub label: Option<String>,
+    pub labeled_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TrainingPuzzle {
+    pub score: u32,
+    pub tier: String,
+    pub difficulty: u32,
+    pub outcome: String,
+    pub monitored: bool,
+    pub sig_rate: u32,
+    pub sig_header_anomaly: u32,
+    pub sig_ip_reputation: u32,
+    pub sig_tls_fingerprint: u32,
+    pub ip_reputation_category: Option<String>,
+    pub country: Option<String>,
+    pub browser_family: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TrainingVerify {
+    pub score: u32,
+    pub outcome: String,
+    pub success: bool,
+    pub monitored: bool,
+    pub sig_honeypot: u32,
+    pub sig_time_on_page: u32,
+    pub sig_behavior: u32,
+    pub sig_remote_ip: u32,
+    pub time_on_page_ms: Option<u64>,
+    pub webdriver: String,
+    pub automation: String,
+    pub headless: String,
+    pub mouse_moves: Option<u32>,
+    pub touches: Option<u32>,
+    pub interactions: Option<u32>,
+    pub first_interaction_ms: Option<u64>,
+    pub impossible_timing: bool,
+    pub duplicate_blob: bool,
 }
 
 /// Wire format returned by the admin API. One row per puzzle decision; verify

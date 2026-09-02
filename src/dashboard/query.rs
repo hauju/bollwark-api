@@ -11,7 +11,8 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Row};
 use super::types::{
     Analytics, BotCount, BrowserCount, CountryCount, NetworkTypeCount, OutcomeCounts,
     PuzzleBreakdownDto, PuzzleSignalSums, Session, SignalFires, SiteActivity, Stats, TierCounts,
-    TimeBucket, VerifyBreakdownDto, VerifySection, VerifySignalSums,
+    TimeBucket, TrainingPage, TrainingPuzzle, TrainingSample, TrainingVerify, VerifyBreakdownDto,
+    VerifySection, VerifySignalSums,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -49,6 +50,19 @@ impl Sessions {
         tokio::task::spawn_blocking(move || -> Result<Option<Session>, rusqlite::Error> {
             let conn = open_ro(&path)?;
             get_blocking(&conn, id)
+        })
+        .await?
+        .map_err(QueryError::Sqlite)
+    }
+
+    /// One page of anonymised training samples, keyset-paged by row id so a
+    /// puller can resume from wherever it stopped. See `DecisionLog::prune`
+    /// for how rows get there.
+    pub async fn training(&self, after_id: i64, limit: u32) -> Result<TrainingPage, QueryError> {
+        let path = self.db_path.clone();
+        tokio::task::spawn_blocking(move || -> Result<TrainingPage, rusqlite::Error> {
+            let conn = open_ro(&path)?;
+            training_blocking(&conn, after_id, limit)
         })
         .await?
         .map_err(QueryError::Sqlite)
@@ -320,6 +334,97 @@ fn stats_blocking(conn: &Connection) -> rusqlite::Result<Stats> {
 
 // SUM() over zero rows yields NULL in SQLite, which rusqlite surfaces as a
 // type error when the target is `i64`. Read as Option and default to 0.
+fn training_blocking(
+    conn: &Connection,
+    after_id: i64,
+    limit: u32,
+) -> rusqlite::Result<TrainingPage> {
+    let mut stmt =
+        conn.prepare("SELECT * FROM training_samples WHERE id > ?1 ORDER BY id LIMIT ?2")?;
+    let samples = stmt
+        .query_map(rusqlite::params![after_id, limit], row_to_sample)?
+        .collect::<Result<Vec<_>, _>>()?;
+    // A full page may be the last one; the caller finds out on the next call.
+    let next_after_id = if samples.len() >= limit as usize {
+        samples.last().map(|s| s.id)
+    } else {
+        None
+    };
+    Ok(TrainingPage {
+        samples,
+        next_after_id,
+    })
+}
+
+#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+fn row_to_sample(row: &Row<'_>) -> rusqlite::Result<TrainingSample> {
+    let int = |name: &str| -> rusqlite::Result<u32> { Ok(row.get::<_, i64>(name)? as u32) };
+    let opt_int = |name: &str| -> rusqlite::Result<Option<u32>> {
+        Ok(row.get::<_, Option<i64>>(name)?.map(|v| v as u32))
+    };
+    let opt_ms = |name: &str| -> rusqlite::Result<Option<u64>> {
+        Ok(row.get::<_, Option<i64>>(name)?.map(|v| v as u64))
+    };
+    let flag = |name: &str| -> rusqlite::Result<String> {
+        Ok(row
+            .get::<_, Option<String>>(name)?
+            .unwrap_or_else(|| "n/a".to_string()))
+    };
+    let truthy = |name: &str| -> rusqlite::Result<bool> {
+        Ok(row.get::<_, Option<i64>>(name)?.unwrap_or(0) != 0)
+    };
+
+    let verify = match row.get::<_, Option<i64>>("v_score")? {
+        None => None,
+        Some(score) => Some(TrainingVerify {
+            score: score as u32,
+            outcome: row
+                .get::<_, Option<String>>("v_outcome")?
+                .unwrap_or_default(),
+            success: truthy("v_success")?,
+            monitored: truthy("v_monitored")?,
+            sig_honeypot: opt_int("sig_honeypot")?.unwrap_or(0),
+            sig_time_on_page: opt_int("sig_time_on_page")?.unwrap_or(0),
+            sig_behavior: opt_int("sig_behavior")?.unwrap_or(0),
+            sig_remote_ip: opt_int("sig_remote_ip")?.unwrap_or(0),
+            time_on_page_ms: opt_ms("time_on_page_ms")?,
+            webdriver: flag("webdriver")?,
+            automation: flag("automation")?,
+            headless: flag("headless")?,
+            mouse_moves: opt_int("mouse_moves")?,
+            touches: opt_int("touches")?,
+            interactions: opt_int("interactions")?,
+            first_interaction_ms: opt_ms("first_interaction_ms")?,
+            impossible_timing: truthy("impossible_timing")?,
+            duplicate_blob: truthy("duplicate_blob")?,
+        }),
+    };
+
+    Ok(TrainingSample {
+        id: row.get("id")?,
+        challenge_id: row.get("challenge_id")?,
+        site_key: row.get("site_key")?,
+        hour: row.get("hour")?,
+        puzzle: TrainingPuzzle {
+            score: int("score")?,
+            tier: row.get("tier")?,
+            difficulty: int("difficulty")?,
+            outcome: row.get("outcome")?,
+            monitored: truthy("monitored")?,
+            sig_rate: int("sig_rate")?,
+            sig_header_anomaly: int("sig_header_anomaly")?,
+            sig_ip_reputation: int("sig_ip_reputation")?,
+            sig_tls_fingerprint: int("sig_tls_fingerprint")?,
+            ip_reputation_category: row.get("ip_reputation_category")?,
+            country: row.get("country")?,
+            browser_family: row.get("browser_family")?,
+        },
+        verify,
+        label: row.get("label")?,
+        labeled_at: row.get("labeled_at")?,
+    })
+}
+
 fn opt_i64(row: &Row<'_>, idx: usize) -> rusqlite::Result<i64> {
     Ok(row.get::<_, Option<i64>>(idx)?.unwrap_or(0))
 }
@@ -339,7 +444,7 @@ fn bucket_secs_for(hours: u32) -> i64 {
 /// Classify a User-Agent into a coarse browser family. Order matters:
 /// Chromium-family browsers all contain "chrome/", so the more specific
 /// tokens are checked first.
-fn browser_family(ua: Option<&str>) -> &'static str {
+pub(crate) fn browser_family(ua: Option<&str>) -> &'static str {
     let Some(ua) = ua else { return "(none)" };
     let l = ua.to_ascii_lowercase();
     const SCRIPTED: &[&str] = &[

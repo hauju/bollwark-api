@@ -45,6 +45,16 @@ fn test_app_with_store(
     builder.build_with_store()
 }
 
+/// Like `test_app_with_store`, but also returns the `AppState` — for tests
+/// that need the decision log itself (to flush or prune it).
+fn test_app_with_state(
+    customize: impl FnOnce(&mut TestAppBuilder),
+) -> (axum::Router, Arc<InMemoryStore>, Arc<AppState>) {
+    let mut builder = TestAppBuilder::default();
+    customize(&mut builder);
+    builder.build_with_state()
+}
+
 /// Move a stored challenge back by `secs` so the verify-time time-on-page
 /// signal sees a realistic elapsed time instead of the ~0ms gap between
 /// issuing and verifying in a test.
@@ -2050,6 +2060,196 @@ async fn admin_req(
         .unwrap();
     let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, json)
+}
+
+/// Solve and verify once on `site`; returns the challenge id the verify
+/// response hands back — the handle an integrator later labels.
+async fn solve_and_verify_once(
+    app: &axum::Router,
+    store: &InMemoryStore,
+    site: &CreateSiteResponse,
+) -> uuid::Uuid {
+    let (_, puzzle) = get_test_puzzle(app, &site.site_key.to_string()).await;
+    let puzzle = puzzle.unwrap();
+    let nonce = solve_challenge(&puzzle.prefix, puzzle.difficulty);
+    backdate_challenge(store, puzzle.challenge_id, 5).await;
+    let body = serde_json::json!({ "challenge_id": puzzle.challenge_id, "nonce": nonce });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/verify")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", site.secret_key))
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: VerifyResponse = serde_json::from_slice(&bytes).unwrap();
+    assert!(result.success);
+    let cid = result
+        .challenge_id
+        .expect("verify hands back the challenge id");
+    assert_eq!(cid, puzzle.challenge_id);
+    cid
+}
+
+async fn feedback_req(
+    app: &axum::Router,
+    secret: &str,
+    challenge_id: uuid::Uuid,
+    verdict: &str,
+) -> StatusCode {
+    let body = serde_json::json!({ "challenge_id": challenge_id, "verdict": verdict });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/feedback")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {secret}"))
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    app.clone()
+        .oneshot(with_connect_info(req))
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+async fn test_feedback_labels_only_the_callers_own_challenge() {
+    let (app, store, state) = test_app_with_state(|b| b.enable_admin = true);
+    let site = create_test_site(&app).await;
+    let other = create_test_site(&app).await;
+    let cid = solve_and_verify_once(&app, &store, &site).await;
+    // Decisions are written asynchronously; wait for the row to land.
+    state.decision_log.as_ref().unwrap().flush().await.unwrap();
+
+    assert_eq!(
+        feedback_req(&app, &other.secret_key, cid, "spam").await,
+        StatusCode::NOT_FOUND,
+        "another site's secret cannot label it"
+    );
+    assert_eq!(
+        feedback_req(&app, &site.secret_key, uuid::Uuid::new_v4(), "spam").await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        feedback_req(&app, "nope", cid, "spam").await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        feedback_req(&app, &site.secret_key, cid, "spam").await,
+        StatusCode::NO_CONTENT
+    );
+}
+
+#[tokio::test]
+async fn test_feedback_without_a_decision_log_is_not_found() {
+    let (app, store) = test_app_with_store(|_| {});
+    let site = create_test_site(&app).await;
+    let cid = solve_and_verify_once(&app, &store, &site).await;
+    assert_eq!(
+        feedback_req(&app, &site.secret_key, cid, "legit").await,
+        StatusCode::NOT_FOUND
+    );
+}
+
+/// The retention prune folds decisions into anonymised training samples,
+/// labels included; `/v1/admin/training` pages them out by id; a label that
+/// arrives after the prune still lands on the sample.
+#[tokio::test]
+async fn test_training_export_is_anonymised_labelled_and_paged() {
+    let (app, store, state) = test_app_with_state(|b| b.enable_admin = true);
+    let log = state.decision_log.clone().expect("admin log");
+    let site = create_test_site(&app).await;
+    let first = solve_and_verify_once(&app, &store, &site).await;
+    let second = solve_and_verify_once(&app, &store, &site).await;
+    log.flush().await.unwrap();
+    assert_eq!(
+        feedback_req(&app, &site.secret_key, first, "spam").await,
+        StatusCode::NO_CONTENT
+    );
+
+    // Nothing is exported until the sweeper folds rows into samples.
+    let (status, body) = admin_req(
+        &app,
+        "GET",
+        "/v1/admin/training",
+        Some(TEST_ADMIN_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["samples"].as_array().unwrap().is_empty());
+    assert!(body["next_after_id"].is_null());
+
+    // A retention of zero hours: everything is older than "now".
+    let pruned = log.prune(0).await.unwrap();
+    assert!(pruned >= 4, "two puzzle + two verify rows, got {pruned}");
+
+    let (status, page1) = admin_req(
+        &app,
+        "GET",
+        "/v1/admin/training?limit=1",
+        Some(TEST_ADMIN_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let samples = page1["samples"].as_array().unwrap();
+    assert_eq!(samples.len(), 1);
+    let s = &samples[0];
+    assert_eq!(s["challenge_id"], serde_json::json!(first.to_string()));
+    assert_eq!(s["site_key"], serde_json::json!(site.site_key.to_string()));
+    assert_eq!(s["label"], serde_json::json!("spam"));
+    assert!(s["labeled_at"].is_string());
+    assert!(s["hour"].as_str().unwrap().ends_with(":00:00Z"));
+    assert!(s["puzzle"]["browser_family"].is_string());
+    assert!(s["verify"]["success"].as_bool().unwrap());
+    assert_eq!(s["verify"]["webdriver"], serde_json::json!("no_blob"));
+    // Nothing that identifies the visitor made it across.
+    let text = s.to_string();
+    for forbidden in ["\"ip\"", "user_agent", "Mozilla", "127.0.0"] {
+        assert!(
+            !text.contains(forbidden),
+            "sample leaks {forbidden}: {text}"
+        );
+    }
+    let next = page1["next_after_id"]
+        .as_i64()
+        .expect("a full page has a cursor");
+
+    let (_, page2) = admin_req(
+        &app,
+        "GET",
+        &format!("/v1/admin/training?after_id={next}&limit=1"),
+        Some(TEST_ADMIN_TOKEN),
+        None,
+    )
+    .await;
+    let s2 = &page2["samples"][0];
+    assert_eq!(s2["challenge_id"], serde_json::json!(second.to_string()));
+    assert!(s2["label"].is_null());
+
+    // Late feedback reaches the sample, not a 404.
+    assert_eq!(
+        feedback_req(&app, &site.secret_key, second, "legit").await,
+        StatusCode::NO_CONTENT
+    );
+    let (_, all) = admin_req(
+        &app,
+        "GET",
+        "/v1/admin/training",
+        Some(TEST_ADMIN_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(all["samples"][1]["label"], serde_json::json!("legit"));
+    assert!(
+        all["next_after_id"].is_null(),
+        "a short page is the last one"
+    );
 }
 
 #[tokio::test]

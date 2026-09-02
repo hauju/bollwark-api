@@ -3,6 +3,7 @@ use std::net::IpAddr;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::dashboard::types::FeedbackVerdict;
 use crate::error::CaptchaError;
 use crate::puzzle::types::Algorithm;
 use crate::risk::{BehaviorReport, EscalationTier, VerifyDecision};
@@ -309,6 +310,15 @@ impl From<VerifyDecision> for RiskBand {
     }
 }
 
+/// `POST /v1/feedback`: an integrator telling the service what a submission
+/// it already decided turned out to be — the one source of ground truth the
+/// scorer has. See `CONFIGURATION.md` → *Feedback and training samples*.
+#[derive(Debug, Deserialize)]
+pub struct FeedbackRequest {
+    pub challenge_id: Uuid,
+    pub verdict: FeedbackVerdict,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VerifyResponse {
     pub success: bool,
@@ -324,24 +334,32 @@ pub struct VerifyResponse {
     /// report (an invalid proof of work).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub risk: Option<RiskBand>,
+    /// The challenge this verdict is about — the handle for `POST
+    /// /v1/feedback`, so an integrator can label the decision later without
+    /// decoding the token themselves. Absent on the failover path, which has
+    /// no challenge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub challenge_id: Option<Uuid>,
 }
 
 impl VerifyResponse {
     /// The ordinary path: `failover` is false for every solved-puzzle verdict.
-    pub fn solved(success: bool, decision: VerifyDecision) -> Self {
+    pub fn solved(challenge_id: Uuid, success: bool, decision: VerifyDecision) -> Self {
         Self {
             success,
             failover: false,
             risk: Some(decision.into()),
+            challenge_id: Some(challenge_id),
         }
     }
 
     /// A wrong nonce: refused before any scoring ran, so there is no band.
-    pub fn pow_invalid() -> Self {
+    pub fn pow_invalid(challenge_id: Uuid) -> Self {
         Self {
             success: false,
             failover: false,
             risk: None,
+            challenge_id: Some(challenge_id),
         }
     }
 }

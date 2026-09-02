@@ -55,6 +55,9 @@ pub fn router(state: SharedState, admin: Option<AdminState>) -> Router {
                 // ever runs; 8 KiB is generous for the real payload.
                 .layer(DefaultBodyLimit::max(VERIFY_BODY_LIMIT_BYTES)),
         )
+        // Same credential as `/v1/verify`, same no-CORS surface: only the
+        // backend that verified a submission knows what became of it.
+        .route("/v1/feedback", post(handlers::feedback))
         .route("/v1/sites", post(handlers::create_site))
         // Outage attestation lives on the main router, not the dashboard's:
         // failover must work without ADMIN_DB_PATH. This is how an operator

@@ -507,9 +507,14 @@ pub async fn verify(
                 breakdown: Default::default(),
                 time_on_page_ms: Some(time_on_page_ms),
                 webdriver: "n/a",
+                automation: "n/a",
+                headless: "n/a",
+                behavior: None,
+                impossible_timing: false,
+                duplicate_blob: false,
             });
         }
-        return Ok(Json(VerifyResponse::pow_invalid()));
+        return Ok(Json(VerifyResponse::pow_invalid(challenge.id)));
     }
 
     // Consume the challenge atomically after a valid PoW. This preserves
@@ -633,10 +638,54 @@ pub async fn verify(
             breakdown: vscore.breakdown,
             time_on_page_ms: Some(time_on_page_ms),
             webdriver: webdriver_flag,
+            automation: automation_flag,
+            headless: headless_flag,
+            behavior: req.behavior,
+            impossible_timing,
+            duplicate_blob,
         });
     }
 
-    Ok(Json(VerifyResponse::solved(success, vscore.decision)))
+    Ok(Json(VerifyResponse::solved(
+        challenge.id,
+        success,
+        vscore.decision,
+    )))
+}
+
+/// `POST /v1/feedback` — attach an integrator's `spam`/`legit` verdict to a
+/// decision. Site-secret gated like `/v1/verify` and scoped to that site's own
+/// challenges. 404 without a decision log (`ADMIN_DB_PATH`): there is nothing
+/// to attach it to — the same shape as `POST /v1/sites` without `ADMIN_TOKEN`.
+pub async fn feedback(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    AppJson(body): AppJson<FeedbackRequest>,
+) -> Result<axum::http::StatusCode, CaptchaError> {
+    let token = super::extract::bearer_token(&headers).ok_or(CaptchaError::Unauthorized)?;
+    let site = state
+        .store
+        .get_site_by_secret(token)
+        .await?
+        .ok_or(CaptchaError::Unauthorized)?;
+    let Some(log) = &state.decision_log else {
+        return Err(CaptchaError::NotFound);
+    };
+    let found = log
+        .label(body.challenge_id, site.site_key, body.verdict)
+        .await
+        .map_err(|e| CaptchaError::Storage(format!("feedback: {e}")))?;
+    if !found {
+        return Err(CaptchaError::ChallengeNotFound);
+    }
+    tracing::info!(
+        event = "feedback",
+        challenge_id = %body.challenge_id,
+        site_key = %site.site_key,
+        verdict = body.verdict.as_str(),
+        "Feedback recorded"
+    );
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 /// Decide a failover claim — a client asserting it could not reach us at all.
@@ -726,6 +775,7 @@ fn verify_failover(
         // The band describes the local evidence that was scored; an
         // attestation refusal shows up as `success: false` beside it.
         risk: Some(vscore.decision.into()),
+        challenge_id: None,
     }))
 }
 

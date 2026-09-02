@@ -573,6 +573,20 @@ The bundled `static/{about,privacy,terms}.html` are written to be safe defaults 
 
 ---
 
+## Feedback and training samples
+
+The scorer never learns which of its decisions were wrong: a `ShadowFail` that was a real person and a `Pass` that turned out to be spam look identical in the log. Two pieces close that loop; both need `ADMIN_DB_PATH`.
+
+### `POST /v1/feedback` (bearer: site secret)
+
+`{ "challenge_id": "<uuid>", "verdict": "spam" | "legit" }` — the integrator's verdict on a submission the service already decided. `challenge_id` is returned by `/v1/verify` alongside `success`. Scoped to the caller's own site (another site's challenge is a `404`), `204` on success, `404` when there is no decision log. The label attaches to the live decision row, or — once the retention sweeper has folded that row into a training sample — to the sample directly, so feedback arriving days later still reaches the dataset. Only the challenge id and the verdict are stored, never the submission.
+
+### Training samples
+
+When the retention sweeper prunes a decision (`LOG_RETENTION_HOURS`), the same transaction first copies it into `training_samples`, minus everything that could identify a visitor: the IP is dropped, the user-agent string is reduced to a browser family, the timestamp to the hour. What remains — the scores and per-signal breakdown, the behaviour counters and probe flags, tier and decision, country and network category, and the integrator's label — identifies nobody. It is anonymous within the meaning of Recital 26 GDPR, which is why the table has no retention limit; the anonymisation step itself runs under the same legitimate interest as the scoring (Recitals 47 and 49). Puzzles that never saw a verify are kept too: an issued-but-never-solved puzzle is a signal in itself.
+
+`GET /v1/admin/training?after_id=<id>&limit=<1..1000>` (bearer `ADMIN_TOKEN`) pages the table by row id — loop until `next_after_id` is `null`. For the hosted service this is what bollwark-dx pulls into its long-retention store; a self-hoster gets the same table locally. Tuning a weight against it is offline work; nothing here changes scoring at runtime. A dashboard reset (`DELETE /v1/admin/sessions`) clears decisions and pending labels but deliberately leaves the samples alone.
+
 ## Privacy posture
 
 The service is **cookie-free** and runs every signal under **legitimate interest** with data minimization — there is no global on/off switch and no consent-triggering client storage. Each signal self-gates on whether its input is configured:
@@ -586,6 +600,8 @@ The service is **cookie-free** and runs every signal under **legitimate interest
 | Behavior (mouse / touch / `webdriver`) | Yes | Ephemeral, submitted for one verification, not linked to an identity |
 | Remote IP check (`remote_ip` on `/v1/verify`) | Only when the integrator forwards it | Issuing address held on the in-memory challenge for its TTL (≤ `CHALLENGE_TTL_SECS`), never logged; the forwarded address is compared and discarded |
 | Behavior blob dedup (5 identical blobs per site / 10 min) | Yes | In-memory only, never logged and never persisted. The key is a non-reversible hash of the blob's event counters scoped to one site — a count of mouse moves and clicks identifies no person, carries no device or network identifier, and the window is reclaimed by the same sweeper that clears the rate counters |
+| Feedback label (`POST /v1/feedback`) | Only with `ADMIN_DB_PATH` | Challenge id plus `spam`/`legit`, nothing from the submission itself; pruned with the row it annotates once folded into the sample |
+| Training sample (prune-time copy) | Only with `ADMIN_DB_PATH` | No IP, no user-agent string, hour-bucketed timestamp; scores, counters, categories and the label only — anonymous under Recital 26, no retention limit |
 | IP reputation | Only with `IP_REPUTATION_FILE` | Transient CIDR lookup; the full IP is never persisted (the decision log truncates it — see `ANONYMIZE_LOG_IP`) |
 | TLS fingerprint | Only with `TLS_FINGERPRINT_HEADER` + `TRUSTED_PROXIES` | The one device-fingerprint signal; opt-in via its own env vars |
 | Geo country (dashboard only) | Only with `GEOIP_DB_PATH` | Not a scoring signal — observability only. Offline lookup on the already-truncated logged IP; resolves country-level, stores only a 2-letter code |
