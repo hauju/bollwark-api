@@ -186,14 +186,16 @@ mod tests {
     /// The plumbing: every scorer reads the table it is handed.
     #[test]
     fn scorers_read_the_weights_they_are_given() {
-        let mut w = SignalWeights::default();
-        w.ua_missing = 7;
-        w.rate_ip_elevated = 3;
-        w.ip_tor = 11;
-        w.tls_fingerprint_bad = 13;
-        w.time_very_short = 17;
-        w.remote_ip_mismatch = 19;
-        w.behavior_flatline = 23;
+        let w = SignalWeights {
+            ua_missing: 7,
+            rate_ip_elevated: 3,
+            ip_tor: 11,
+            tls_fingerprint_bad: 13,
+            time_very_short: 17,
+            remote_ip_mismatch: 19,
+            behavior_flatline: 23,
+            ..SignalWeights::default()
+        };
 
         assert_eq!(
             signals::score_header_anomaly_with(&w, &HeaderMap::new()),
