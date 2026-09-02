@@ -125,6 +125,18 @@ Keep `ARGON2_M_COST` modest so each verify stays cheap, treat every `secret_key`
 
 ---
 
+### Choosing `ARGON2_M_COST`
+
+Memory cost is the one Argon2id knob worth revisiting, and the question is not "how much does it hurt an attacker" but "how much does it hurt an attacker *more than* a visitor". Measured on one machine (Apple Silicon laptop; `cargo run --release --example argon2_cost` for the native side, the bundled widget in headless Chromium for the WASM side; `t_cost=2`, difficulty 5 = 32 expected hashes per solve):
+
+| `ARGON2_M_COST` | native ms/hash (verify, attacker) | WASM ms/hash (visitor) | expected solve, desktop | 95th-percentile solve, desktop |
+|---|---|---|---|---|
+| `8192` (default) | 5 | 8 | 0.25 s | 0.8 s |
+| `32768` | 23 | 34 | 1.1 s | 3.3 s |
+| `65536` | 54 | 70 | 2.2 s | 6.7 s |
+
+Two things follow. The WASM-to-native gap is only about 1.3–1.5× and it does not move with memory: raising `m_cost` raises the absolute cost for both sides in lockstep and never changes the ratio, so it cannot turn PoW into something that stops a funded attacker — at 64 MiB a submission still costs them under two CPU-seconds. And the visitor's cost has a long tail: a solve is a geometric search, so one visitor in twenty does three times the expected work, and a low-end phone is a further 4–8× slower than the desktop above — at 64 MiB that is a 30–60 s wait for the unlucky mobile visitor, at 8 MiB it stays under 5 s. The default stays at 8 MiB for that reason. Raising it is a defensible choice for a site whose visitors are desktop-only and whose abuse is the cheap long tail; measure on the slowest device you care about first — the harness prints the native side, and the widget's `data-debug` panel shows `PoW hashes` / `PoW time` for the browser side. Server memory per in-flight verify is `m_cost` KiB, bounded by the verify permit semaphore.
+
 ## Risk tier thresholds (puzzle-time)
 
 The puzzle-time scorer adds up contributions from each enabled signal and maps the total to an `EscalationTier`. Tier thresholds are inclusive: `score >= threshold` selects that tier.
