@@ -101,6 +101,7 @@ pub struct VerifyBreakdownDto {
     pub honeypot: u32,
     pub time_on_page: u32,
     pub behavior: u32,
+    pub remote_ip: u32,
 }
 
 /// Aggregate stats across every recorded session. Computed via a single
@@ -137,6 +138,7 @@ pub struct VerifySignalSums {
     pub honeypot: u64,
     pub time_on_page: u64,
     pub behavior: u64,
+    pub remote_ip: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -248,6 +250,7 @@ pub struct SignalFires {
     pub honeypot: u64,
     pub time_on_page: u64,
     pub behavior: u64,
+    pub remote_ip: u64,
 }
 
 /// Aggregate counts for a single site, drawn from the decision log.

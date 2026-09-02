@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS verify_decisions (
     sig_honeypot       INTEGER NOT NULL,
     sig_time_on_page   INTEGER NOT NULL,
     sig_behavior       INTEGER NOT NULL,
+    sig_remote_ip      INTEGER NOT NULL DEFAULT 0,
     time_on_page_ms INTEGER,
     webdriver       TEXT    NOT NULL,
     monitored       INTEGER NOT NULL DEFAULT 0
@@ -108,6 +109,9 @@ const MIGRATIONS: &[&str] = &[
     // to 0 so every pre-existing row reads as enforced, which it was.
     "ALTER TABLE puzzle_decisions ADD COLUMN monitored INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE verify_decisions ADD COLUMN monitored INTEGER NOT NULL DEFAULT 0",
+    // Remote-IP mismatch signal. 0 for every pre-existing row: the check
+    // did not exist, so it never fired.
+    "ALTER TABLE verify_decisions ADD COLUMN sig_remote_ip INTEGER NOT NULL DEFAULT 0",
 ];
 
 enum Msg {
@@ -458,11 +462,11 @@ fn insert_verify(conn: &Connection, r: &VerifyRecord) -> rusqlite::Result<()> {
         "INSERT INTO verify_decisions (
             ts, challenge_id, success, outcome, score,
             sig_honeypot, sig_time_on_page, sig_behavior,
-            time_on_page_ms, webdriver, monitored
+            time_on_page_ms, webdriver, monitored, sig_remote_ip
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5,
             ?6, ?7, ?8,
-            ?9, ?10, ?11
+            ?9, ?10, ?11, ?12
          )",
         params![
             ts,
@@ -476,6 +480,7 @@ fn insert_verify(conn: &Connection, r: &VerifyRecord) -> rusqlite::Result<()> {
             r.time_on_page_ms.map(|v| v as i64),
             r.webdriver,
             r.monitored as i64,
+            r.breakdown.remote_ip,
         ],
     )?;
     Ok(())

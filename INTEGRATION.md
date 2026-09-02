@@ -311,6 +311,14 @@ curl -s -X POST https://api.bollwark.eu/v1/verify \
 
 > **Server-to-server callers** that build the request without the widget can send the explicit fields instead of `token`: `challenge_id` plus `nonce`, with optional `honeypot` and `behavior`. Forward the widget's `behavior` blob verbatim or omit it — never synthesise a constant one: identical activity-claiming blobs repeating on a site are scored as scripted traffic (see *Verify-time signals* in `CONFIGURATION.md`), and an omitted blob is neutral by default.
 
+Forward the visitor's IP too, if you can:
+
+```bash
+  -d '{ "token": "<captcha-token value>", "remote_ip": "<visitor IP as your backend saw it>" }'
+```
+
+`remote_ip` is optional. When present, the service compares it with the address the puzzle was issued to (IPv6 at /64); a mismatch is the shape of a **token farm** — puzzles solved on one machine, tokens handed to a fleet — and lands the submission in `risk: "elevated"`, never a refusal on its own. Pass the address you would rate-limit on: behind a proxy or CDN that is the resolved client IP, not the proxy's, or every submission reads as elevated. Only the top-level field counts; a `remote_ip` inside the opaque `token` is ignored, since the token is written by the visitor's browser. The `bollwark-verify` crate exposes this as `Client::verify_from(token, ip)`.
+
 Successful response:
 
 ```json

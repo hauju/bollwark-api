@@ -68,6 +68,14 @@ pub struct Challenge {
     /// `VERIFY_MAX_ATTEMPTS`.
     #[serde(default)]
     pub attempts: u32,
+    /// The client address this challenge was issued to (reverse-proxy
+    /// resolved, full address), so `/v1/verify` can check an
+    /// integrator-forwarded `remote_ip` against it. Held in memory for the
+    /// challenge's TTL only and never logged. `None` means unknown (a
+    /// challenge minted before this field existed), which disables the check
+    /// rather than failing it.
+    #[serde(default)]
+    pub issued_to: Option<std::net::IpAddr>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

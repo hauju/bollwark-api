@@ -50,6 +50,7 @@ impl PuzzleEngine {
             dwell_since: now,
             expires_at,
             attempts: 0,
+            issued_to: None,
         }
     }
 

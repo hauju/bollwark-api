@@ -65,6 +65,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::net::IpAddr;
 use std::time::Duration;
 
 #[cfg(feature = "axum")]
@@ -250,6 +251,23 @@ impl Client {
     /// An empty token short-circuits to [`Verdict::Replayed`] without a round
     /// trip: there is nothing to verify, and it must never be accepted.
     pub async fn verify(&self, token: &str) -> Result<Verdict, Error> {
+        self.verify_inner(token, None).await
+    }
+
+    /// [`verify`](Client::verify), also forwarding the visitor's IP as your
+    /// backend saw it — the address you would rate-limit on.
+    ///
+    /// The service compares it with the address the puzzle was issued to
+    /// (IPv6 at /64). A mismatch is the shape of a token farm — puzzles solved
+    /// on one machine, tokens handed to a fleet — and lands the submission in
+    /// [`Risk::Elevated`], never a refusal on its own. Behind a proxy or CDN
+    /// pass the resolved client address, not the proxy's, or every submission
+    /// reads as elevated.
+    pub async fn verify_from(&self, token: &str, remote_ip: IpAddr) -> Result<Verdict, Error> {
+        self.verify_inner(token, Some(remote_ip)).await
+    }
+
+    async fn verify_inner(&self, token: &str, remote_ip: Option<IpAddr>) -> Result<Verdict, Error> {
         if token.is_empty() {
             return Ok(Verdict::Replayed);
         }
@@ -258,7 +276,7 @@ impl Client {
             .http
             .post(&self.verify_url)
             .bearer_auth(&self.secret_key)
-            .json(&serde_json::json!({ "token": token }))
+            .json(&serde_json::json!({ "token": token, "remote_ip": remote_ip }))
             .send()
             .await?;
 

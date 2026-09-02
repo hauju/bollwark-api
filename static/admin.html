@@ -840,6 +840,7 @@ const SIGNAL_COLORS = {
   honeypot:        '#ff7b72',
   time_on_page:    '#ffa657',
   behavior:        '#56d364',
+  remote_ip:       '#bc8cff',
 };
 
 const SIGNAL_LABELS = {
@@ -850,6 +851,7 @@ const SIGNAL_LABELS = {
   honeypot: 'honeypot',
   time_on_page: 'time on page',
   behavior: 'behavior',
+  remote_ip: 'remote ip',
 };
 
 // Fixed palette per IP-reputation network type, falls back to grey for any
@@ -895,7 +897,7 @@ function renderContribution(breakdown, keys, total) {
 }
 
 const PUZZLE_KEYS = ['rate', 'header_anomaly', 'ip_reputation', 'tls_fingerprint'];
-const VERIFY_KEYS = ['honeypot', 'time_on_page', 'behavior'];
+const VERIFY_KEYS = ['honeypot', 'time_on_page', 'behavior', 'remote_ip'];
 
 // ---- Analytics charts (vanilla SVG/divs, no chart library) ----
 

@@ -26,6 +26,10 @@ pub struct VerifyContext {
     /// puzzle side passes `ip_count`/`site_count` into `SignalContext`.
     /// `0` means "not counted" (no blob, a flatline, or the failover path).
     pub behavior_duplicate_count: u32,
+    /// The integrator forwarded the submitting visitor's address and it is
+    /// not the one the challenge was issued to. Computed in the handler
+    /// (which holds both addresses) so the scorer stays pure.
+    pub remote_ip_mismatch: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -33,6 +37,7 @@ pub struct VerifyBreakdown {
     pub honeypot: u32,
     pub time_on_page: u32,
     pub behavior: u32,
+    pub remote_ip: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -82,6 +87,24 @@ pub const TIME_VERY_SHORT_MS: u64 = 500;
 pub const TIME_SHORT_MS: u64 = 2_000;
 pub const TIME_VERY_SHORT_SCORE: u32 = 50;
 pub const TIME_SHORT_SCORE: u32 = 25;
+
+/// The integrator forwarded the submitting visitor's IP and it is not the one
+/// the challenge was issued to (IPv6 compared at /64, like the rate key).
+/// That is the shape of a token farm — puzzles solved on one box, tokens
+/// handed to a fleet — but also of a phone changing networks mid-form, of
+/// egress pools such as iCloud Private Relay, and of an integrator forwarding
+/// its own proxy's address by mistake. Shadow band alone, so every one of
+/// those shows up as `risk: "elevated"` and a `remote_ip_mismatch` log field
+/// before it costs anyone a pass.
+pub const REMOTE_IP_MISMATCH_SCORE: u32 = 30;
+
+pub fn score_remote_ip(mismatch: bool) -> u32 {
+    if mismatch {
+        REMOTE_IP_MISMATCH_SCORE
+    } else {
+        0
+    }
+}
 
 pub fn score_time_on_page(ms: Option<u64>) -> u32 {
     match ms {
@@ -134,8 +157,10 @@ impl VerifyScorer {
                         + score_duplicate_blob(b, ctx.behavior_duplicate_count)
                 }
             },
+            remote_ip: score_remote_ip(ctx.remote_ip_mismatch),
         };
-        let total = breakdown.honeypot + breakdown.time_on_page + breakdown.behavior;
+        let total =
+            breakdown.honeypot + breakdown.time_on_page + breakdown.behavior + breakdown.remote_ip;
         let decision = if total >= thresholds.block_min {
             VerifyDecision::Block
         } else if total >= thresholds.shadow_min {
@@ -170,6 +195,7 @@ mod tests {
             time_on_page_ms: Some(10_000),
             behavior: BehaviorPresence::Absent,
             behavior_duplicate_count: 0,
+            remote_ip_mismatch: false,
         }
     }
 
@@ -311,6 +337,7 @@ mod tests {
             time_on_page_ms: Some(1_500),
             behavior: BehaviorPresence::Present(keyboard),
             behavior_duplicate_count: 0,
+            remote_ip_mismatch: false,
         };
         let tight = VerifyThresholds {
             shadow_min: 20,
@@ -347,6 +374,7 @@ mod tests {
             time_on_page_ms: Some(1_500),
             behavior: BehaviorPresence::Present(typing_at_mount),
             behavior_duplicate_count: 0,
+            remote_ip_mismatch: false,
         };
         let tight = VerifyThresholds {
             shadow_min: 20,
@@ -362,6 +390,26 @@ mod tests {
     /// A fabricated blob claiming an interaction from long before the visitor
     /// existed. Alone it must shadow, never block — the same rollout stance as
     /// `VERIFY_REQUIRE_BEHAVIOR`.
+    #[test]
+    fn remote_ip_mismatch_alone_shadows() {
+        let mut c = ctx();
+        c.remote_ip_mismatch = true;
+        let s = scorer().score(&c, VerifyThresholds::default());
+        assert_eq!(s.breakdown.remote_ip, REMOTE_IP_MISMATCH_SCORE);
+        assert_eq!(s.total, REMOTE_IP_MISMATCH_SCORE);
+        assert_eq!(s.decision, VerifyDecision::ShadowFail);
+    }
+
+    #[test]
+    fn remote_ip_mismatch_stacks_with_a_fast_submit_to_block() {
+        let mut c = ctx();
+        c.remote_ip_mismatch = true;
+        c.time_on_page_ms = Some(100);
+        let s = scorer().score(&c, VerifyThresholds::default());
+        assert_eq!(s.total, REMOTE_IP_MISMATCH_SCORE + TIME_VERY_SHORT_SCORE);
+        assert_eq!(s.decision, VerifyDecision::Block);
+    }
+
     #[test]
     fn impossible_timing_alone_shadows() {
         let mut c = ctx();

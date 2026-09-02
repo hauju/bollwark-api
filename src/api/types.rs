@@ -1,3 +1,5 @@
+use std::net::IpAddr;
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -70,6 +72,13 @@ pub struct VerifyRequest {
     /// Client-supplied mint time (unix ms). Sanity-checked only — forgeable.
     #[serde(default)]
     pub issued_at: Option<i64>,
+    /// The visitor's address as the integrator's backend saw it — the one
+    /// they would rate-limit on. Only ever read from the outer request body,
+    /// never from inside the opaque `token`: the token is client-authored, so
+    /// a client that could name its own remote IP would name the issuing one.
+    /// Optional; absent disables the check.
+    #[serde(default)]
+    pub remote_ip: Option<IpAddr>,
 }
 
 /// Inner payload carried by the opaque `token`. The widget hex-encodes the
@@ -104,6 +113,8 @@ pub struct SolvedVerify {
     pub nonce: u64,
     pub honeypot: Option<String>,
     pub behavior: Option<BehaviorReport>,
+    /// See [`VerifyRequest::remote_ip`]; always the outer field.
+    pub remote_ip: Option<IpAddr>,
 }
 
 /// A claim that the widget could not reach this service at all.
@@ -162,6 +173,7 @@ impl VerifyRequest {
                 nonce: p.nonce,
                 honeypot: p.honeypot,
                 behavior: p.behavior,
+                remote_ip: self.remote_ip,
             }))
         } else if self.failover {
             Ok(ResolvedVerify::Failover(FailoverClaim {
@@ -181,6 +193,7 @@ impl VerifyRequest {
                 nonce: self.nonce,
                 honeypot: self.honeypot,
                 behavior: self.behavior,
+                remote_ip: self.remote_ip,
             }))
         }
     }
@@ -361,7 +374,44 @@ mod tests {
             failover: false,
             site_key: None,
             issued_at: None,
+            remote_ip: None,
         }
+    }
+
+    #[test]
+    fn remote_ip_is_read_from_the_body_never_from_the_token() {
+        let cid = Uuid::new_v4();
+        let payload = serde_json::json!({
+            "challenge_id": cid,
+            "nonce": 7,
+            "remote_ip": "203.0.113.9",
+        });
+        let token = hex::encode(serde_json::to_vec(&payload).unwrap());
+
+        let solved = expect_solved(
+            VerifyRequest {
+                token: Some(token.clone()),
+                ..req()
+            }
+            .resolve()
+            .unwrap(),
+        );
+        assert_eq!(
+            solved.remote_ip, None,
+            "a token cannot name its own remote IP"
+        );
+
+        let outer: IpAddr = "198.51.100.4".parse().unwrap();
+        let solved = expect_solved(
+            VerifyRequest {
+                token: Some(token),
+                remote_ip: Some(outer),
+                ..req()
+            }
+            .resolve()
+            .unwrap(),
+        );
+        assert_eq!(solved.remote_ip, Some(outer));
     }
 
     fn expect_solved(r: ResolvedVerify) -> SolvedVerify {

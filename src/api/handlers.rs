@@ -330,9 +330,14 @@ pub async fn get_puzzle(
         None => None,
     };
 
-    let challenge = state
-        .engine
-        .generate_with_dwell(params.site_key, difficulty, inherited_dwell);
+    let mut challenge =
+        state
+            .engine
+            .generate_with_dwell(params.site_key, difficulty, inherited_dwell);
+    // Remembered for the remote-IP check at verify time. The full resolved
+    // address rather than the /64-bucketed rate key: bucketing happens at
+    // compare time, so a change to the bucketing rule applies to both sides.
+    challenge.issued_to = Some(ip);
 
     if let Some(log) = &state.decision_log {
         log.record_puzzle(PuzzleRecord {
@@ -536,11 +541,20 @@ pub async fn verify(
         }
         _ => 0,
     };
+    // Remote-IP check: only when the integrator forwarded the submitting
+    // visitor's address *and* the challenge remembers whom it was issued to.
+    // Compared on the rate key (IPv6 at /64) so a host rotating through its
+    // delegated block, as privacy extensions do, is not a mismatch.
+    let remote_ip_mismatch = match (challenge.issued_to, req.remote_ip) {
+        (Some(issued), Some(remote)) => rate_key(issued) != rate_key(remote),
+        _ => false,
+    };
     let vctx = VerifyContext {
         honeypot_tripped,
         time_on_page_ms: Some(time_on_page_ms),
         behavior,
         behavior_duplicate_count,
+        remote_ip_mismatch,
     };
     let vscore = state.verify_scorer.score(&vctx, policy.verify);
 
@@ -589,6 +603,8 @@ pub async fn verify(
                 sig_honeypot = vscore.breakdown.honeypot,
                 sig_time_on_page = vscore.breakdown.time_on_page,
                 sig_behavior = vscore.breakdown.behavior,
+                sig_remote_ip = vscore.breakdown.remote_ip,
+                remote_ip_mismatch = remote_ip_mismatch,
                 webdriver = webdriver_flag,
                 automation = automation_flag,
                 headless = headless_flag,
@@ -668,6 +684,8 @@ fn verify_failover(
         // site's backlog at once, which is also the one moment when a burst of
         // similar blobs is expected rather than suspicious.
         behavior_duplicate_count: 0,
+        // No challenge, so nothing to compare a forwarded address against.
+        remote_ip_mismatch: false,
     };
     let vscore = state.verify_scorer.score(&vctx, policy.verify);
 

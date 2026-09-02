@@ -594,6 +594,7 @@ mod tests {
             dwell_since: now,
             expires_at: now + Duration::seconds(ttl_secs),
             attempts: 0,
+            issued_to: None,
         }
     }
 

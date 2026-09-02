@@ -131,7 +131,8 @@ const LIST_SQL: &str = "SELECT
     v.ts, v.outcome, v.success, v.score,
     v.sig_honeypot, v.sig_time_on_page, v.sig_behavior,
     v.time_on_page_ms, v.webdriver,
-    p.monitored, v.monitored
+    p.monitored, v.monitored,
+    v.sig_remote_ip
 FROM puzzle_decisions p
 LEFT JOIN verify_decisions v ON v.challenge_id = p.challenge_id
 ORDER BY p.id DESC
@@ -145,7 +146,8 @@ const GET_SQL: &str = "SELECT
     v.ts, v.outcome, v.success, v.score,
     v.sig_honeypot, v.sig_time_on_page, v.sig_behavior,
     v.time_on_page_ms, v.webdriver,
-    p.monitored, v.monitored
+    p.monitored, v.monitored,
+    v.sig_remote_ip
 FROM puzzle_decisions p
 LEFT JOIN verify_decisions v ON v.challenge_id = p.challenge_id
 WHERE p.id = ?1";
@@ -181,6 +183,7 @@ fn row_to_session(row: &Row<'_>) -> rusqlite::Result<Session> {
             honeypot: row.get::<_, i64>(21)? as u32,
             time_on_page: row.get::<_, i64>(22)? as u32,
             behavior: row.get::<_, i64>(23)? as u32,
+            remote_ip: row.get::<_, i64>(28)? as u32,
         };
         let time_on_page_ms: Option<i64> = row.get(24)?;
         let webdriver: String = row.get(25)?;
@@ -266,7 +269,8 @@ fn stats_blocking(conn: &Connection) -> rusqlite::Result<Stats> {
             SUM(CASE WHEN p.tier = 'HardPow'          THEN 1 ELSE 0 END),
             SUM(CASE WHEN p.tier = 'Block'            THEN 1 ELSE 0 END),
             SUM(CASE WHEN p.monitored = 1 THEN 1 ELSE 0 END),
-            SUM(CASE WHEN v.monitored = 1 THEN 1 ELSE 0 END)
+            SUM(CASE WHEN v.monitored = 1 THEN 1 ELSE 0 END),
+            COALESCE(SUM(v.sig_remote_ip), 0)
          FROM puzzle_decisions p
          LEFT JOIN verify_decisions v ON v.challenge_id = p.challenge_id",
         [],
@@ -287,6 +291,7 @@ fn stats_blocking(conn: &Connection) -> rusqlite::Result<Stats> {
                     honeypot: r.get::<_, i64>(9)? as u64,
                     time_on_page: r.get::<_, i64>(10)? as u64,
                     behavior: r.get::<_, i64>(11)? as u64,
+                    remote_ip: r.get::<_, i64>(24)? as u64,
                 },
                 outcomes: OutcomeCounts {
                     puzzle_issued: opt_i64(r, 12)? as u64,
@@ -509,7 +514,8 @@ fn analytics_blocking(
                 SUM(CASE WHEN p.sig_tls_fingerprint > 0 THEN 1 ELSE 0 END),
                 SUM(CASE WHEN COALESCE(v.sig_honeypot, 0)     > 0 THEN 1 ELSE 0 END),
                 SUM(CASE WHEN COALESCE(v.sig_time_on_page, 0) > 0 THEN 1 ELSE 0 END),
-                SUM(CASE WHEN COALESCE(v.sig_behavior, 0)     > 0 THEN 1 ELSE 0 END)
+                SUM(CASE WHEN COALESCE(v.sig_behavior, 0)     > 0 THEN 1 ELSE 0 END),
+                SUM(CASE WHEN COALESCE(v.sig_remote_ip, 0)    > 0 THEN 1 ELSE 0 END)
              FROM puzzle_decisions p
              LEFT JOIN verify_decisions v ON v.challenge_id = p.challenge_id
              WHERE {FILTER}"
@@ -524,6 +530,7 @@ fn analytics_blocking(
                 honeypot: opt_i64(r, 4)? as u64,
                 time_on_page: opt_i64(r, 5)? as u64,
                 behavior: opt_i64(r, 6)? as u64,
+                remote_ip: opt_i64(r, 7)? as u64,
             })
         },
     )?;

@@ -1234,6 +1234,72 @@ async fn test_clean_verify_reports_low_risk() {
     assert_eq!(result.risk, Some(RiskBand::Low));
 }
 
+/// `remote_ip` forwarded by the integrator is checked against the address the
+/// puzzle was issued to. Same address (or same IPv6 /64) is neutral; a
+/// different one is the shape of a token farm and lands in the shadow band —
+/// still `success: true`, so a misconfigured proxy costs nobody a pass.
+#[tokio::test]
+async fn test_remote_ip_mismatch_is_elevated_and_a_match_is_not() {
+    let (app, store) = test_app_with_store(|_| {});
+    let site = create_test_site(&app).await;
+
+    for (issued_from, remote_ip, expected) in [
+        ("10.1.2.3", Some("10.1.2.3"), RiskBand::Low),
+        ("10.1.2.3", None, RiskBand::Low),
+        ("10.1.2.3", Some("198.51.100.7"), RiskBand::Elevated),
+        // Same /64: a host rotating through its delegated block.
+        (
+            "[2001:db8:1:2::10]",
+            Some("2001:db8:1:2:ffff::1"),
+            RiskBand::Low,
+        ),
+        (
+            "[2001:db8:1:2::10]",
+            Some("2001:db8:1:3::10"),
+            RiskBand::Elevated,
+        ),
+    ] {
+        let req = puzzle_request(
+            &site.site_key.to_string(),
+            Some(CLEAN_UA),
+            Some(CLEAN_LANG),
+            Some(CLEAN_ENC),
+        );
+        let (status, puzzle) = send_puzzle(&app, with_connect_info_ip(req, issued_from)).await;
+        assert_eq!(status, StatusCode::OK);
+        let puzzle = puzzle.unwrap();
+        let nonce = solve_challenge(&puzzle.prefix, puzzle.difficulty);
+        backdate_challenge(&store, puzzle.challenge_id, 5).await;
+
+        let mut body = serde_json::json!({ "challenge_id": puzzle.challenge_id, "nonce": nonce });
+        if let Some(ip) = remote_ip {
+            body["remote_ip"] = serde_json::Value::String(ip.into());
+        }
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/verify")
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", site.secret_key))
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let result: VerifyResponse = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            result.success,
+            "shadow band still passes ({issued_from} vs {remote_ip:?})"
+        );
+        assert_eq!(
+            result.risk,
+            Some(expected),
+            "{issued_from} vs {remote_ip:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_require_behavior_blocks_blobless_fast_submit() {
     // With VERIFY_REQUIRE_BEHAVIOR, an instant submit with no behavior blob

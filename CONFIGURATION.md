@@ -206,6 +206,9 @@ By default, a verify request with no `behavior` blob at all contributes 0 — a 
 | Behavior: headless hints | +20 |
 | Behavior: impossible timing (`first_interaction_ms` > dwell + 30 s) | +30 |
 | Behavior: duplicate blob (5th identical activity-claiming blob per site / 10 min) | +30 |
+| Remote IP differs from the issuing IP (only when the integrator forwards `remote_ip`; IPv6 at /64) | +30 |
+
+*Remote IP.* `POST /v1/verify` accepts an optional top-level `remote_ip` — the submitting visitor's address as the integrator's backend saw it. The challenge remembers the (reverse-proxy resolved) address it was issued to, and a forwarded address that differs — IPv6 compared at /64, like the rate key — scores +30: the shape of a token farm, where puzzles are solved on one machine and the tokens handed to a fleet. It is also the shape of a phone changing networks mid-form, of egress pools such as iCloud Private Relay, and of an integrator forwarding its own proxy's address by mistake, which is why it sits in the shadow band alone: every one of those shows up as `risk: "elevated"` and a `remote_ip_mismatch=true` log field before it costs anyone a pass. The issuing address lives on the in-memory challenge for its TTL and is never logged; the forwarded one is compared and discarded. A `remote_ip` inside the opaque `token` is ignored — the token is client-authored. Absent on either side, the check is off.
 
 The two automation markers — `navigator.webdriver` and driver artifacts (ChromeDriver's `cdc_` globals, legacy Selenium/PhantomJS markers) — are **one dimension and saturate at +30**; they don't sum. They describe the same fact, and scoring them additively would put every driven browser at the block threshold. The artifact probe adds *recall*, catching drivers that scrub `navigator.webdriver` but leave the globals behind.
 
@@ -581,6 +584,7 @@ The service is **cookie-free** and runs every signal under **legitimate interest
 | Honeypot | Yes | No PII |
 | Time-on-page | Yes | Derived server-side, transient |
 | Behavior (mouse / touch / `webdriver`) | Yes | Ephemeral, submitted for one verification, not linked to an identity |
+| Remote IP check (`remote_ip` on `/v1/verify`) | Only when the integrator forwards it | Issuing address held on the in-memory challenge for its TTL (≤ `CHALLENGE_TTL_SECS`), never logged; the forwarded address is compared and discarded |
 | Behavior blob dedup (5 identical blobs per site / 10 min) | Yes | In-memory only, never logged and never persisted. The key is a non-reversible hash of the blob's event counters scoped to one site — a count of mouse moves and clicks identifies no person, carries no device or network identifier, and the window is reclaimed by the same sweeper that clears the rate counters |
 | IP reputation | Only with `IP_REPUTATION_FILE` | Transient CIDR lookup; the full IP is never persisted (the decision log truncates it — see `ANONYMIZE_LOG_IP`) |
 | TLS fingerprint | Only with `TLS_FINGERPRINT_HEADER` + `TRUSTED_PROXIES` | The one device-fingerprint signal; opt-in via its own env vars |
