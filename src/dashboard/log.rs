@@ -755,9 +755,13 @@ fn insert_verify(conn: &Connection, r: &VerifyRecord) -> rusqlite::Result<()> {
             r.behavior.map(|b| b.mouse_moves),
             r.behavior.map(|b| b.touches),
             r.behavior.map(|b| b.interactions),
+            // Client-asserted: a lying blob can carry any u64, and a value past
+            // i64::MAX would wrap negative here and then fail to parse as an
+            // integer downstream (the training export, dx's puller). Clamp;
+            // the impossible-timing check has already scored the lie.
             r.behavior
                 .and_then(|b| b.first_interaction_ms)
-                .map(|v| v as i64),
+                .map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
             r.impossible_timing as i64,
             r.duplicate_blob as i64,
         ],
@@ -819,6 +823,45 @@ mod tests {
 
         // A cutoff before everything is a no-op.
         assert_eq!(prune_before(&conn, "2025-01-01T00:00:00+00:00").unwrap(), 0);
+    }
+
+    /// A client-asserted `first_interaction_ms` past `i64::MAX` is clamped
+    /// rather than wrapped, so the row — and every export that reads it —
+    /// stays a valid integer.
+    #[test]
+    fn insert_verify_clamps_a_hostile_first_interaction() {
+        use crate::risk::BehaviorReport;
+        use crate::risk::verify::VerifyBreakdown;
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        let record = VerifyRecord {
+            monitored: false,
+            challenge_id: Uuid::new_v4(),
+            success: true,
+            outcome: "pass",
+            score: 0,
+            breakdown: VerifyBreakdown::default(),
+            time_on_page_ms: Some(5_000),
+            webdriver: "false",
+            automation: "false",
+            headless: "false",
+            behavior: Some(BehaviorReport {
+                first_interaction_ms: Some(u64::MAX),
+                ..Default::default()
+            }),
+            impossible_timing: true,
+            duplicate_blob: false,
+        };
+        insert_verify(&conn, &record).unwrap();
+        let stored: i64 = conn
+            .query_row(
+                "SELECT first_interaction_ms FROM verify_decisions",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, i64::MAX);
     }
 
     /// The prune folds each row it is about to delete into `training_samples`
