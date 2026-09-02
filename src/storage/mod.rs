@@ -104,6 +104,15 @@ pub trait Store: Send + Sync + 'static {
         ip: &IpAddr,
     ) -> impl Future<Output = Result<u32, CaptchaError>> + Send;
 
+    /// Same counter key as [`Store::increment_ip_count`], over the sustained
+    /// window ([`crate::risk::signals::RATE_SUSTAINED_WINDOW_SECS`]). The
+    /// handler increments both per request and the rate signal takes the
+    /// worse band of the two.
+    fn increment_ip_count_sustained(
+        &self,
+        ip: &IpAddr,
+    ) -> impl Future<Output = Result<u32, CaptchaError>> + Send;
+
     fn increment_site_count(
         &self,
         site_key: &Uuid,

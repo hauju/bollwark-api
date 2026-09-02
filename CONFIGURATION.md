@@ -145,12 +145,14 @@ A hard per-IP issuance cap that sits *outside* the scoring pipeline. The rate si
 
 | Signal | Max contribution | Enabled by |
 |---|---|---|
-| Rate (per-IP — IPv6 bucketed to /64 — + per-site, 60s window) | 45 | Always on |
+| Rate (per-IP — IPv6 bucketed to /64 — over a 60 s **and** a 15 min window, + per-site over 60 s) | 45 | Always on |
 | Header anomaly (UA / Accept-Language / Accept-Encoding / fetch metadata / client hints) | 75 | Always on |
 | IP reputation | 40 | `IP_REPUTATION_FILE` |
 | TLS fingerprint | 35 | `TLS_FINGERPRINT_HEADER` + `TRUSTED_PROXIES` |
 
 Every signal self-gates on its own input: header anomaly always computes, IP reputation contributes 0 without `IP_REPUTATION_FILE`, and TLS fingerprint contributes 0 unless a trusted proxy supplied the header. There is no global on/off switch — the service is cookie-free and runs these signals under legitimate interest with data minimization. Tuning the per-signal score weights requires a code change (see `src/risk/signals.rs` and the per-signal modules); only the **tier thresholds** are env-tunable.
+
+Rate components: the per-IP counter is read over two tumbling windows, 60 s (>10 → +8, >20 → +15, >50 → +30) and 15 min (>90 → +8, >180 → +15, >450 → +30), and the IP component is the **worse band of the two, never the sum** — so a one-minute burst scores exactly as it did with one window and the signal's ceiling stays at 45. The 15-minute window exists for the source that paces itself just under the minute thresholds: 9 requests a minute never trips `>10`, but 135 in a quarter hour does. Its thresholds are the rate a source must *hold* for the whole window — roughly 6 / 12 / 30 a minute — which no single visitor produces (the widget fetches one puzzle per page load plus one refresh per `CHALLENGE_TTL_SECS`) but a shared egress can, which is why the lowest band is still below `TIER_CHECKBOX_MIN` on its own. Per-site stays on the single 60 s window (>200 → +8, >500 → +15); sustained site load is `LOAD_LADDER`'s job. Both per-IP counts are emitted on the `puzzle_decision` event as `ip_count` / `ip_count_sustained`.
 
 Header anomaly components:
 
@@ -574,7 +576,7 @@ The service is **cookie-free** and runs every signal under **legitimate interest
 
 | Signal | Always on? | Privacy notes |
 |---|---|---|
-| Rate (per-IP + per-site, 60 s window) | Yes | Transient counter, no per-IP profile retained |
+| Rate (per-IP over 60 s and 15 min + per-site over 60 s) | Yes | Transient counters, no per-IP profile retained |
 | Header anomaly (UA / Accept-Language / Accept-Encoding / fetch metadata / client hints) | Yes | Scored transiently from headers the browser already sends; `Sec-Fetch-*` and `Sec-CH-UA` are checked for presence only, never read; no stable identifier persisted |
 | Honeypot | Yes | No PII |
 | Time-on-page | Yes | Derived server-side, transient |

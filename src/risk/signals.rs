@@ -17,16 +17,46 @@ pub const RATE_SITE_HIGH: u32 = 200;
 pub const RATE_SITE_SCORE_VERY_HIGH: u32 = 15;
 pub const RATE_SITE_SCORE_HIGH: u32 = 8;
 
-pub fn score_rate(ip_count: u32, site_count: u32) -> u32 {
-    let ip_component = if ip_count > RATE_IP_VERY_HIGH {
+/// Length of the second, sustained per-IP window. The 60 s window sees bursts;
+/// this one sees the source that paces itself just under the minute
+/// thresholds — 9 requests a minute never trips `> RATE_IP_ELEVATED`, but
+/// 135 in a quarter hour does.
+pub const RATE_SUSTAINED_WINDOW_SECS: i64 = 900;
+
+/// Sustained-window thresholds. Each is the rate a source must *hold* for the
+/// whole window to reach the band — roughly 6 / 12 / 30 a minute — which no
+/// single visitor produces (the widget fetches one puzzle per page load plus
+/// one refresh per `CHALLENGE_TTL_SECS`) but a shared egress can, so the
+/// lowest band stays below `TIER_CHECKBOX_MIN` on its own, like the 60 s one.
+pub const RATE_IP_SUSTAINED_VERY_HIGH: u32 = 450;
+pub const RATE_IP_SUSTAINED_HIGH: u32 = 180;
+pub const RATE_IP_SUSTAINED_ELEVATED: u32 = 90;
+
+fn ip_band(count: u32, very_high: u32, high: u32, elevated: u32) -> u32 {
+    if count > very_high {
         RATE_IP_SCORE_VERY_HIGH
-    } else if ip_count > RATE_IP_HIGH {
+    } else if count > high {
         RATE_IP_SCORE_HIGH
-    } else if ip_count > RATE_IP_ELEVATED {
+    } else if count > elevated {
         RATE_IP_SCORE_ELEVATED
     } else {
         0
-    };
+    }
+}
+
+/// `ip_count` is the 60 s per-IP count, `ip_count_sustained` the 15 min one.
+/// The IP component is the *worse* band of the two windows, never the sum: a
+/// one-minute burst scores exactly as it did with one window, the signal's
+/// ceiling stays at 45, and the sustained window only matters when the minute
+/// window is quiet.
+pub fn score_rate(ip_count: u32, ip_count_sustained: u32, site_count: u32) -> u32 {
+    let ip_component =
+        ip_band(ip_count, RATE_IP_VERY_HIGH, RATE_IP_HIGH, RATE_IP_ELEVATED).max(ip_band(
+            ip_count_sustained,
+            RATE_IP_SUSTAINED_VERY_HIGH,
+            RATE_IP_SUSTAINED_HIGH,
+            RATE_IP_SUSTAINED_ELEVATED,
+        ));
 
     let site_component = if site_count > RATE_SITE_VERY_HIGH {
         RATE_SITE_SCORE_VERY_HIGH
@@ -120,37 +150,70 @@ mod tests {
 
     #[test]
     fn rate_zero_yields_zero() {
-        assert_eq!(score_rate(0, 0), 0);
+        assert_eq!(score_rate(0, 0, 0), 0);
     }
 
     #[test]
     fn rate_very_high_ip_only() {
         // 55 > 50 → 30
-        assert_eq!(score_rate(55, 0), RATE_IP_SCORE_VERY_HIGH);
+        assert_eq!(score_rate(55, 0, 0), RATE_IP_SCORE_VERY_HIGH);
     }
 
     #[test]
     fn rate_moderate_ip() {
         // 25 > 20 → 15
-        assert_eq!(score_rate(25, 0), RATE_IP_SCORE_HIGH);
+        assert_eq!(score_rate(25, 0, 0), RATE_IP_SCORE_HIGH);
     }
 
     #[test]
     fn rate_elevated_ip() {
         // 15 > 10 → 8
-        assert_eq!(score_rate(15, 0), RATE_IP_SCORE_ELEVATED);
+        assert_eq!(score_rate(15, 0, 0), RATE_IP_SCORE_ELEVATED);
     }
 
     #[test]
     fn rate_very_high_site_only() {
-        assert_eq!(score_rate(0, 600), RATE_SITE_SCORE_VERY_HIGH);
+        assert_eq!(score_rate(0, 0, 600), RATE_SITE_SCORE_VERY_HIGH);
     }
 
     #[test]
     fn rate_combined() {
         // 30 + 15 = 45
         assert_eq!(
-            score_rate(55, 600),
+            score_rate(55, 0, 600),
+            RATE_IP_SCORE_VERY_HIGH + RATE_SITE_SCORE_VERY_HIGH
+        );
+    }
+
+    // --- Sustained (15 min) window ---
+
+    #[test]
+    fn rate_sustained_at_threshold_is_zero() {
+        assert_eq!(score_rate(9, RATE_IP_SUSTAINED_ELEVATED, 0), 0);
+    }
+
+    #[test]
+    fn rate_sustained_bands_fire_while_the_minute_is_quiet() {
+        // 9/min never trips the 60 s window; held for 15 min it walks the bands.
+        assert_eq!(score_rate(9, 91, 0), RATE_IP_SCORE_ELEVATED);
+        assert_eq!(score_rate(9, 181, 0), RATE_IP_SCORE_HIGH);
+        assert_eq!(score_rate(9, 451, 0), RATE_IP_SCORE_VERY_HIGH);
+    }
+
+    #[test]
+    fn rate_windows_take_the_worse_band_not_the_sum() {
+        // Both windows very high: still 30, the ceiling is unchanged.
+        assert_eq!(score_rate(55, 500, 0), RATE_IP_SCORE_VERY_HIGH);
+        // Minute high beats sustained elevated.
+        assert_eq!(score_rate(25, 91, 0), RATE_IP_SCORE_HIGH);
+        // Sustained high beats minute elevated.
+        assert_eq!(score_rate(15, 181, 0), RATE_IP_SCORE_HIGH);
+    }
+
+    #[test]
+    fn rate_sustained_stacks_with_site_like_the_minute_window() {
+        assert_eq!(
+            score_rate(9, 451, 600),
             RATE_IP_SCORE_VERY_HIGH + RATE_SITE_SCORE_VERY_HIGH
         );
     }

@@ -77,6 +77,10 @@ pub async fn get_puzzle(
     // IPv6 to /64 so one host rotating through its delegated block still
     // shares a single counter; scoring and logging keep the full `ip`.
     let ip_count = state.store.increment_ip_count(&rate_key(ip)).await?;
+    let ip_count_sustained = state
+        .store
+        .increment_ip_count_sustained(&rate_key(ip))
+        .await?;
     let site_count = state.store.increment_site_count(&params.site_key).await?;
 
     // TLS fingerprint: only honor the header when the immediate peer is in
@@ -100,6 +104,7 @@ pub async fn get_puzzle(
         ip,
         headers: &headers,
         ip_count,
+        ip_count_sustained,
         site_count,
         tls_fingerprint,
     };
@@ -226,6 +231,7 @@ pub async fn get_puzzle(
         ip = %logged_ip,
         site_key = %params.site_key,
         ip_count,
+        ip_count_sustained,
         site_count,
         score = score.total,
         tier = ?tier,

@@ -12,6 +12,8 @@ pub struct SignalContext<'a> {
     pub ip: IpAddr,
     pub headers: &'a HeaderMap,
     pub ip_count: u32,
+    /// Same key as `ip_count`, over the 15 min window (`RATE_SUSTAINED_WINDOW_SECS`).
+    pub ip_count_sustained: u32,
     pub site_count: u32,
     pub tls_fingerprint: TlsFingerprint<'a>,
 }
@@ -62,7 +64,7 @@ impl RiskScorer {
     pub fn score(&self, ctx: &SignalContext<'_>, thresholds: TierThresholds) -> RiskScore {
         let ip_category = self.reputation.lookup(ctx.ip);
         let breakdown = SignalBreakdown {
-            rate: score_rate(ctx.ip_count, ctx.site_count),
+            rate: score_rate(ctx.ip_count, ctx.ip_count_sustained, ctx.site_count),
             header_anomaly: score_header_anomaly(ctx.headers),
             ip_reputation: score_ip_reputation(ip_category),
             tls_fingerprint: score_tls_fingerprint(ctx.tls_fingerprint, &self.tls_blocklist),
@@ -140,9 +142,21 @@ mod tests {
             ip: ip.parse().unwrap(),
             headers,
             ip_count,
+            ip_count_sustained: 0,
             site_count,
             tls_fingerprint: TlsFingerprint::Skipped,
         }
+    }
+
+    #[test]
+    fn sustained_flood_under_the_minute_threshold_reaches_checkbox() {
+        // 9/min is invisible to the 60 s window; 451 over 15 min is very high.
+        let headers = clean_headers();
+        let mut c = ctx(&headers, "127.0.0.1", 9, 1);
+        c.ip_count_sustained = 451;
+        let result = scorer().score(&c, TierThresholds::default());
+        assert_eq!(result.breakdown.rate, 30);
+        assert_eq!(result.tier, EscalationTier::Checkbox);
     }
 
     #[test]

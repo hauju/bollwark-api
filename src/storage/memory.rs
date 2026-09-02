@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::error::CaptchaError;
 use crate::puzzle::types::Challenge;
 use crate::risk::behavior::BEHAVIOR_DUPLICATE_WINDOW_SECS;
+use crate::risk::signals::RATE_SUSTAINED_WINDOW_SECS;
 use crate::site::types::{Site, SitePolicy};
 
 use super::Store;
@@ -85,6 +86,10 @@ pub struct InMemoryStore {
     sites_by_key: RwLock<HashMap<Uuid, Site>>,
     sites_by_secret: RwLock<HashMap<String, Uuid>>,
     ip_rates: ShardedRates<IpAddr>,
+    /// The same per-IP key over the 15 min window. Entries live for two
+    /// windows before the sweeper reclaims them, so this map holds every
+    /// distinct source seen in the last half hour — a few dozen bytes each.
+    ip_rates_sustained: ShardedRates<IpAddr>,
     site_rates: ShardedRates<Uuid>,
     /// Occurrences of one verify-time behaviour blob per site, keyed on
     /// `(site_key, behavior_fingerprint)`. Same shape as the counters above,
@@ -119,6 +124,7 @@ impl InMemoryStore {
             sites_by_key: RwLock::new(HashMap::new()),
             sites_by_secret: RwLock::new(HashMap::new()),
             ip_rates: ShardedRates::new(RATE_WINDOW_SECS),
+            ip_rates_sustained: ShardedRates::new(RATE_SUSTAINED_WINDOW_SECS),
             site_rates: ShardedRates::new(RATE_WINDOW_SECS),
             behavior_blobs: ShardedRates::new(BEHAVIOR_DUPLICATE_WINDOW_SECS),
             site_persistence: None,
@@ -530,6 +536,10 @@ impl Store for InMemoryStore {
         self.ip_rates.increment(*ip)
     }
 
+    async fn increment_ip_count_sustained(&self, ip: &IpAddr) -> Result<u32, CaptchaError> {
+        self.ip_rates_sustained.increment(*ip)
+    }
+
     async fn increment_site_count(&self, site_key: &Uuid) -> Result<u32, CaptchaError> {
         self.site_rates.increment(*site_key)
     }
@@ -554,6 +564,7 @@ impl Store for InMemoryStore {
         // Clean stale rate windows across every stripe
         let ts = now.timestamp();
         self.ip_rates.retain_fresh(ts)?;
+        self.ip_rates_sustained.retain_fresh(ts)?;
         self.site_rates.retain_fresh(ts)?;
         self.behavior_blobs.retain_fresh(ts)?;
 
@@ -739,6 +750,21 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn test_sustained_ip_counter_is_independent_of_the_minute_counter() {
+        let store = InMemoryStore::new();
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+
+        for _ in 0..3 {
+            store.increment_ip_count(&ip).await.unwrap();
+        }
+        // The sustained map has seen nothing yet; it starts its own count.
+        assert_eq!(store.increment_ip_count_sustained(&ip).await.unwrap(), 1);
+        assert_eq!(store.increment_ip_count_sustained(&ip).await.unwrap(), 2);
+        // And the minute counter was not touched by those increments.
+        assert_eq!(store.increment_ip_count(&ip).await.unwrap(), 4);
     }
 
     #[tokio::test]
