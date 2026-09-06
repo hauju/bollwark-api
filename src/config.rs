@@ -97,12 +97,6 @@ pub struct AppConfig {
     /// When unset, sites live only in memory (lost on restart). Strongly
     /// recommended for any deployment beyond local dev.
     pub site_db_path: Option<String>,
-    /// Comma- or whitespace-separated allowlist of origins permitted to
-    /// call `GET /v1/puzzle` from a browser. When unset, any origin is
-    /// allowed. When set, only listed origins receive CORS headers —
-    /// others get a same-origin response that browsers will block.
-    /// Other endpoints never have CORS enabled.
-    pub cors_allowed_origins: Option<String>,
     /// **Dev/test only.** When true, `POST /v1/sites` skips the
     /// `ADMIN_TOKEN` bearer check so local-dev pages and Playwright e2e
     /// can register sites anonymously. Refused outside `cfg!(debug_assertions)`
@@ -179,6 +173,20 @@ impl AppConfig {
         // per-hash cost), so an unset DEFAULT_DIFFICULTY / MAX_DIFFICULTY must
         // follow the selected algorithm.
         let puzzle_algorithm = parse_algorithm_from_env();
+
+        // Retired: CORS on the public surface is always wildcard and the
+        // per-site `allowed_origins` list is the only origin control. Warn
+        // rather than ignore silently — an install that relied on this to
+        // restrict `/v1/puzzle` must now set the list on each site, or every
+        // origin can fetch puzzles for its keys.
+        if env::var_os("CORS_ALLOWED_ORIGINS").is_some() {
+            tracing::warn!(
+                "CORS_ALLOWED_ORIGINS is set but no longer read — the public surface is \
+                 always wildcard CORS. Restrict origins per site with `allowed_origins` \
+                 (POST /v1/sites or PUT /v1/admin/sites/{{id}}/origins)."
+            );
+        }
+
         Self {
             listen_addr: env::var("LISTEN_ADDR")
                 .ok()
@@ -247,7 +255,6 @@ impl AppConfig {
             admin_db_path: env::var("ADMIN_DB_PATH").ok(),
             admin_token: env::var("ADMIN_TOKEN").ok(),
             site_db_path: env::var("SITE_DB_PATH").ok(),
-            cors_allowed_origins: env::var("CORS_ALLOWED_ORIGINS").ok(),
             dev_disable_admin_auth: parse_truthy(
                 env::var("DEV_DISABLE_ADMIN_AUTH").ok().as_deref(),
             ),
@@ -477,7 +484,6 @@ impl Default for AppConfig {
             admin_db_path: None,
             admin_token: None,
             site_db_path: None,
-            cors_allowed_origins: None,
             dev_disable_admin_auth: false,
             info_about_url: None,
             info_privacy_url: None,

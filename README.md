@@ -61,13 +61,7 @@ When the script is served from a different origin than your app, the widget uses
 
 The older two-tag embed (`/static/captcha-widget.css` + `/static/captcha-widget.js`) still works, unversioned — see [INTEGRATION.md](./INTEGRATION.md#3-embed-the-widget).
 
-For cross-origin embeds, allowlist your app origin on the puzzle endpoint:
-
-```bash
-CORS_ALLOWED_ORIGINS="https://your-app.example"
-```
-
-The service is cookie-free, so cross-origin embeds need no `SameSite` or credentials handling.
+Cross-origin embeds need no server setting: the puzzle endpoint and widget assets answer every origin with wildcard CORS, and the service is cookie-free, so there is no `SameSite` or credentials handling either. To pin a site key to your app's origin, register the site with `allowed_origins`.
 
 The widget evaluates its risk tier once on mount (matching Turnstile / hCaptcha behaviour), solves the PoW off-thread, and writes the resulting token into a hidden `<input name="captcha-token">` on submit. Your backend then calls `POST /v1/verify` with the site secret to confirm.
 

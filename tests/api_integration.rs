@@ -844,6 +844,27 @@ async fn test_origin_allowlist_mismatched_origin_forbidden() {
 }
 
 #[tokio::test]
+async fn test_origin_refusal_is_readable_cross_origin() {
+    // The 403 for an off-list origin must carry wildcard CORS: that is what
+    // lets the widget read the body and show "Verification isn't set up for
+    // this site" instead of an opaque network error. CORS is process-wide
+    // wildcard by design — the per-site list is the only origin control.
+    let app = test_app();
+    let site = create_test_site_with_origins(&app, &["https://example.com"]).await;
+    let key = site.site_key.to_string();
+
+    let req = puzzle_request_with_origin(&key, Some("https://evil.example"));
+    let resp = app.clone().oneshot(with_connect_info(req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        resp.headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok()),
+        Some("*")
+    );
+}
+
+#[tokio::test]
 async fn test_origin_allowlist_missing_origin_passes() {
     // No Origin header → always allowed (same-origin embeds and
     // server-to-server fetches don't send one).

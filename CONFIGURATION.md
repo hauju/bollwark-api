@@ -37,7 +37,6 @@ A `.env` file in the working directory is loaded automatically at startup (via `
 | `ADMIN_DB_PATH` | _unset_ | Path to the SQLite database for the validation dashboard. Enables decision logging + admin endpoints. |
 | `ADMIN_TOKEN` | _unset_ | Bearer token for `/v1/admin/*` and `POST /v1/sites`. Without it, `POST /v1/sites` returns 404 (no anonymous provisioning). Required when `ADMIN_DB_PATH` is set. |
 | `SITE_DB_PATH` | _unset_ | Path to a SQLite file for persistent site registrations. Without it, sites live only in memory and are lost on restart. |
-| `CORS_ALLOWED_ORIGINS` | _unset_ | Comma- or whitespace-separated allowlist of origins permitted to call `GET /v1/puzzle` and fetch static widget assets from a browser. Empty/unset = any origin, no credentials. Other API endpoints never have CORS enabled. |
 | `DEV_DISABLE_ADMIN_AUTH` | `false` | **Dev/test only.** When truthy (`1`/`true`/`yes`/`on`), `POST /v1/sites` skips the `ADMIN_TOKEN` bearer check. Refused in release builds. Admin dashboard endpoints (`/v1/admin/*`) are NOT bypassed. |
 | `ANONYMIZE_LOG_IP` | `true` | Truncate the client IP (IPv4 → /24, IPv6 → /48) before writing it to the decision log. **On by default** so the dashboard stores no per-visitor address. Set to `false` to log full IPs (abuse forensics). Live scoring always uses the full IP regardless. |
 | `LOG_RETENTION_HOURS` | `72` | Retention window for the decision log. A background sweeper prunes rows older than this (only runs when `ADMIN_DB_PATH` is set). **On by default** (ALTCHA's window) so the durable log obeys GDPR storage-limitation. Set to `0` to disable pruning and keep rows forever. |
@@ -455,13 +454,11 @@ A monitored verify row is the one place `outcome` and `success` disagree on purp
 
 ## CORS
 
-### `CORS_ALLOWED_ORIGINS`
-The browser-embedded widget reaches `GET /v1/puzzle` and static assets (`/static/captcha-worker.js`, vendor files) cross-origin. Those are the only surfaces with CORS. `/v1/verify`, `/v1/sites`, and `/v1/admin/*` have **no** CORS layer — same-origin policy in browsers blocks cross-origin reads of those endpoints.
+The browser-embedded widget reaches `GET /v1/puzzle` and the widget assets (`/v1/widget.js`, its hashed bundle, `/static/*`) cross-origin. Those are the only surfaces with CORS, and they always answer `Access-Control-Allow-Origin: *`. `/v1/verify`, `/v1/sites`, and `/v1/admin/*` have **no** CORS layer — same-origin policy in browsers blocks cross-origin reads of those endpoints.
 
-- Unset: any origin allowed, no credentials. The widget can fetch puzzles from any embedding origin.
-- Set: comma- or whitespace-separated allowlist (`https://a.example,https://b.example`). Origins outside the list don't get CORS headers and the browser blocks the response.
+Wildcard is safe here: the service is cookie-free (the widget never sends or receives credentials), the puzzle body is a public proof-of-work challenge, and the assets are public scripts. Which browser origins may use a given **site key** is the per-site `allowed_origins` list (`POST /v1/sites`, `PUT /v1/admin/sites/{id}/origins`) — an origin outside it gets a `403` that the widget can read and explain. Keeping CORS open is what makes that error readable.
 
-Since the service is cookie-free, there are no cross-origin credential concerns — the widget never sends or receives cookies, so a wildcard origin is safe for the puzzle endpoint.
+`CORS_ALLOWED_ORIGINS` is retired. It used to layer a process-wide allowlist in front of the per-site one, and an origin missing from that list saw only an opaque browser error while the server logged a healthy `200`. Setting it now logs a warning at boot and has no effect; move any origins you had there onto the sites they belong to.
 
 ---
 
@@ -658,9 +655,6 @@ LISTEN_ADDR=0.0.0.0:3000
 # Provisioning + persistence (do not deploy without these)
 ADMIN_TOKEN=$(openssl rand -hex 32)
 SITE_DB_PATH=/var/lib/bollwark/sites.db
-
-# Restrict the puzzle endpoint to your known embedders
-CORS_ALLOWED_ORIGINS="https://app.example,https://admin.example"
 
 # Adaptive escalation tuned a bit more aggressively
 TIER_CHECKBOX_MIN=15

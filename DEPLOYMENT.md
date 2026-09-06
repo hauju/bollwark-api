@@ -89,7 +89,6 @@ Strongly recommended:
 | Variable | Why |
 |---|---|
 | `SITE_DB_PATH` | e.g. `/data/sites.db`. Without it sites are in-memory only and every restart invalidates every integrator's `secret_key`. |
-| `CORS_ALLOWED_ORIGINS` | Comma-separated allowlist for `GET /v1/puzzle`. Unset means any origin can fetch puzzles for your site keys. |
 | `TRUSTED_PROXIES` | Required behind a reverse proxy — see below. |
 
 Optional, each inert until configured: `ADMIN_DB_PATH` (validation dashboard +
@@ -207,7 +206,7 @@ server-side switch that moves them — migration is necessarily
 integrator-driven, and the only safe shape is to run both hosts at once.
 
 **1. Stand up the new instance.** Same image, new Coolify app, new domain.
-Copy `CORS_ALLOWED_ORIGINS`, `TRUSTED_PROXIES` and `ADMIN_TOKEN` across.
+Copy `TRUSTED_PROXIES` and `ADMIN_TOKEN` across.
 
 **2. Copy `sites.db` before anything else.** This is what makes the
 migration a one-line change for integrators instead of a key rotation. Copy

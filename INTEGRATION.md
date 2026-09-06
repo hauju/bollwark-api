@@ -290,7 +290,7 @@ What you take on by doing that: the mount race in both directions, the asynchron
 
 Your backend then calls `/v1/verify` with that string exactly as below — the token is opaque either way, and nothing about the server side changes.
 
-> **Cross-origin**: the widget fetches its puzzle from wherever the script came from. If that's a different origin to your app (the usual case), that origin must list yours in `CORS_ALLOWED_ORIGINS`, or `GET /v1/puzzle` is blocked by the browser before the widget ever renders.
+> **Cross-origin**: the widget fetches its puzzle from wherever the script came from, and that endpoint answers every origin with wildcard CORS, so a different origin to your app (the usual case) needs no server setting. If you registered the site with `allowed_origins`, your app's origin must be on that list or `GET /v1/puzzle` answers `403`.
 
 ## 4. Verify on Your Backend
 
@@ -519,13 +519,9 @@ Note what this collapses, and decide whether you mean it: an expired challenge, 
 
 ## 7. Cross-Origin Setup
 
-If your app runs at `https://app.example.com` and bollwark runs at `https://api.bollwark.eu`, set:
+None needed on the server. `GET /v1/puzzle` and the widget assets answer every origin with `Access-Control-Allow-Origin: *`, so an app at `https://app.example.com` embedding a widget served from `https://api.bollwark.eu` works as-is.
 
-```bash
-CORS_ALLOWED_ORIGINS="https://app.example.com"
-```
-
-This allows the browser widget to fetch puzzles and static worker assets.
+To restrict which origins may use your site key, register the site with `allowed_origins` (or set it later with `PUT /v1/admin/sites/{site_key}/origins`). Origins outside the list get a `403` the widget can read and explain. The retired `CORS_ALLOWED_ORIGINS` env is ignored and logs a warning at boot.
 
 The service is cookie-free, so cross-origin embeds need no `SameSite` or credentials handling.
 
@@ -537,7 +533,7 @@ Before using this in a real application:
 - Set `SITE_DB_PATH` so registered sites survive restarts.
 - Store `secret_key` only in backend secrets/config.
 - Put the service behind HTTPS.
-- Set `CORS_ALLOWED_ORIGINS` to your app origin.
+- Register each site with `allowed_origins` so only your app's origin can spend its quota.
 - Decide whether to enable IP reputation (`IP_REPUTATION_FILE`) and TLS fingerprinting (`TLS_FINGERPRINT_HEADER` + `TRUSTED_PROXIES`). Both self-gate on their own config and stay off until set; enabling either gives stronger scoring but adds a fingerprinting signal, so update your DPIA accordingly. The service is otherwise cookie-free and runs every signal under legitimate interest with data minimization.
 - Configure `TRUSTED_PROXIES` if you rely on `X-Forwarded-For` or TLS fingerprint headers.
 - Keep `/v1/verify`, `/v1/sites`, and `/v1/admin/*` server-to-server only.

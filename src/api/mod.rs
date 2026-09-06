@@ -26,19 +26,17 @@ use crate::dashboard::routes::AdminState;
 use state::SharedState;
 
 pub fn router(state: SharedState, admin: Option<AdminState>) -> Router {
-    let cors = build_cors_layer(state.config.cors_allowed_origins.as_deref());
-    let asset_cors = build_cors_layer(state.config.cors_allowed_origins.as_deref());
-    let bundle_cors = build_cors_layer(state.config.cors_allowed_origins.as_deref());
+    let cors = build_cors_layer();
     let static_dir = state.config.static_dir.clone();
     let landing_path = format!("{static_dir}/landing.html");
-    let bundle = build_widget_routes(&static_dir, bundle_cors);
+    let bundle = build_widget_routes(&static_dir, cors.clone());
 
     // Public CORS-enabled surface: just the puzzle endpoint. Browser widgets
     // hosted on a different origin from the captcha service need to fetch it.
     let public = Router::new()
         .route("/v1/puzzle", get(handlers::get_puzzle))
         .with_state(state.clone())
-        .layer(cors);
+        .layer(cors.clone());
 
     // Server-to-server / provisioning surface: NO CORS. Browsers can't
     // reach these from a different origin (same-origin policy blocks the
@@ -94,7 +92,7 @@ pub fn router(state: SharedState, admin: Option<AdminState>) -> Router {
         .nest_service(
             "/static",
             ServiceBuilder::new()
-                .layer(asset_cors)
+                .layer(cors)
                 .layer(SetResponseHeaderLayer::if_not_present(
                     header::CACHE_CONTROL,
                     HeaderValue::from_static(assets::LEGACY_CACHE_CONTROL),
@@ -197,42 +195,23 @@ async fn landing(path: String) -> Response {
     }
 }
 
-/// Build the CORS layer for the public puzzle endpoint and static assets.
+/// Build the CORS layer for the public puzzle endpoint and the widget assets.
 ///
-/// The service is cookie-free, so these requests are always
-/// non-credentialed and a wildcard `Access-Control-Allow-Origin` is valid.
+/// Always wildcard. The service is cookie-free, so these requests are
+/// non-credentialed and `Access-Control-Allow-Origin: *` is valid; the puzzle
+/// body is a public PoW challenge and the assets are public scripts, so there
+/// is nothing an origin restriction here would protect.
 ///
-/// - If `allowed` is `None` (env unset): allow any origin (`*`) so the
-///   widget can embed from any customer site.
-/// - If `allowed` is `Some(spec)`: restrict to a comma- or
-///   whitespace-separated allowlist; other origins get a same-origin
-///   response that browsers block.
-fn build_cors_layer(allowed: Option<&str>) -> CorsLayer {
-    let methods = [Method::GET, Method::OPTIONS];
-    let allow_headers = [header::CONTENT_TYPE];
-
-    match allowed.map(parse_origins).unwrap_or_default() {
-        list if !list.is_empty() => CorsLayer::new()
-            .allow_origin(AllowOrigin::list(list))
-            .allow_methods(methods)
-            .allow_headers(allow_headers),
-        _ => CorsLayer::new()
-            .allow_origin(AllowOrigin::any())
-            .allow_methods(methods)
-            .allow_headers(allow_headers),
-    }
-}
-
-fn parse_origins(spec: &str) -> Vec<HeaderValue> {
-    spec.split(|c: char| c == ',' || c.is_whitespace())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .filter_map(|s| match HeaderValue::from_str(s) {
-            Ok(v) => Some(v),
-            Err(e) => {
-                tracing::warn!(origin = s, error = %e, "CORS_ALLOWED_ORIGINS: skipping malformed origin");
-                None
-            }
-        })
-        .collect()
+/// Which origins may use a *site key* is the per-site `allowed_origins` list,
+/// enforced in `get_puzzle` with a 403. Keeping CORS open is what lets the
+/// widget read that 403 and tell the integrator what to fix. A process-wide
+/// allowlist (`CORS_ALLOWED_ORIGINS`) used to sit in front of the per-site
+/// one; an origin missing from *that* list saw only an opaque network error
+/// while the server logged a healthy 200, which is how three integrators lost
+/// the widget for a week without a single server-side signal.
+fn build_cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::any())
+        .allow_methods([Method::GET, Method::OPTIONS])
+        .allow_headers([header::CONTENT_TYPE])
 }

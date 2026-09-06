@@ -39,10 +39,6 @@ services:
       # or the server refuses to start.
       # ADMIN_DB_PATH: /data/decisions.db
 
-      # --- Browser embeds ----------------------------------------------------
-      # Comma-separated allowlist for GET /v1/puzzle. Unset = any origin.
-      # CORS_ALLOWED_ORIGINS: https://app.example,https://www.app.example
-
       # --- Behind a reverse proxy -------------------------------------------
       # CIDRs of the proxies in front of this service. Required for
       # X-Forwarded-For walking, or every request scores as the proxy's IP.
