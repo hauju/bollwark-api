@@ -69,7 +69,7 @@ pub fn router(state: SharedState, admin: Option<AdminState>) -> Router {
         .with_state(state);
 
     let mut app = Router::new()
-        // Marketing landing page at `/`. Static file read on each request —
+        // Neutral instance page at `/`. Static file read on each request —
         // tiny overhead, lets operators edit `static/landing.html` without
         // recompiling. Failing to read falls back to a redirect to `/static/`.
         .route("/", get(move || landing(landing_path.clone())))

@@ -10,7 +10,7 @@ A `.env` file in the working directory is loaded automatically at startup (via `
 |---|---|---|
 | `LISTEN_ADDR` | `0.0.0.0:3000` | Socket address to bind |
 | `RUST_LOG` | `info` | Tracing filter |
-| `STATIC_DIR` | `static` | Filesystem directory for the bundled widget assets and landing page. Resolved relative to the process working directory unless absolute. |
+| `STATIC_DIR` | `static` | Filesystem directory for the bundled widget assets and the instance page served at `/`. Resolved relative to the process working directory unless absolute. |
 | `PUZZLE_ALGORITHM` | `argon2id` | PoW algorithm: `argon2id` (default, memory-hard) or `sha256`. SHA-256 is fast to verify but trivially GPU-parallelised, so it taxes honest browsers more than attackers; Argon2id collapses that asymmetry. |
 | `ARGON2_M_COST` | `8192` | Argon2id memory cost in KiB (when `PUZZLE_ALGORITHM=argon2id`) |
 | `ARGON2_T_COST` | `2` | Argon2id iteration count |
@@ -60,7 +60,7 @@ Standard `tracing-subscriber` env filter. Useful targets:
 - `bollwark=trace` — everything
 
 ### `STATIC_DIR`
-Filesystem directory holding the bundled browser widget assets and the `landing.html` page served at `/`.
+Filesystem directory holding the bundled browser widget assets and `landing.html`, the neutral instance page served at `/` (edit it to brand your instance).
 
 - Default: `static`
 - Resolved relative to the process working directory unless absolute. Deployments not started from the repo root (systemd, etc.) should set an absolute path; the Dockerfile's `WORKDIR` already handles the container case.
