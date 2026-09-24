@@ -465,16 +465,28 @@ impl DecisionLog {
 
     /// Block until every record queued so far has been written to disk.
     /// Called on graceful shutdown so decisions from requests that drained
-    /// during shutdown aren't lost with the process. Returns `Err(())` if the
-    /// writer thread is already gone.
-    pub async fn flush(&self) -> Result<(), ()> {
+    /// during shutdown aren't lost with the process. Returns [`WriterGone`] if
+    /// the writer thread is already gone.
+    pub async fn flush(&self) -> Result<(), WriterGone> {
         let (tx, rx) = oneshot::channel();
         if self.sender.send(Msg::Flush(tx)).await.is_err() {
-            return Err(());
+            return Err(WriterGone);
         }
-        rx.await.map_err(|_| ())
+        rx.await.map_err(|_| WriterGone)
     }
 }
+
+/// The decision-log writer thread has exited, so nothing more can be written.
+#[derive(Debug)]
+pub struct WriterGone;
+
+impl std::fmt::Display for WriterGone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("decision-log writer thread is gone")
+    }
+}
+
+impl std::error::Error for WriterGone {}
 
 /// Insert a batch of Puzzle/Verify records in a single transaction — one fsync
 /// per batch instead of per record. A single failing insert rolls back the
