@@ -48,7 +48,7 @@ pub struct VerifyRecord {
     pub automation: &'static str,
     pub headless: &'static str,
     /// The raw counters, kept for the training copy: they are what a tuning
-    /// pass needs, and a count of mouse moves identifies nobody.
+    /// pass needs. They remain subject to the decision log retention policy.
     pub behavior: Option<BehaviorReport>,
     pub impossible_timing: bool,
     pub duplicate_blob: bool,
@@ -76,14 +76,14 @@ impl FeedbackVerdict {
 /// the next page, `None` once the caller has everything.
 #[derive(Debug, Clone, Serialize)]
 pub struct TrainingPage {
+    /// Source retention; zero means collection is disabled.
+    pub retention_hours: u64,
     pub samples: Vec<TrainingSample>,
     pub next_after_id: Option<i64>,
 }
 
-/// An anonymised decision: what the scorer saw and decided, minus everything
-/// that could identify the visitor. No IP, no user-agent string, no timestamp
-/// finer than the hour. `challenge_id` is a random id that links only to the
-/// integrator's own record of the submission (and to their label).
+/// Minimized, pseudonymous decision. The challenge ID can be linked to an
+/// integrator's submission, so retention and erasure apply to all copies.
 #[derive(Debug, Clone, Serialize)]
 pub struct TrainingSample {
     pub id: i64,

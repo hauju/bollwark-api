@@ -127,6 +127,9 @@ pub struct AppConfig {
     /// to disable pruning and keep rows forever (e.g. when the operator is
     /// the data controller and needs a longer forensic trail).
     pub log_retention_hours: u64,
+    /// Opt-in training retention from the original event, in hours.
+    /// 0 disables collection and removes existing samples; maximum 90 days.
+    pub training_retention_hours: u64,
     /// Path to a MaxMind GeoLite2/GeoIP2 *Country* database (`.mmdb`). When set
     /// (and `ADMIN_DB_PATH` is enabled), the decision-log writer stamps each
     /// puzzle row with the visitor's ISO country code, looked up offline on the
@@ -271,6 +274,12 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(72),
+            training_retention_hours: env::var("TRAINING_RETENTION_HOURS")
+                .map(|v| {
+                    v.parse()
+                        .expect("TRAINING_RETENTION_HOURS must be an integer")
+                })
+                .unwrap_or(0),
             geoip_db_path: env::var("GEOIP_DB_PATH").ok(),
             failover_enabled: parse_truthy(env::var("FAILOVER_ENABLED").ok().as_deref()),
             failover_state_path: env::var("FAILOVER_STATE_PATH").ok(),
@@ -367,6 +376,14 @@ impl AppConfig {
                 self.log_retention_hours
             );
         }
+
+        assert!(
+            self.training_retention_hours <= 2160
+                && (self.training_retention_hours == 0
+                    || (self.log_retention_hours > 0
+                        && self.training_retention_hours > self.log_retention_hours)),
+            "TRAINING_RETENTION_HOURS must be 0 (off), or greater than LOG_RETENTION_HOURS and at most 2160; training requires decision-log pruning"
+        );
 
         // Failover without durable state is inert: a heartbeat gap can only be
         // detected by comparing against a timestamp that survived the restart,
@@ -490,6 +507,7 @@ impl Default for AppConfig {
             info_terms_url: None,
             anonymize_log_ip: true,
             log_retention_hours: 72,
+            training_retention_hours: 0,
             geoip_db_path: None,
             failover_enabled: false,
             failover_state_path: None,
@@ -628,6 +646,26 @@ mod tests {
     fn rejects_overflowing_retention() {
         AppConfig {
             log_retention_hours: u64::MAX,
+            ..AppConfig::default()
+        }
+        .validated();
+    }
+
+    #[test]
+    fn training_retention_requires_a_bounded_opt_in() {
+        for (training, log) in [(2161, 72), (720, 0), (72, 72)] {
+            assert!(
+                std::panic::catch_unwind(|| AppConfig {
+                    training_retention_hours: training,
+                    log_retention_hours: log,
+                    ..AppConfig::default()
+                }
+                .validated())
+                .is_err()
+            );
+        }
+        AppConfig {
+            training_retention_hours: 720,
             ..AppConfig::default()
         }
         .validated();

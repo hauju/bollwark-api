@@ -31,6 +31,7 @@ A `.env` file in the working directory is loaded automatically at startup (via `
 | `VERIFY_REQUIRE_BEHAVIOR` | `false` | When truthy, a verify request with no `behavior` blob scores +30 (like a flatline) instead of 0. Enable when every legitimate client is the bundled widget. |
 | `IP_REPUTATION_FILE` | _unset_ | Path to CIDR reputation list (signal off if unset) |
 | `SIGNAL_WEIGHTS_FILE` | _unset_ | JSON file overriding any subset of the signal weights (see *Signal weights*); a bad file refuses to boot |
+| `TRAINING_RETENTION_HOURS` | `0` (off) | Opt-in sample retention in hours; greater than nonzero log retention, at most 2160; zero purges samples |
 | `TLS_FINGERPRINT_HEADER` | _unset_ | Header to read TLS fingerprint from (signal off if unset) |
 | `TLS_FINGERPRINT_FILE` | _unset_ | Path to known-bad fingerprint blocklist |
 | `TRUSTED_PROXIES` | _unset_ | CIDR allowlist of peers whose `TLS_FINGERPRINT_HEADER` we honor |
@@ -295,7 +296,7 @@ Accepted keys: `RATE_IP_SCORE_VERY_HIGH`, `RATE_IP_SCORE_HIGH`, `RATE_IP_SCORE_E
 
 Weights are a property of this service, not of a site, which is why they live in a process-wide file rather than in `SitePolicy` — a site tunes *where the bands sit*, not *what a signal is worth*. Thresholds that are counts rather than scores (the rate bands, the dedup window, the timing slack) stay constants on purpose: they are calibrated against how browsers behave, not against how bots score.
 
-This file is the return path of the self-improvement loop (see *Feedback and training samples*): the hosted service tunes against its anonymised training samples and ships a file, a self-hoster can adopt it or tune locally against their own `training_samples`.
+This file is the return path of the self-improvement loop (see *Feedback and training samples*): the hosted service tunes against its pseudonymous training samples and ships a file, a self-hoster can adopt it or tune locally against their own `training_samples`.
 
 ## Cookie-free operation
 
@@ -613,9 +614,17 @@ The scorer never learns which of its decisions were wrong: a `ShadowFail` that w
 
 ### Training samples
 
-When the retention sweeper prunes a decision (`LOG_RETENTION_HOURS`), the same transaction first copies it into `training_samples`, minus everything that could identify a visitor: the IP is dropped, the user-agent string is reduced to a browser family, the timestamp to the hour. What remains — the scores and per-signal breakdown, the behaviour counters and probe flags, tier and decision, country and network category, and the integrator's label — identifies nobody. It is anonymous within the meaning of Recital 26 GDPR, which is why the table has no retention limit; the anonymisation step itself runs under the same legitimate interest as the scoring (Recitals 47 and 49). Puzzles that never saw a verify are kept too: an issued-but-never-solved puzzle is a signal in itself.
+Training collection is **off by default**. Set `TRAINING_RETENTION_HOURS=720` to retain samples for 30 days from the original event. The value must exceed a nonzero `LOG_RETENTION_HOURS` and may not exceed 2160 (90 days). This is an upper product bound, not a claim that every deployment needs 90 days. Choose and document the shortest justified window. Collection happens when the decision log is pruned. Startup and each retention sweep remove expired samples; expiry is hour-bucketed and sweep cadence adds at most one hour. Late feedback never extends retention.
 
-`GET /v1/admin/training?after_id=<id>&limit=<1..1000>` (bearer `ADMIN_TOKEN`) pages the table by row id — loop until `next_after_id` is `null`. For the hosted service this is what bollwark-dx pulls into its long-retention store; a self-hoster gets the same table locally. Tuning a weight against it is offline work; nothing here changes scoring at runtime. A dashboard reset (`DELETE /v1/admin/sessions`) clears decisions and pending labels but deliberately leaves the samples alone.
+**Upgrade behavior:** unset or `TRAINING_RETENTION_HOURS=0` removes existing training samples at startup and disables further copies. Set an appropriate window before upgrading if collection remains justified. The source decisions still follow `LOG_RETENTION_HOURS`.
+
+These records are **pseudonymous personal data**, not guaranteed anonymous: `challenge_id` can be linked to an integrator's submission. No IP or full user-agent is copied, but site, hour, coarse categories, counters, scores and feedback remain. Do not enrich them with identity or form contents. Their export and any mirror need access controls, a lawful purpose, retention and erasure.
+
+`GET /v1/admin/training?after_id=<id>&limit=<1..1000>` (bearer `ADMIN_TOKEN`) returns `{retention_hours, samples, next_after_id}`. Tuning is local and offline; no model provider receives samples. See [TUNING.md](TUNING.md) for the evaluator, review gates and rollout.
+
+`DELETE /v1/admin/sites/<site_key>/data?challenge_id=<uuid>` (bearer `ADMIN_TOKEN`) erases that challenge's decisions, feedback and training sample. Omit `challenge_id` to erase the site's entire decision dataset. It does not delete the site registration. Source rows are erased too, so pruning cannot recreate the sample. A dashboard reset is not erasure: it deliberately leaves training samples intact.
+
+The optional hosted mirror (bollwark-dx) has its own retention window; the shorter of source and mirror applies, and the mirror expires rows itself even while this API is unreachable. Erasure is not pulled: the dashboard erases upstream and in its mirror in one step when a site is deleted, because it is the only holder of `ADMIN_TOKEN`. An erasure run by hand against this API leaves mirror rows until their window closes, so hosted erasure goes through the dashboard. Erasure is logical deletion; SQLite WALs, database backups, prior exports and logs need the operator's documented deletion/backup lifecycle. `secure_delete` is enabled on the SQLite writer but is not a guarantee of immediate physical erasure from storage or backups.
 
 ## Privacy posture
 
@@ -631,7 +640,7 @@ The service is **cookie-free** and runs every signal under **legitimate interest
 | Remote IP check (`remote_ip` on `/v1/verify`) | Only when the integrator forwards it | Issuing address held on the in-memory challenge for its TTL (≤ `CHALLENGE_TTL_SECS`), never logged; the forwarded address is compared and discarded |
 | Behavior blob dedup (5 identical blobs per site / 10 min) | Yes | In-memory only, never logged and never persisted. The key is a non-reversible hash of the blob's event counters scoped to one site — a count of mouse moves and clicks identifies no person, carries no device or network identifier, and the window is reclaimed by the same sweeper that clears the rate counters |
 | Feedback label (`POST /v1/feedback`) | Only with `ADMIN_DB_PATH` | Challenge id plus `spam`/`legit`, nothing from the submission itself; pruned with the row it annotates once folded into the sample |
-| Training sample (prune-time copy) | Only with `ADMIN_DB_PATH` | No IP, no user-agent string, hour-bucketed timestamp; scores, counters, categories and the label only — anonymous under Recital 26, no retention limit |
+| Training sample (prune-time copy) | Only with `ADMIN_DB_PATH` and nonzero `TRAINING_RETENTION_HOURS` | Pseudonymous site/check IDs, hour, scores, counters, categories and feedback; no IP/full UA; expires from event time within the configured window (maximum 90 days) |
 | IP reputation | Only with `IP_REPUTATION_FILE` | Transient CIDR lookup; the full IP is never persisted (the decision log truncates it — see `ANONYMIZE_LOG_IP`) |
 | TLS fingerprint | Only with `TLS_FINGERPRINT_HEADER` + `TRUSTED_PROXIES` | The one device-fingerprint signal; opt-in via its own env vars |
 | Geo country (dashboard only) | Only with `GEOIP_DB_PATH` | Not a scoring signal — observability only. Offline lookup on the already-truncated logged IP; resolves country-level, stores only a 2-letter code |

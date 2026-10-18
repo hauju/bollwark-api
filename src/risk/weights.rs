@@ -23,9 +23,9 @@ use super::{behavior, reputation, signals, tls_fingerprint, verify};
 
 macro_rules! weights {
     ($( $field:ident : $default:path = $key:literal ),* $(,)?) => {
-        #[derive(Debug, Clone, PartialEq, Eq)]
+        #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
         pub struct SignalWeights {
-            $( pub $field: u32, )*
+            $( #[serde(rename = $key)] pub $field: u32, )*
         }
 
         impl Default for SignalWeights {

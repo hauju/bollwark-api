@@ -44,6 +44,10 @@ pub fn router(state: AdminState) -> Router {
         .route("/v1/admin/sites", get(list_sites))
         .route("/v1/admin/sites/{id}", axum::routing::delete(delete_site))
         .route(
+            "/v1/admin/sites/{id}/data",
+            axum::routing::delete(erase_site_data),
+        )
+        .route(
             "/v1/admin/sites/{id}/rotate",
             axum::routing::post(rotate_site),
         )
@@ -181,10 +185,10 @@ struct TrainingParams {
     limit: Option<u32>,
 }
 
-/// Anonymised training samples, keyset-paged: `after_id` is the last id the
+/// Pseudonymous training samples, keyset-paged: `after_id` is the last id the
 /// caller holds, `limit` is clamped to 1..=1000, and the caller loops until
 /// `next_after_id` is null. This is what bollwark-dx pulls into its
-/// long-retention store; a self-hoster can export the same way.
+/// retention-bounded mirror; a self-hoster can export the same way.
 async fn get_training(
     State(state): State<AdminState>,
     headers: HeaderMap,
@@ -409,6 +413,29 @@ async fn update_site_origins(
         Err(e) => {
             tracing::warn!(error = %e, "admin update_site_origins failed");
             (StatusCode::INTERNAL_SERVER_ERROR, "update failed").into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct EraseParams {
+    challenge_id: Option<uuid::Uuid>,
+}
+
+async fn erase_site_data(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+    Query(params): Query<EraseParams>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_auth(&state, &headers) {
+        return resp;
+    }
+    match state.log.erase(id, params.challenge_id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "admin erase data failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "erase failed").into_response()
         }
     }
 }

@@ -9,7 +9,7 @@ license = "MIT"
 # of this service; they are not linked into the server binary, so its property
 # of making zero outbound HTTP calls survives their dependencies.
 [workspace]
-members = ["crates/bollwark-verify"]
+members = ["crates/bollwark-verify", "crates/bollwark-tuning"]
 
 [dependencies]
 axum = { version = "0.8", features = ["macros"] }
@@ -43,4 +43,5 @@ arc-swap = "1"
 notify-debouncer-full = "0.7"
 
 [dev-dependencies]
+bollwark-tuning = { path = "crates/bollwark-tuning" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }

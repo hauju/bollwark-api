@@ -89,6 +89,7 @@ struct TestAppBuilder {
     max_active_challenges: Option<usize>,
     /// Mount the `/v1/admin/*` router backed by a temp-file decision log.
     enable_admin: bool,
+    training_retention_hours: u64,
     /// `VERIFY_REQUIRE_BEHAVIOR`: score an absent behavior blob as flatline.
     verify_require_behavior: bool,
     /// Override the admin token. Default is the constant `TEST_ADMIN_TOKEN`,
@@ -139,6 +140,7 @@ impl TestAppBuilder {
             max_difficulty: 16,
             load_ladder,
             challenge_ttl_secs: 300,
+            training_retention_hours: self.training_retention_hours,
             tls_fingerprint_header: self.tls_header.map(String::from),
             ip_hard_limit: self
                 .ip_hard_limit
@@ -186,7 +188,8 @@ impl TestAppBuilder {
         // (so the admin endpoints read them), plus the admin sub-router.
         let (decision_log, admin) = if self.enable_admin {
             let path = temp_db_path();
-            let log = DecisionLog::open(&path, None).expect("open admin decision log");
+            let log = DecisionLog::open_with_training(&path, None, config.training_retention_hours)
+                .expect("open admin decision log");
             let sessions = Sessions::new(log.db_path().to_string());
             let admin = AdminState {
                 sessions,
@@ -2181,7 +2184,10 @@ async fn test_feedback_without_a_decision_log_is_not_found() {
 /// arrives after the prune still lands on the sample.
 #[tokio::test]
 async fn test_training_export_is_anonymised_labelled_and_paged() {
-    let (app, store, state) = test_app_with_state(|b| b.enable_admin = true);
+    let (app, store, state) = test_app_with_state(|b| {
+        b.enable_admin = true;
+        b.training_retention_hours = 720;
+    });
     let log = state.decision_log.clone().expect("admin log");
     let site = create_test_site(&app).await;
     let first = solve_and_verify_once(&app, &store, &site).await;
@@ -3727,4 +3733,55 @@ async fn test_refresh_does_not_consume_the_cited_challenge() {
 
     // The cited challenge is still solvable.
     assert!(solve_and_verify_now(&app, &site, &original).await);
+}
+
+#[tokio::test]
+async fn training_is_off_by_default_and_erasure_is_scoped_and_authenticated() {
+    let (app, store, state) = test_app_with_state(|b| b.enable_admin = true);
+    let log = state.decision_log.clone().unwrap();
+    let a = create_test_site(&app).await;
+    let b = create_test_site(&app).await;
+    let cid = solve_and_verify_once(&app, &store, &a).await;
+    let other = solve_and_verify_once(&app, &store, &b).await;
+    log.flush().await.unwrap();
+    let url = format!("/v1/admin/sites/{}/data?challenge_id={cid}", a.site_key);
+    assert_eq!(
+        admin_req(&app, "DELETE", &url, None, None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let wrong = format!("/v1/admin/sites/{}/data?challenge_id={cid}", b.site_key);
+    assert_eq!(
+        admin_req(&app, "DELETE", &wrong, Some(TEST_ADMIN_TOKEN), None)
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        feedback_req(&app, &a.secret_key, cid, "legit").await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        admin_req(&app, "DELETE", &url, Some(TEST_ADMIN_TOKEN), None)
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        feedback_req(&app, &a.secret_key, cid, "legit").await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        feedback_req(&app, &b.secret_key, other, "legit").await,
+        StatusCode::NO_CONTENT
+    );
+    log.prune(0).await.unwrap();
+    let (_, body) = admin_req(
+        &app,
+        "GET",
+        "/v1/admin/training",
+        Some(TEST_ADMIN_TOKEN),
+        None,
+    )
+    .await;
+    assert!(body["samples"].as_array().unwrap().is_empty());
 }

@@ -55,7 +55,7 @@ impl Sessions {
         .map_err(QueryError::Sqlite)
     }
 
-    /// One page of anonymised training samples, keyset-paged by row id so a
+    /// One page of pseudonymous training samples, keyset-paged by row id so a
     /// puller can resume from wherever it stopped. See `DecisionLog::prune`
     /// for how rows get there.
     pub async fn training(&self, after_id: i64, limit: u32) -> Result<TrainingPage, QueryError> {
@@ -334,7 +334,9 @@ fn stats_blocking(conn: &Connection) -> rusqlite::Result<Stats> {
 
 // SUM() over zero rows yields NULL in SQLite, which rusqlite surfaces as a
 // type error when the target is `i64`. Read as Option and default to 0.
-fn training_blocking(
+/// Read a page on an existing connection, allowing offline callers to hold a
+/// single read transaction across the complete experiment.
+pub fn training_blocking(
     conn: &Connection,
     after_id: i64,
     limit: u32,
@@ -351,6 +353,14 @@ fn training_blocking(
         None
     };
     Ok(TrainingPage {
+        retention_hours: conn
+            .query_row(
+                "SELECT hours FROM training_retention WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0),
         samples,
         next_after_id,
     })

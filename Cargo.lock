@@ -184,6 +184,7 @@ dependencies = [
  "arc-swap",
  "argon2",
  "axum",
+ "bollwark-tuning",
  "chrono",
  "dotenvy",
  "hex",
@@ -205,6 +206,13 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "bollwark-tuning"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

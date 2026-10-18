@@ -94,9 +94,9 @@ CREATE TABLE IF NOT EXISTS labels (
     ts              TEXT NOT NULL
 );
 
--- Anonymised decisions, written by the retention prune and never deleted.
--- Deliberately no ip, no user_agent, no minute-level timestamp: what is here
--- identifies nobody, which is what lets it live without a retention window.
+-- Pseudonymous decisions: challenge IDs can link back to integrator records.
+-- Opt-in, bounded retention; no IP or full user-agent.
+CREATE TABLE IF NOT EXISTS training_retention (id INTEGER PRIMARY KEY CHECK(id = 1), hours INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS training_samples (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     challenge_id    TEXT UNIQUE,
@@ -136,6 +136,7 @@ CREATE TABLE IF NOT EXISTS training_samples (
     labeled_at      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_training_site ON training_samples(site_key);
+CREATE INDEX IF NOT EXISTS idx_training_hour ON training_samples(hour);
 ";
 
 /// Everything the training copy takes from a decision that is about to be
@@ -239,6 +240,7 @@ enum Msg {
     /// carries the number of rows removed so the sweeper can log it.
     Prune {
         cutoff: String,
+        training_cutoff: Option<String>,
         ack: oneshot::Sender<rusqlite::Result<usize>>,
     },
     /// Attach an integrator's verdict to a decision. Routed through the writer
@@ -256,12 +258,18 @@ enum Msg {
     /// thread (which can't be joined cleanly — the detached retention sweeper
     /// keeps a sender alive).
     Flush(oneshot::Sender<()>),
+    Erase {
+        site: String,
+        challenge: Option<String>,
+        ack: oneshot::Sender<rusqlite::Result<()>>,
+    },
 }
 
 #[derive(Clone)]
 pub struct DecisionLog {
     sender: Sender<Msg>,
     db_path: String,
+    training_retention_hours: u64,
     /// Monotonic count of records dropped because the channel was full.
     /// Exposed for `/v1/admin/stats` and inspection from operators.
     dropped: Arc<AtomicU64>,
@@ -273,6 +281,18 @@ impl DecisionLog {
     /// puzzle row with the visitor's ISO country code (looked up offline on the
     /// logged IP). `None` leaves the `country` column NULL.
     pub fn open(path: impl AsRef<Path>, geoip: Option<GeoIp>) -> rusqlite::Result<Self> {
+        Self::open_with_training(path, geoip, 0)
+    }
+
+    pub fn open_with_training(
+        path: impl AsRef<Path>,
+        geoip: Option<GeoIp>,
+        training_retention_hours: u64,
+    ) -> rusqlite::Result<Self> {
+        assert!(
+            training_retention_hours <= 2160,
+            "TRAINING_RETENTION_HOURS must be at most 2160 (enforced by AppConfig::validated)"
+        );
         let path_str = path.as_ref().to_string_lossy().into_owned();
 
         // Writer connection. Run schema, enable WAL so readers don't block.
@@ -291,6 +311,15 @@ impl DecisionLog {
         }
         writer.pragma_update(None, "journal_mode", "WAL")?;
         writer.pragma_update(None, "synchronous", "NORMAL")?;
+        writer.pragma_update(None, "secure_delete", "ON")?;
+        writer.execute(
+            "INSERT OR REPLACE INTO training_retention (id, hours) VALUES (1, ?1)",
+            [training_retention_hours],
+        )?;
+        expire_training(
+            &writer,
+            training_cutoff(training_retention_hours).as_deref(),
+        )?;
 
         let (tx, mut rx) = channel::<Msg>(CHANNEL_CAPACITY);
 
@@ -302,9 +331,11 @@ impl DecisionLog {
                 while let Some(msg) = rx.blocking_recv() {
                     match msg {
                         // Control messages run alone, in order, in their own tx.
-                        Msg::Clear(_) | Msg::Prune { .. } | Msg::Label { .. } | Msg::Flush(_) => {
-                            handle_control(&writer, msg)
-                        }
+                        Msg::Clear(_)
+                        | Msg::Prune { .. }
+                        | Msg::Label { .. }
+                        | Msg::Flush(_)
+                        | Msg::Erase { .. } => handle_control(&writer, msg),
                         // Inserts are batched: start with this record, then
                         // greedily drain whatever inserts are already queued and
                         // commit them in one transaction. A control message that
@@ -319,7 +350,8 @@ impl DecisionLog {
                                         m @ (Msg::Clear(_)
                                         | Msg::Prune { .. }
                                         | Msg::Label { .. }
-                                        | Msg::Flush(_)),
+                                        | Msg::Flush(_)
+                                        | Msg::Erase { .. }),
                                     ) => {
                                         deferred = Some(m);
                                         break;
@@ -348,6 +380,7 @@ impl DecisionLog {
         Ok(Self {
             sender: tx,
             db_path: path_str,
+            training_retention_hours,
             dropped: Arc::new(AtomicU64::new(0)),
         })
     }
@@ -430,12 +463,31 @@ impl DecisionLog {
         let (tx, rx) = oneshot::channel();
         if self
             .sender
-            .send(Msg::Prune { cutoff, ack: tx })
+            .send(Msg::Prune {
+                cutoff,
+                training_cutoff: training_cutoff(self.training_retention_hours),
+                ack: tx,
+            })
             .await
             .is_err()
         {
             return Err(rusqlite::Error::InvalidQuery);
         }
+        rx.await.unwrap_or(Err(rusqlite::Error::InvalidQuery))
+    }
+
+    /// Erase one site's records, optionally narrowed to a challenge. Remove
+    /// live rows too, so a subsequent prune cannot recreate the sample.
+    pub async fn erase(&self, site: Uuid, challenge: Option<Uuid>) -> rusqlite::Result<()> {
+        let (ack, rx) = oneshot::channel();
+        self.sender
+            .send(Msg::Erase {
+                site: site.to_string(),
+                challenge: challenge.map(|id| id.to_string()),
+                ack,
+            })
+            .await
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
         rx.await.unwrap_or(Err(rusqlite::Error::InvalidQuery))
     }
 
@@ -499,7 +551,11 @@ fn flush_batch(conn: &Connection, batch: &[Msg], geoip: Option<&GeoIp>) -> rusql
             Msg::Puzzle(rec) => insert_puzzle(&tx, rec, geoip)?,
             Msg::Verify(rec) => insert_verify(&tx, rec)?,
             // Control messages are never placed in an insert batch.
-            Msg::Clear(_) | Msg::Prune { .. } | Msg::Label { .. } | Msg::Flush(_) => {}
+            Msg::Clear(_)
+            | Msg::Prune { .. }
+            | Msg::Label { .. }
+            | Msg::Flush(_)
+            | Msg::Erase { .. } => {}
         }
     }
     tx.commit()
@@ -516,8 +572,19 @@ fn handle_control(conn: &Connection, msg: Msg) {
             }
             let _ = ack.send(result);
         }
-        Msg::Prune { cutoff, ack } => {
-            let result = prune_before(conn, &cutoff);
+        Msg::Erase {
+            site,
+            challenge,
+            ack,
+        } => {
+            let _ = ack.send(erase_records(conn, &site, challenge.as_deref()));
+        }
+        Msg::Prune {
+            cutoff,
+            training_cutoff,
+            ack,
+        } => {
+            let result = prune_before(conn, &cutoff, training_cutoff.as_deref());
             if let Err(e) = &result {
                 tracing::warn!(error = %e, "decision-log: prune failed");
             }
@@ -545,6 +612,39 @@ fn handle_control(conn: &Connection, msg: Msg) {
     }
 }
 
+fn training_cutoff(hours: u64) -> Option<String> {
+    (hours > 0).then(|| {
+        hour_bucket(&(chrono::Utc::now() - chrono::Duration::hours(hours as i64)).to_rfc3339())
+    })
+}
+
+fn expire_training(conn: &Connection, cutoff: Option<&str>) -> rusqlite::Result<usize> {
+    conn.execute(
+        "DELETE FROM training_samples WHERE ?1 IS NULL OR hour <= ?1",
+        [cutoff],
+    )
+}
+
+fn erase_records(conn: &Connection, site: &str, challenge: Option<&str>) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM verify_decisions WHERE challenge_id IN
+        (SELECT challenge_id FROM puzzle_decisions WHERE site_key = ?1
+         UNION SELECT challenge_id FROM training_samples WHERE site_key = ?1)
+        AND (?2 IS NULL OR challenge_id = ?2)",
+        params![site, challenge],
+    )?;
+    for table in ["labels", "training_samples", "puzzle_decisions"] {
+        tx.execute(
+            &format!(
+                "DELETE FROM {table} WHERE site_key = ?1 AND (?2 IS NULL OR challenge_id = ?2)"
+            ),
+            params![site, challenge],
+        )?;
+    }
+    tx.commit()
+}
+
 fn clear_all(conn: &Connection) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
     tx.execute("DELETE FROM verify_decisions", [])?;
@@ -569,12 +669,16 @@ fn clear_all(conn: &Connection) -> rusqlite::Result<()> {
 /// trailing `+00:00` sort lexicographically in chronological order — and
 /// index-friendly via `idx_puzzle_ts` / `idx_verify_ts`, unlike a
 /// `strftime('%s', ts)` comparison which would scan every row.
-fn prune_before(conn: &Connection, cutoff: &str) -> rusqlite::Result<usize> {
+fn prune_before(
+    conn: &Connection,
+    cutoff: &str,
+    training_cutoff: Option<&str>,
+) -> rusqlite::Result<usize> {
     let tx = conn.unchecked_transaction()?;
-    // Fold the rows about to go into the anonymised training set first, in
-    // the same transaction: a crash between the two loses nothing and
-    // duplicates nothing.
-    copy_to_training(&tx, cutoff)?;
+    if training_cutoff.is_some() {
+        copy_to_training(&tx, cutoff)?;
+    }
+    expire_training(&tx, training_cutoff)?;
     // Verify rows first: a verify always shares its puzzle's window, so
     // pruning by each table's own `ts` keeps the join consistent — a puzzle
     // row only survives if it's newer than the cutoff, and the queries drive
@@ -592,14 +696,8 @@ fn prune_before(conn: &Connection, cutoff: &str) -> rusqlite::Result<usize> {
     Ok(verifies + puzzles)
 }
 
-/// Copy every decision older than `cutoff` into `training_samples`, minus
-/// everything that could identify a visitor: the IP is dropped, the
-/// user-agent string is reduced to its browser family, the timestamp to the
-/// hour. What remains is a row of scores, counters and categories that
-/// identifies nobody — anonymous within the meaning of Recital 26 GDPR, which
-/// is what lets it live without a retention limit. The integrator's label, if
-/// one arrived while the row was live, rides along. Rows that never saw a
-/// verify are copied too: an issued-but-never-solved puzzle is a signal.
+/// Copy minimized, pseudonymous records for an explicitly enabled tuning window.
+/// Challenge IDs remain linkable; these records are not claimed to be anonymous.
 fn copy_to_training(conn: &Connection, cutoff: &str) -> rusqlite::Result<usize> {
     use rusqlite::types::Value;
 
@@ -653,7 +751,7 @@ fn apply_label(
     verdict: &str,
 ) -> rusqlite::Result<bool> {
     let ts = chrono::Utc::now().to_rfc3339();
-    // Already anonymised into a sample: label the sample directly.
+    // Already folded into a sample: label it without extending event retention.
     let updated = conn.execute(
         "UPDATE training_samples SET label = ?1, labeled_at = ?2
          WHERE challenge_id = ?3 AND site_key = ?4",
@@ -814,7 +912,12 @@ mod tests {
         )
         .unwrap();
 
-        let removed = prune_before(&conn, "2026-01-03T00:00:00+00:00").unwrap();
+        let removed = prune_before(
+            &conn,
+            "2026-01-03T00:00:00+00:00",
+            Some("2025-12-01T00:00:00Z"),
+        )
+        .unwrap();
         assert_eq!(removed, 2, "one puzzle + one verify from the old day");
 
         let puzzles: i64 = conn
@@ -834,7 +937,10 @@ mod tests {
         assert_eq!(survivor, "new");
 
         // A cutoff before everything is a no-op.
-        assert_eq!(prune_before(&conn, "2025-01-01T00:00:00+00:00").unwrap(), 0);
+        assert_eq!(
+            prune_before(&conn, "2025-01-01T00:00:00+00:00", None).unwrap(),
+            0
+        );
     }
 
     /// A client-asserted `first_interaction_ms` past `i64::MAX` is clamped
@@ -903,7 +1009,12 @@ mod tests {
         )
         .unwrap();
 
-        prune_before(&conn, "2026-01-03T00:00:00+00:00").unwrap();
+        prune_before(
+            &conn,
+            "2026-01-03T00:00:00+00:00",
+            Some("2025-12-01T00:00:00Z"),
+        )
+        .unwrap();
 
         let (cid, hour, family, country, v_score, mouse_moves, label): (
             String,
@@ -973,6 +1084,75 @@ mod tests {
             )
             .unwrap();
         assert_eq!(pending, "spam");
+        erase_records(&conn, "s", Some("new")).unwrap();
+        prune_before(
+            &conn,
+            "2026-01-10T00:00:00+00:00",
+            Some("2025-12-01T00:00:00Z"),
+        )
+        .unwrap();
+        let recreated: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM training_samples WHERE challenge_id='new'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(recreated, 0, "erased source cannot be copied again");
+    }
+
+    #[test]
+    fn training_expiry_and_erasure_do_not_recreate_samples() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        conn.execute_batch(
+            "INSERT INTO training_samples
+            (challenge_id,site_key,hour,score,tier,difficulty,outcome,monitored,
+             sig_rate,sig_header_anomaly,sig_ip_reputation,sig_tls_fingerprint)
+            VALUES ('expired','a','2026-01-01T00:00:00Z',0,'InvisiblePass',5,'issued',0,0,0,0,0),
+                   ('keep','a','2026-01-03T00:00:00Z',0,'InvisiblePass',5,'issued',0,0,0,0,0),
+                   ('other','b','2026-01-03T00:00:00Z',0,'InvisiblePass',5,'issued',0,0,0,0,0);",
+        )
+        .unwrap();
+        assert_eq!(
+            expire_training(&conn, Some("2026-01-01T00:00:00Z")).unwrap(),
+            1
+        );
+        assert!(!apply_label(&conn, "expired", "a", "legit").unwrap());
+        erase_records(&conn, "a", Some("other")).unwrap();
+        assert!(apply_label(&conn, "other", "b", "spam").unwrap());
+        erase_records(&conn, "a", Some("keep")).unwrap();
+        assert!(!apply_label(&conn, "keep", "a", "legit").unwrap());
+        assert_eq!(
+            expire_training(&conn, None).unwrap(),
+            1,
+            "disabled removes all remaining samples"
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_training_purges_legacy_samples_at_startup() {
+        let path = std::env::temp_dir().join(format!("bollwark-retention-{}.db", Uuid::new_v4()));
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        conn.execute_batch(
+            "INSERT INTO training_samples
+            (site_key,hour,score,tier,difficulty,outcome,monitored,
+             sig_rate,sig_header_anomaly,sig_ip_reputation,sig_tls_fingerprint)
+            VALUES ('site','2099-01-01T00:00:00Z',0,'InvisiblePass',5,'issued',0,0,0,0,0)",
+        )
+        .unwrap();
+        let log = DecisionLog::open(&path, None).unwrap();
+        log.flush().await.unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM training_samples", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        drop(log);
+        drop(conn);
+        let _ = std::fs::remove_file(path);
     }
 
     /// `flush` resolves only after the writer thread has committed everything

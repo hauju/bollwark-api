@@ -147,6 +147,10 @@ cargo fmt
 
 A `justfile` wraps these (`just build`, `just test`, `just lint`, `just ci`).
 
+### Offline improvement
+
+Opt-in, retention-bounded training samples can be evaluated locally with `cargo run --example tune_weights -- config.json NEW_OUTPUT_DIR`. The runner produces an aggregate report and, only after held-out gates pass, candidate weights for review. No automatic production changes or external model calls. See [TUNING.md](TUNING.md).
+
 ### Validation harnesses
 
 - **Structured logs** — `LOG_FORMAT=json cargo run` emits JSONL on stderr. `event=puzzle_decision` and `event=verify_decision` carry the score, tier/decision, signal breakdown, and outcome. Pipe through `jq -c 'select(.event == "puzzle_decision")'` for clean parsing.

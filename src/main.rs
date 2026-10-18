@@ -265,7 +265,7 @@ async fn main() {
             // Geo enrichment is tied to the decision log existing — load it
             // here so we don't open the GeoIP db when there's nothing to stamp.
             let geoip = open_geoip(config.geoip_db_path.as_deref());
-            let log = DecisionLog::open(path, geoip)
+            let log = DecisionLog::open_with_training(path, geoip, config.training_retention_hours)
                 .unwrap_or_else(|e| panic!("failed to open ADMIN_DB_PATH={path}: {e}"));
             tracing::info!("Validation dashboard enabled (db={path})");
             let sessions = Sessions::new(log.db_path().to_string());
