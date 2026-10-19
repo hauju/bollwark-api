@@ -352,7 +352,7 @@ Challenges are single-use. A second submit with the same `challenge_id` will fai
 
 #### Enriching Stripe Radar
 
-If the form leads to a payment, forward the verdict as PaymentIntent `metadata` so Radar rules can match on it, e.g. `Review if ::bollwark_risk:: = 'elevated'` or `Block if ::bollwark_signals:: = 'honeypot'`:
+If the form leads to a payment, forward the verdict as PaymentIntent `metadata` so Radar rules can match on it, e.g. `Review if ::bollwark_risk:: = 'elevated'` or `Block if ::bollwark_signals:: INCLUDES 'honeypot'`:
 
 ```js
 await stripe.paymentIntents.create({
