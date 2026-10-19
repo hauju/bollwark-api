@@ -40,6 +40,24 @@ pub struct VerifyBreakdown {
     pub remote_ip: u32,
 }
 
+impl VerifyBreakdown {
+    /// Names of the components that contributed, in field order — the
+    /// integrator-facing `signals` on `/v1/verify`. Names match the field
+    /// (and decision-log column) names; weights are deliberately left out.
+    pub fn fired_signals(&self) -> Vec<String> {
+        [
+            ("honeypot", self.honeypot),
+            ("time_on_page", self.time_on_page),
+            ("behavior", self.behavior),
+            ("remote_ip", self.remote_ip),
+        ]
+        .into_iter()
+        .filter(|&(_, points)| points > 0)
+        .map(|(name, _)| name.to_string())
+        .collect()
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct VerifyScore {
     pub total: u32,
@@ -508,5 +526,25 @@ mod tests {
         let s = scorer().score(&c, VerifyThresholds::default());
         assert_eq!(s.breakdown.behavior, 0);
         assert_eq!(s.total, TIME_VERY_SHORT_SCORE, "only the dwell band fires");
+    }
+
+    #[test]
+    fn fired_signals_names_every_nonzero_component_in_field_order() {
+        assert!(VerifyBreakdown::default().fired_signals().is_empty());
+        let honeypot_only = VerifyBreakdown {
+            honeypot: HONEYPOT_TRIPPED_SCORE,
+            ..Default::default()
+        };
+        assert_eq!(honeypot_only.fired_signals(), ["honeypot"]);
+        let several = VerifyBreakdown {
+            honeypot: 0,
+            time_on_page: 25,
+            behavior: 30,
+            remote_ip: 30,
+        };
+        assert_eq!(
+            several.fired_signals(),
+            ["time_on_page", "behavior", "remote_ip"]
+        );
     }
 }

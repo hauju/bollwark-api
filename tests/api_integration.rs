@@ -1263,7 +1263,9 @@ async fn test_clean_verify_reports_low_risk() {
     let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap();
-    let result: VerifyResponse = serde_json::from_slice(&body).unwrap();
+    let raw: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(raw.get("signals").is_none(), "clean verdict omits signals");
+    let result: VerifyResponse = serde_json::from_value(raw).unwrap();
     assert!(result.success);
     assert_eq!(result.risk, Some(RiskBand::Low));
 }
@@ -1517,6 +1519,7 @@ async fn test_honeypot_filled_fails_verify() {
         .unwrap();
     let result: VerifyResponse = serde_json::from_slice(&body).unwrap();
     assert!(!result.success, "honeypot should reject");
+    assert!(result.signals.iter().any(|s| s == "honeypot"));
 }
 
 #[tokio::test]

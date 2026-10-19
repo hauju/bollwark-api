@@ -340,16 +340,29 @@ pub struct VerifyResponse {
     /// no challenge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub challenge_id: Option<Uuid>,
+    /// Names of the verify-time signals that contributed to `risk` (e.g.
+    /// `honeypot`, `time_on_page`, `behavior`, `remote_ip`). The names are a
+    /// stable contract; the weights behind them are not, so none are exposed.
+    /// Absent when nothing fired, on the failover path and on an invalid
+    /// proof of work.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signals: Vec<String>,
 }
 
 impl VerifyResponse {
     /// The ordinary path: `failover` is false for every solved-puzzle verdict.
-    pub fn solved(challenge_id: Uuid, success: bool, decision: VerifyDecision) -> Self {
+    pub fn solved(
+        challenge_id: Uuid,
+        success: bool,
+        decision: VerifyDecision,
+        signals: Vec<String>,
+    ) -> Self {
         Self {
             success,
             failover: false,
             risk: Some(decision.into()),
             challenge_id: Some(challenge_id),
+            signals,
         }
     }
 
@@ -360,6 +373,7 @@ impl VerifyResponse {
             failover: false,
             risk: None,
             challenge_id: Some(challenge_id),
+            signals: Vec::new(),
         }
     }
 }

@@ -328,7 +328,7 @@ Successful response:
 Failed response:
 
 ```json
-{ "success": false, "failover": false, "risk": "high", "challenge_id": "…" }
+{ "success": false, "failover": false, "risk": "high", "challenge_id": "…", "signals": ["honeypot"] }
 ```
 
 Challenges are single-use. A second submit with the same `challenge_id` will fail.
@@ -345,6 +345,24 @@ Challenges are single-use. A second submit with the same `challenge_id` will fai
 | `high` | `true` | Would have been refused, but the site is in monitor mode | Log it — this is what the site will reject once you flip to `enforce` |
 
 `risk` is absent when there was no risk verdict to report: an invalid proof of work (`success: false`, no band). Servers from before the field existed omit it; treat a missing band as `low`. The `bollwark-verify` crate exposes it as `Verdict::Passed { risk, .. }`.
+
+### The `signals` field
+
+`signals` names the verify-time checks that contributed to `risk`: any of `honeypot`, `time_on_page`, `behavior` and `remote_ip`, in that order. The names are a stable contract — they are the same names the operator dashboard and decision log use — but the weights behind them are not, so no per-signal score is exposed. The field is omitted when nothing fired, which is every clean submission, and on the failover path and an invalid proof of work, where no verify-time scoring is reported. Treat a missing field as an empty list.
+
+#### Enriching Stripe Radar
+
+If the form leads to a payment, forward the verdict as PaymentIntent `metadata` so Radar rules can match on it, e.g. `Review if ::bollwark_risk:: = 'elevated'` or `Block if ::bollwark_signals:: = 'honeypot'`:
+
+```js
+await stripe.paymentIntents.create({
+  amount, currency: "eur",
+  metadata: {
+    bollwark_risk: verdict.risk ?? "low",
+    bollwark_signals: (verdict.signals ?? []).join(","),
+  },
+});
+```
 
 ### The `failover` field
 

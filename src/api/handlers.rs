@@ -650,6 +650,7 @@ pub async fn verify(
         challenge.id,
         success,
         vscore.decision,
+        vscore.breakdown.fired_signals(),
     )))
 }
 
@@ -776,6 +777,7 @@ fn verify_failover(
         // attestation refusal shows up as `success: false` beside it.
         risk: Some(vscore.decision.into()),
         challenge_id: None,
+        signals: Vec::new(),
     }))
 }
 
