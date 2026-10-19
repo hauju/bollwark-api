@@ -11,8 +11,8 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Row};
 use super::types::{
     Analytics, BotCount, BrowserCount, CountryCount, NetworkTypeCount, OutcomeCounts,
     PuzzleBreakdownDto, PuzzleSignalSums, Session, SignalFires, SiteActivity, Stats, TierCounts,
-    TimeBucket, TrainingPage, TrainingPuzzle, TrainingSample, TrainingVerify, VerifyBreakdownDto,
-    VerifySection, VerifySignalSums,
+    TimeBucket, TrainingPage, TrainingPuzzle, TrainingSample, TrainingVerify, VerifyActivity,
+    VerifyBreakdownDto, VerifySection, VerifySignalSums,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -111,6 +111,48 @@ impl Sessions {
         .await?
         .map_err(QueryError::Sqlite)
     }
+
+    /// First and last solved challenge of one site, counting only verifies at
+    /// or after `since` (an RFC 3339 string in the log's own `+00:00` form)
+    /// when given. "Solved" is `success = 1`, which includes a monitored block:
+    /// the question is whether the integration reaches `/v1/verify`, not what
+    /// the scorer thought of the visitor.
+    pub async fn site_verify_activity(
+        &self,
+        site_key: String,
+        since: Option<String>,
+    ) -> Result<VerifyActivity, QueryError> {
+        let path = self.db_path.clone();
+        tokio::task::spawn_blocking(move || -> Result<VerifyActivity, rusqlite::Error> {
+            let conn = open_ro(&path)?;
+            site_verify_activity_blocking(&conn, &site_key, since.as_deref())
+        })
+        .await?
+        .map_err(QueryError::Sqlite)
+    }
+}
+
+/// `verify_decisions` carries no `site_key`, so the site comes from the puzzle
+/// row the challenge was issued under. `v.ts` is written by `to_rfc3339()`, so
+/// the lexicographic `>=` is chronological, as in `analytics_blocking`.
+fn site_verify_activity_blocking(
+    conn: &Connection,
+    site_key: &str,
+    since: Option<&str>,
+) -> rusqlite::Result<VerifyActivity> {
+    conn.query_row(
+        "SELECT MIN(v.ts), MAX(v.ts)
+         FROM verify_decisions v
+         JOIN puzzle_decisions p ON p.challenge_id = v.challenge_id
+         WHERE p.site_key = ?1 AND v.success = 1 AND (?2 IS NULL OR v.ts >= ?2)",
+        rusqlite::params![site_key, since],
+        |r| {
+            Ok(VerifyActivity {
+                first_verify_at: r.get(0)?,
+                last_verify_at: r.get(1)?,
+            })
+        },
+    )
 }
 
 fn open_ro(path: &PathBuf) -> rusqlite::Result<Connection> {
@@ -786,6 +828,66 @@ fn site_activity_blocking(conn: &Connection) -> rusqlite::Result<HashMap<String,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Per-site verify activity: only solved verifies of that site count, and
+    /// `since` cuts from the left. A failed verify and another site's verify
+    /// must not make a fresh install look like it works.
+    #[test]
+    fn site_verify_activity_counts_only_solved_verifies_of_the_site() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::dashboard::log::SCHEMA).unwrap();
+        conn.execute_batch(
+            "INSERT INTO puzzle_decisions
+               (ts, challenge_id, site_key, ip, ip_count, site_count, score, tier, difficulty,
+                outcome, sig_rate, sig_header_anomaly, sig_ip_reputation,
+                sig_tls_fingerprint, tls_fingerprint, user_agent)
+             VALUES
+               ('2026-01-01T00:00:00+00:00','a1','s1','1.2.3.4',1,1,10,'Checkbox',12,'issued',
+                10,0,0,0,'Skipped',NULL),
+               ('2026-01-02T00:00:00+00:00','a2','s1','1.2.3.4',1,1,10,'Checkbox',12,'issued',
+                10,0,0,0,'Skipped',NULL),
+               ('2026-01-03T00:00:00+00:00','a3','s1','1.2.3.4',1,1,10,'Checkbox',12,'issued',
+                10,0,0,0,'Skipped',NULL),
+               ('2026-01-04T00:00:00+00:00','b1','s2','1.2.3.4',1,1,10,'Checkbox',12,'issued',
+                10,0,0,0,'Skipped',NULL);
+             INSERT INTO verify_decisions
+               (ts, challenge_id, success, outcome, score, sig_honeypot, sig_time_on_page,
+                sig_behavior, time_on_page_ms, webdriver)
+             VALUES
+               ('2026-01-01T00:00:05+00:00','a1',1,'pass',0,0,0,0,5000,'false'),
+               ('2026-01-02T00:00:05+00:00','a2',1,'pass',0,0,0,0,5000,'false'),
+               ('2026-01-03T00:00:05+00:00','a3',0,'block',90,30,0,0,5000,'false'),
+               ('2026-01-04T00:00:05+00:00','b1',1,'pass',0,0,0,0,5000,'false');",
+        )
+        .unwrap();
+
+        let all = site_verify_activity_blocking(&conn, "s1", None).unwrap();
+        assert_eq!(
+            all.first_verify_at.as_deref(),
+            Some("2026-01-01T00:00:05+00:00")
+        );
+        // The later failed verify (a3) and the other site's pass (b1) do not count.
+        assert_eq!(
+            all.last_verify_at.as_deref(),
+            Some("2026-01-02T00:00:05+00:00")
+        );
+
+        let since =
+            site_verify_activity_blocking(&conn, "s1", Some("2026-01-02T00:00:05+00:00")).unwrap();
+        assert_eq!(
+            since.first_verify_at.as_deref(),
+            Some("2026-01-02T00:00:05+00:00"),
+            "since is inclusive"
+        );
+
+        let none =
+            site_verify_activity_blocking(&conn, "s1", Some("2026-01-03T00:00:00+00:00")).unwrap();
+        assert_eq!(none, VerifyActivity::default());
+        assert_eq!(
+            site_verify_activity_blocking(&conn, "unknown", None).unwrap(),
+            VerifyActivity::default()
+        );
+    }
 
     /// Guards the positional column→field mapping in `stats_blocking`. The
     /// SELECT list and the `Stats` construction are aligned only by index, so

@@ -100,6 +100,7 @@ Two scoring passes bracket every successful solve:
 | `GET /v1/admin/analytics?hours=&site_key=` | Bearer (`ADMIN_TOKEN`) | Windowed analytics for the dashboard's Analytics tab: time-bucketed traffic/outcome/tier series (dense, zero-filled), bot-probability histogram, browser-family breakdown, network-type + country breakdowns, per-signal fire counts. `hours` clamped to 1–720, optional `site_key` filter. |
 | `GET /v1/admin/training?after_id=&limit=` | Bearer (`ADMIN_TOKEN`) | Keyset-paged pseudonymous training samples (`{samples, next_after_id}`), written by the retention prune. What bollwark-dx pulls. |
 | `GET /v1/admin/sites` | Bearer (`ADMIN_TOKEN`) | List registered sites (no secrets) merged with per-site activity from the decision log. |
+| `GET /v1/admin/sites/:id/activity?since=` | Bearer (`ADMIN_TOKEN`) | First and last solved challenge (`success = 1`) of one site, optionally at or after `since` (RFC 3339): `{first_verify_at, last_verify_at}`, both null until there is one. What bollwark-dx's `verify_setup` MCP tool polls. |
 | `POST /v1/admin/sites/:id/rotate` | Bearer (`ADMIN_TOKEN`) | Issue a new `secret_key` for a site; old one invalidated immediately. |
 | `PUT /v1/admin/sites/:id/name` | Bearer (`ADMIN_TOKEN`) | Rename a site (trimmed + length-checked like `POST /v1/sites`). A label only — no credential changes, no scoring changes. |
 | `PUT /v1/admin/sites/:id/origins` | Bearer (`ADMIN_TOKEN`) | Replace a site's `allowed_origins` list (validated like `POST /v1/sites`) without rotating its secret. |

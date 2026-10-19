@@ -47,6 +47,7 @@ pub fn router(state: AdminState) -> Router {
             "/v1/admin/sites/{id}/data",
             axum::routing::delete(erase_site_data),
         )
+        .route("/v1/admin/sites/{id}/activity", get(site_activity))
         .route(
             "/v1/admin/sites/{id}/rotate",
             axum::routing::post(rotate_site),
@@ -249,6 +250,59 @@ async fn list_sites(State(state): State<AdminState>, headers: HeaderMap) -> impl
         .collect();
 
     Json(json!({ "sites": summaries })).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct ActivityParams {
+    #[serde(default)]
+    since: Option<String>,
+}
+
+/// First and last solved challenge of one site, at or after `since` (RFC 3339)
+/// when given: `{ "first_verify_at", "last_verify_at" }`, both `null` until
+/// there is one. What bollwark-dx's `verify_setup` asks to tell "installed and
+/// working" from "not yet".
+async fn site_activity(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(params): Query<ActivityParams>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_auth(&state, &headers) {
+        return resp;
+    }
+    let site_key = match uuid::Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid site_key").into_response(),
+    };
+    // Normalised to the log's own `+00:00` form, so the lexicographic
+    // comparison in the query stays chronological whatever offset was sent.
+    let since = match params.since.as_deref().filter(|s| !s.is_empty()) {
+        None => None,
+        Some(raw) => match chrono::DateTime::parse_from_rfc3339(raw) {
+            Ok(t) => Some(t.with_timezone(&chrono::Utc).to_rfc3339()),
+            Err(_) => return (StatusCode::BAD_REQUEST, "invalid since").into_response(),
+        },
+    };
+    match state.store.get_site_by_key(&site_key).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return (StatusCode::NOT_FOUND, "site not found").into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "admin site_activity: store read failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "store read failed").into_response();
+        }
+    }
+    match state
+        .sessions
+        .site_verify_activity(site_key.to_string(), since)
+        .await
+    {
+        Ok(activity) => Json(activity).into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "admin site_activity failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "query failed").into_response()
+        }
+    }
 }
 
 async fn rotate_site(

@@ -352,6 +352,14 @@ pub struct SiteActivity {
     pub avg_bot_probability: f64,
 }
 
+/// Wire format for `GET /v1/admin/sites/{site_key}/activity`: the first and
+/// last solved challenge of one site. Both are `None` until it has one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct VerifyActivity {
+    pub first_verify_at: Option<String>,
+    pub last_verify_at: Option<String>,
+}
+
 /// Wire format for `GET /v1/admin/sites`. Combines the registered site
 /// (from `InMemoryStore`) with activity aggregates from the decision log.
 /// `secret_key` is intentionally omitted — secrets are revealed once at
