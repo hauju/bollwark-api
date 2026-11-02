@@ -55,7 +55,10 @@ jobs:
         run: cargo test --locked
 
   e2e:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to 26.04 on 2026-10-25 and Playwright ships
+    # no Chromium for it ("does not support chromium on ubuntu26.04-x64"),
+    # which also blocked the docker job behind this one.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.91.0
